@@ -67,7 +67,7 @@ setup(
         "numpy",
         "setuptools>=18.0",
     ],
-    install_requires=["cython", "numpy", "rich", "torch", "transformers"],
+    install_requires=["cython", "numpy", "rich", "tensorboard", "torch", "transformers"],
     packages=find_packages(exclude=["cli_tools", "tests"]),
     ext_modules=extensions,
     test_suite="tests",
