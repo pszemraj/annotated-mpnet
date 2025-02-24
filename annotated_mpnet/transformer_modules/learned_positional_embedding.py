@@ -10,12 +10,8 @@ LOG_FORMAT = "%(message)s"
 logging.basicConfig(level="INFO", format=LOG_FORMAT, datefmt="[%X] ", handlers=[RichHandler()])
 LOGGER = logging.getLogger(__name__)
 
-import os
-import sys
 
-import torch
 from torch import nn
-import torch.nn.functional as F
 
 from annotated_mpnet.utils import utils
 

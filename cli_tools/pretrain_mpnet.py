@@ -13,7 +13,6 @@ import argparse
 import gc
 import math
 import os
-import sys
 
 from rich.progress import track
 from transformers import AutoTokenizer
