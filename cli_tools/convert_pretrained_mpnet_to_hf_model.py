@@ -1,26 +1,28 @@
 """
-Script for converting our pretrained models to the main MPNet class in Huggingface (which is 
-MPNetForMaskedLM). This is ported over from Kaitao Song's Github, who was the lead author for the 
-MPNet paper. We have amended a good amount of the notation to fit our construction of 
+Script for converting our pretrained models to the main MPNet class in Huggingface (which is
+MPNetForMaskedLM). This is ported over from Kaitao Song's Github, who was the lead author for the
+MPNet paper. We have amended a good amount of the notation to fit our construction of
 MPNetForPretraining, as well as commenting each step of the logic so that posterity knows what we're
 doing here.
 """
 
 import logging
+
 from rich.logging import RichHandler
 
 LOG_FORMAT = "%(message)s"
-logging.basicConfig(level="INFO", format=LOG_FORMAT, datefmt="[%X] ", handlers=[RichHandler()])
+logging.basicConfig(
+    level="INFO", format=LOG_FORMAT, datefmt="[%X] ", handlers=[RichHandler()]
+)
 LOGGER = logging.getLogger(__name__)
 
 import argparse
 import pathlib
 
 import torch
-
 from transformers import MPNetConfig, MPNetForMaskedLM
-from transformers.utils import logging as hf_logging
 from transformers.models.mpnet import MPNetLayer
+from transformers.utils import logging as hf_logging
 
 # Set up the transformers logger. This will help us track down any errors while loading the weights
 HF_LOGGER = hf_logging.get_logger(__name__)
@@ -100,10 +102,16 @@ def convert_mpnet_checkpoint_to_pytorch(
     # Here, we're setting the weights and biases for the LM head. This is important for loading into
     # the base HF model type (MPNetForMaskedLM), but this will usually be discarded in any sort of
     # downstream task in favor of the appropriate fine-tuning head
-    model.lm_head.dense.weight.data = mpnet_weight["lm_head.dense.weight"].type_as(tensor)
+    model.lm_head.dense.weight.data = mpnet_weight["lm_head.dense.weight"].type_as(
+        tensor
+    )
     model.lm_head.dense.bias.data = mpnet_weight["lm_head.dense.bias"].type_as(tensor)
-    model.lm_head.layer_norm.weight.data = mpnet_weight["lm_head.layer_norm.weight"].type_as(tensor)
-    model.lm_head.layer_norm.bias.data = mpnet_weight["lm_head.layer_norm.bias"].type_as(tensor)
+    model.lm_head.layer_norm.weight.data = mpnet_weight[
+        "lm_head.layer_norm.weight"
+    ].type_as(tensor)
+    model.lm_head.layer_norm.bias.data = mpnet_weight[
+        "lm_head.layer_norm.bias"
+    ].type_as(tensor)
     model.lm_head.decoder.weight.data = mpnet_weight["lm_head.weight"].type_as(tensor)
     model.lm_head.decoder.bias.data = mpnet_weight["lm_head.bias"].type_as(tensor)
 
@@ -125,7 +133,9 @@ def convert_mpnet_checkpoint_to_pytorch(
 
         # Match up the weight and bias for the initial projection layer of the self-attention
         # mechanism (i.e. stacked QKV)
-        in_proj_weight = mpnet_weight[prefix + "self_attn.in_proj_weight"].type_as(tensor)
+        in_proj_weight = mpnet_weight[prefix + "self_attn.in_proj_weight"].type_as(
+            tensor
+        )
         in_proj_bias = mpnet_weight[prefix + "self_attn.in_proj_bias"].type_as(tensor)
 
         # Now, as described above when we stored the hidden size in `dim`, we need to chunk up the
@@ -151,9 +161,9 @@ def convert_mpnet_checkpoint_to_pytorch(
         layer.attention.attn.o.weight.data = mpnet_weight[
             prefix + "self_attn.out_proj.weight"
         ].type_as(tensor)
-        layer.attention.attn.o.bias.data = mpnet_weight[prefix + "self_attn.out_proj.bias"].type_as(
-            tensor
-        )
+        layer.attention.attn.o.bias.data = mpnet_weight[
+            prefix + "self_attn.out_proj.bias"
+        ].type_as(tensor)
         layer.attention.LayerNorm.weight.data = mpnet_weight[
             prefix + "self_attn_layer_norm.weight"
         ].type_as(tensor)
@@ -163,18 +173,24 @@ def convert_mpnet_checkpoint_to_pytorch(
 
         # Extract the weights and biases for the feed-forward net after the self-attention
         # calculation
-        layer.intermediate.dense.weight.data = mpnet_weight[prefix + "fc1.weight"].type_as(tensor)
-        layer.intermediate.dense.bias.data = mpnet_weight[prefix + "fc1.bias"].type_as(tensor)
-        layer.output.dense.weight.data = mpnet_weight[prefix + "fc2.weight"].type_as(tensor)
+        layer.intermediate.dense.weight.data = mpnet_weight[
+            prefix + "fc1.weight"
+        ].type_as(tensor)
+        layer.intermediate.dense.bias.data = mpnet_weight[prefix + "fc1.bias"].type_as(
+            tensor
+        )
+        layer.output.dense.weight.data = mpnet_weight[prefix + "fc2.weight"].type_as(
+            tensor
+        )
         layer.output.dense.bias.data = mpnet_weight[prefix + "fc2.bias"].type_as(tensor)
 
         # Extract the final LayerNorm and set it here
         layer.output.LayerNorm.weight.data = mpnet_weight[
             prefix + "final_layer_norm.weight"
         ].type_as(tensor)
-        layer.output.LayerNorm.bias.data = mpnet_weight[prefix + "final_layer_norm.bias"].type_as(
-            tensor
-        )
+        layer.output.LayerNorm.bias.data = mpnet_weight[
+            prefix + "final_layer_norm.bias"
+        ].type_as(tensor)
 
     # Create the dump directory if it doesn't exist
     pathlib.Path(pytorch_dump_folder_path).mkdir(parents=True, exist_ok=True)

@@ -4,22 +4,22 @@ class
 """
 
 import logging
+
 from rich.logging import RichHandler
 
 LOG_FORMAT = "%(message)s"
-logging.basicConfig(level="INFO", format=LOG_FORMAT, datefmt="[%X] ", handlers=[RichHandler()])
+logging.basicConfig(
+    level="INFO", format=LOG_FORMAT, datefmt="[%X] ", handlers=[RichHandler()]
+)
 LOGGER = logging.getLogger(__name__)
 
-import os
-import sys
 
 import torch
-from torch import nn
 import torch.nn.functional as F
+from torch import nn
 
+from annotated_mpnet.transformer_modules import LayerNorm, RelativeMultiHeadAttention
 from annotated_mpnet.utils import utils
-from annotated_mpnet.transformer_modules import LayerNorm
-from annotated_mpnet.transformer_modules import RelativeMultiHeadAttention
 
 
 class SentenceEncoderLayer(nn.Module):

@@ -3,23 +3,25 @@ Pretraining script for MPNet
 """
 
 import logging
+
 from rich.logging import RichHandler
 
 LOG_FORMAT = "%(message)s"
-logging.basicConfig(level="INFO", format=LOG_FORMAT, datefmt="[%X] ", handlers=[RichHandler()])
+logging.basicConfig(
+    level="INFO", format=LOG_FORMAT, datefmt="[%X] ", handlers=[RichHandler()]
+)
 LOGGER = logging.getLogger(__name__)
 
 import argparse
 import gc
 import math
 import os
-import sys
 
-from rich.progress import track
-from transformers import AutoTokenizer
 import torch
 import torch.nn.functional as F
+from rich.progress import track
 from torch.utils.tensorboard import SummaryWriter
+from transformers import AutoTokenizer
 
 from annotated_mpnet.data import (
     DataCollatorForMaskedPermutedLanguageModeling,
@@ -177,16 +179,23 @@ def main(args) -> None:
 
         # Now load it as a dataset and get the dataloader
         epoch_train_dataset = MPNetDataset(
-            tokenizer=tokenizer, file_path=current_train_file, block_size=args.max_tokens
+            tokenizer=tokenizer,
+            file_path=current_train_file,
+            block_size=args.max_tokens,
         )
 
         # Let's get a seeded sampler so that we can have reproducible training results. Mainly, we
         # want to change the seed with each epoch since we don't want the same pseudorandom ordering
         # each epoch. We do this by adding the epoch argument
-        sampler = RandomSamplerWithSeed(epoch_train_dataset, epoch=epoch, random_seed=args.seed)
+        sampler = RandomSamplerWithSeed(
+            epoch_train_dataset, epoch=epoch, random_seed=args.seed
+        )
 
         epoch_train_dataloader = torch.utils.data.DataLoader(
-            epoch_train_dataset, sampler=sampler, collate_fn=mplm, batch_size=args.batch_size
+            epoch_train_dataset,
+            sampler=sampler,
+            collate_fn=mplm,
+            batch_size=args.batch_size,
         )
 
         # Zero out the gradients
@@ -258,7 +267,9 @@ def main(args) -> None:
             # We use the sum reduction because we will want to average out the loss (and the
             # resulting gradients) by the sample size, i.e., the total number of prediction targets
             loss = F.nll_loss(
-                F.log_softmax(outs.view(-1, outs.size(-1)), dim=-1, dtype=torch.float32),
+                F.log_softmax(
+                    outs.view(-1, outs.size(-1)), dim=-1, dtype=torch.float32
+                ),
                 targets.view(-1),
                 reduction="sum",
                 ignore_index=tokenizer.pad_token_id,
@@ -292,7 +303,9 @@ def main(args) -> None:
                 # If it hasn't been specified, we will calculate the gradient norm the old fashioned
                 # way so that it can be logged
                 if args.clip_grad_norm > 0.0:
-                    gnorm = torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip_grad_norm)
+                    gnorm = torch.nn.utils.clip_grad_norm_(
+                        model.parameters(), args.clip_grad_norm
+                    )
                 else:
                     gnorm = math.sqrt(
                         sum(
@@ -311,7 +324,9 @@ def main(args) -> None:
                 # Calculate the accumulation normalized metrics by normalizing over the total number
                 # of samples that have passed through each batch
                 normal_acc = accumulation_acc / accumulation_sample_sizes
-                normal_loss = accumulation_loss / accumulation_sample_sizes / math.log(2)
+                normal_loss = (
+                    accumulation_loss / accumulation_sample_sizes / math.log(2)
+                )
 
                 # Log some debugging values here
                 LOGGER.debug("Accumulated batch information is below:")
@@ -393,7 +408,9 @@ def main(args) -> None:
 
                 # Calculate loss here
                 loss = F.nll_loss(
-                    F.log_softmax(outs.view(-1, outs.size(-1)), dim=-1, dtype=torch.float32),
+                    F.log_softmax(
+                        outs.view(-1, outs.size(-1)), dim=-1, dtype=torch.float32
+                    ),
                     targets.view(-1),
                     reduction="sum",
                     ignore_index=tokenizer.pad_token_id,
@@ -484,7 +501,9 @@ def main(args) -> None:
 
             # Calculate loss here
             loss = F.nll_loss(
-                F.log_softmax(outs.view(-1, outs.size(-1)), dim=-1, dtype=torch.float32),
+                F.log_softmax(
+                    outs.view(-1, outs.size(-1)), dim=-1, dtype=torch.float32
+                ),
                 targets.view(-1),
                 reduction="sum",
                 ignore_index=tokenizer.pad_token_id,
@@ -619,7 +638,9 @@ def cli_main():
         "there are usually too many train files to fit in memory.",
         type=str,
     )
-    parser.add_argument("--valid-file", help="The file containing validation data.", type=str)
+    parser.add_argument(
+        "--valid-file", help="The file containing validation data.", type=str
+    )
     parser.add_argument("--test-file", help="The file containing test data.", type=str)
     parser.add_argument(
         "--total-updates",

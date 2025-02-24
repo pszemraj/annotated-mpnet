@@ -4,18 +4,17 @@ something like a sinusoidal distribution
 """
 
 import logging
+
 from rich.logging import RichHandler
 
 LOG_FORMAT = "%(message)s"
-logging.basicConfig(level="INFO", format=LOG_FORMAT, datefmt="[%X] ", handlers=[RichHandler()])
+logging.basicConfig(
+    level="INFO", format=LOG_FORMAT, datefmt="[%X] ", handlers=[RichHandler()]
+)
 LOGGER = logging.getLogger(__name__)
 
-import os
-import sys
 
-import torch
 from torch import nn
-import torch.nn.functional as F
 
 from annotated_mpnet.utils import utils
 
@@ -25,7 +24,9 @@ class LearnedPositionalEmbedding(nn.Embedding):
     A subclass of the Embedding module that will operate as a layer for learning positional embeds
     """
 
-    def __init__(self, num_embeddings: int, embedding_dim: int, padding_idx: int) -> None:
+    def __init__(
+        self, num_embeddings: int, embedding_dim: int, padding_idx: int
+    ) -> None:
         # Initialize the superclass embedding layer
         super().__init__(num_embeddings, embedding_dim, padding_idx)
 
@@ -42,9 +43,9 @@ class LearnedPositionalEmbedding(nn.Embedding):
         """
 
         # Assert that only one of `positions` or `padding_idx` is set
-        assert (positions is None) or (
-            self.padding_idx is None
-        ), "If `positions` is precomputed, do NOT pass in a padding_idx"
+        assert (positions is None) or (self.padding_idx is None), (
+            "If `positions` is precomputed, do NOT pass in a padding_idx"
+        )
 
         # Let's create the positions if they are not precomputed
         if positions is None:
@@ -52,7 +53,9 @@ class LearnedPositionalEmbedding(nn.Embedding):
             if incremental_state is not None:
                 # positions is the same for every token when decoding a single step
                 # Without the int() cast, it doesn't work in some cases when exporting to ONNX
-                positions = input.data.new(1, 1).fill_(int(self.padding_idx + input.size(1)))
+                positions = input.data.new(1, 1).fill_(
+                    int(self.padding_idx + input.size(1))
+                )
             else:
                 # Create positions using the `make_positions` function. This basically just creates
                 # incremental positions starting at padding_idx+1. Very simple function that you

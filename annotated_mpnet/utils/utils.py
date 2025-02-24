@@ -2,13 +2,12 @@
 Utils module exported from fairseq for things we might not need, but it's here anyway
 """
 
-from collections import defaultdict
 import contextlib
 import math
+from collections import defaultdict
 from typing import Callable
 
 import numpy as np
-
 import torch
 import torch.nn.functional as F
 
@@ -22,7 +21,9 @@ def _get_full_incremental_state_key(module_instance, key):
     # not shared across module instances
     if not hasattr(module_instance, "_fairseq_instance_id"):
         INCREMENTAL_STATE_INSTANCE_ID[module_name] += 1
-        module_instance._fairseq_instance_id = INCREMENTAL_STATE_INSTANCE_ID[module_name]
+        module_instance._fairseq_instance_id = INCREMENTAL_STATE_INSTANCE_ID[
+            module_name
+        ]
 
     return "{}.{}.{}".format(module_name, module_instance._fairseq_instance_id, key)
 
@@ -76,7 +77,9 @@ def gelu_accurate(x: torch.Tensor) -> torch.Tensor:
     """
     if not hasattr(gelu_accurate, "_a"):
         gelu_accurate._a = math.sqrt(2 / math.pi)
-    return 0.5 * x * (1 + torch.tanh(gelu_accurate._a * (x + 0.044715 * torch.pow(x, 3))))
+    return (
+        0.5 * x * (1 + torch.tanh(gelu_accurate._a * (x + 0.044715 * torch.pow(x, 3))))
+    )
 
 
 def gelu(x: torch.Tensor) -> torch.Tensor:

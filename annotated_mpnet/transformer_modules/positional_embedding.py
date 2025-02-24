@@ -4,21 +4,22 @@ embeddings
 """
 
 import logging
+
 from rich.logging import RichHandler
 
 LOG_FORMAT = "%(message)s"
-logging.basicConfig(level="INFO", format=LOG_FORMAT, datefmt="[%X] ", handlers=[RichHandler()])
+logging.basicConfig(
+    level="INFO", format=LOG_FORMAT, datefmt="[%X] ", handlers=[RichHandler()]
+)
 LOGGER = logging.getLogger(__name__)
 
-import os
-import sys
 
-import torch
 from torch import nn
-import torch.nn.functional as F
 
-from annotated_mpnet.transformer_modules import LearnedPositionalEmbedding
-from annotated_mpnet.transformer_modules import SinusoidalPositionalEmbedding
+from annotated_mpnet.transformer_modules import (
+    LearnedPositionalEmbedding,
+    SinusoidalPositionalEmbedding,
+)
 
 
 def PositionalEmbedding(
@@ -39,7 +40,7 @@ def PositionalEmbedding(
         m = LearnedPositionalEmbedding(num_embeddings, embedding_dim, padding_idx)
 
         # Make sure the weights are properly initialized here
-        nn.init.normal_(m.weight, mean=0, std=embedding_dim ** -0.5)
+        nn.init.normal_(m.weight, mean=0, std=embedding_dim**-0.5)
 
         # If we specified a padding index, we need to make sure this weight is zeroed out
         if padding_idx is not None:

@@ -55,7 +55,23 @@ class TestData(unittest.TestCase):
                         2007,
                         2001,
                     ],
-                    [1, 0, 2182, 1, 1, 1, 1, 3235, 2027, 2007, 2, 2007, 30526, 2007, 30526],
+                    [
+                        1,
+                        0,
+                        2182,
+                        1,
+                        1,
+                        1,
+                        1,
+                        3235,
+                        2027,
+                        2007,
+                        2,
+                        2007,
+                        30526,
+                        2007,
+                        30526,
+                    ],
                 ]
             ),
             "attention_mask": torch.tensor(
@@ -88,8 +104,12 @@ class TestData(unittest.TestCase):
         )
 
     def test_training_seeded_sampling(self):
-        sampler_epoch_0 = RandomSamplerWithSeed([self.examples] * 10, epoch=0, random_seed=12345)
-        sampler_epoch_1 = RandomSamplerWithSeed([self.examples] * 10, epoch=1, random_seed=12345)
+        sampler_epoch_0 = RandomSamplerWithSeed(
+            [self.examples] * 10, epoch=0, random_seed=12345
+        )
+        sampler_epoch_1 = RandomSamplerWithSeed(
+            [self.examples] * 10, epoch=1, random_seed=12345
+        )
 
         self.assertEqual(
             list(sampler_epoch_0.__iter__()),

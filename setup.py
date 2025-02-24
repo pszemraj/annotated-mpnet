@@ -4,8 +4,9 @@
 Setup script for the annotated_mpnet library
 """
 
-from setuptools import setup, find_packages, Extension
 import sys
+
+from setuptools import Extension, find_packages, setup
 
 # Exit if running Python2
 if sys.version_info < (3,):
@@ -22,6 +23,7 @@ if sys.platform == "darwin":
     extra_compile_args = ["-stdlib=libc++", "-O3"]
 else:
     extra_compile_args = ["-std=c++11", "-O3"]
+
 
 # We need to build a subclass of Extension to get the numpy extensions to install properly.
 # Otherwise, install will fail in envs that don't have numpy previously installed
@@ -65,7 +67,7 @@ setup(
         "numpy",
         "setuptools>=18.0",
     ],
-    install_requires=["cython", "numpy", "rich", "torch", "transformers"],
+    install_requires=["cython", "numpy", "rich", "tensorboard", "torch", "transformers"],
     packages=find_packages(exclude=["cli_tools", "tests"]),
     ext_modules=extensions,
     test_suite="tests",
