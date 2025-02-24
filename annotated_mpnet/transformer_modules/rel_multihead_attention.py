@@ -3,16 +3,19 @@ Defining relative multihead attention for MPNet
 """
 
 import logging
+
 from rich.logging import RichHandler
 
 LOG_FORMAT = "%(message)s"
-logging.basicConfig(level="INFO", format=LOG_FORMAT, datefmt="[%X] ", handlers=[RichHandler()])
+logging.basicConfig(
+    level="INFO", format=LOG_FORMAT, datefmt="[%X] ", handlers=[RichHandler()]
+)
 LOGGER = logging.getLogger(__name__)
 
 
 import torch
-from torch import nn
 import torch.nn.functional as F
+from torch import nn
 
 from annotated_mpnet.utils import utils
 
@@ -52,18 +55,18 @@ class RelativeMultiHeadAttention(nn.Module):
 
         # Integer division to make sure the number of heads is a factor of embed dimension
         self.head_dim = embed_dim // num_heads
-        assert (
-            self.head_dim * num_heads == self.embed_dim
-        ), "embed_dim must be divisible by num_heads"
+        assert self.head_dim * num_heads == self.embed_dim, (
+            "embed_dim must be divisible by num_heads"
+        )
 
-        self.scaling = self.head_dim ** -0.5
+        self.scaling = self.head_dim**-0.5
 
         self.self_attention = self_attention
         self.encoder_decoder_attention = encoder_decoder_attention
 
-        assert (
-            not self.self_attention or self.qkv_same_dim
-        ), "Self-attention requires query, key and value to be of the same size"
+        assert not self.self_attention or self.qkv_same_dim, (
+            "Self-attention requires query, key and value to be of the same size"
+        )
 
         # Define the attention parameters based on the args above
         if self.qkv_same_dim:
@@ -199,31 +202,52 @@ class RelativeMultiHeadAttention(nn.Module):
             k = torch.cat([k, self.bias_k.repeat(1, bsz, 1)])
             v = torch.cat([v, self.bias_v.repeat(1, bsz, 1)])
             if attn_mask is not None:
-                attn_mask = torch.cat([attn_mask, attn_mask.new_zeros(attn_mask.size(0), 1)], dim=1)
+                attn_mask = torch.cat(
+                    [attn_mask, attn_mask.new_zeros(attn_mask.size(0), 1)], dim=1
+                )
             if key_padding_mask is not None:
                 key_padding_mask = torch.cat(
-                    [key_padding_mask, key_padding_mask.new_zeros(key_padding_mask.size(0), 1)],
+                    [
+                        key_padding_mask,
+                        key_padding_mask.new_zeros(key_padding_mask.size(0), 1),
+                    ],
                     dim=1,
                 )
 
         # Do the matrix manipulation for the energy calculation, namely a transpose
-        q = q.contiguous().view(tgt_len, bsz * self.num_heads, self.head_dim).transpose(0, 1)
+        q = (
+            q.contiguous()
+            .view(tgt_len, bsz * self.num_heads, self.head_dim)
+            .transpose(0, 1)
+        )
         if k is not None:
-            k = k.contiguous().view(-1, bsz * self.num_heads, self.head_dim).transpose(0, 1)
+            k = (
+                k.contiguous()
+                .view(-1, bsz * self.num_heads, self.head_dim)
+                .transpose(0, 1)
+            )
         if v is not None:
-            v = v.contiguous().view(-1, bsz * self.num_heads, self.head_dim).transpose(0, 1)
+            v = (
+                v.contiguous()
+                .view(-1, bsz * self.num_heads, self.head_dim)
+                .transpose(0, 1)
+            )
 
         # Not entirely sure what this does, but leaving it in here in case MPNet uses it
         if saved_state is not None:
             # saved states are stored with shape (bsz, num_heads, seq_len, head_dim)
             if "prev_key" in saved_state:
-                prev_key = saved_state["prev_key"].view(bsz * self.num_heads, -1, self.head_dim)
+                prev_key = saved_state["prev_key"].view(
+                    bsz * self.num_heads, -1, self.head_dim
+                )
                 if static_kv:
                     k = prev_key
                 else:
                     k = torch.cat((prev_key, k), dim=1)
             if "prev_value" in saved_state:
-                prev_value = saved_state["prev_value"].view(bsz * self.num_heads, -1, self.head_dim)
+                prev_value = saved_state["prev_value"].view(
+                    bsz * self.num_heads, -1, self.head_dim
+                )
                 if static_kv:
                     v = prev_value
                 else:
@@ -250,12 +274,16 @@ class RelativeMultiHeadAttention(nn.Module):
             k = torch.cat([k, k.new_zeros((k.size(0), 1) + k.size()[2:])], dim=1)
             v = torch.cat([v, v.new_zeros((v.size(0), 1) + v.size()[2:])], dim=1)
             if attn_mask is not None:
-                attn_mask = torch.cat([attn_mask, attn_mask.new_zeros(attn_mask.size(0), 1)], dim=1)
+                attn_mask = torch.cat(
+                    [attn_mask, attn_mask.new_zeros(attn_mask.size(0), 1)], dim=1
+                )
             if key_padding_mask is not None:
                 key_padding_mask = torch.cat(
                     [
                         key_padding_mask,
-                        torch.zeros(key_padding_mask.size(0), 1).type_as(key_padding_mask),
+                        torch.zeros(key_padding_mask.size(0), 1).type_as(
+                            key_padding_mask
+                        ),
                     ],
                     dim=1,
                 )
@@ -297,7 +325,9 @@ class RelativeMultiHeadAttention(nn.Module):
             attn_weights += positions_bias
 
         # Softmax on the energy calculation
-        attn_weights = F.softmax(attn_weights, dim=-1, dtype=torch.float32).type_as(attn_weights)
+        attn_weights = F.softmax(attn_weights, dim=-1, dtype=torch.float32).type_as(
+            attn_weights
+        )
 
         # Calculate dropout on the softmaxed energy calculation
         attn_weights = F.dropout(attn_weights, p=self.dropout, training=self.training)

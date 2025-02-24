@@ -4,22 +4,27 @@ Module for defining the Encoder blocks in the transformer
 
 import logging
 from typing import Optional, Tuple
+
 from rich.logging import RichHandler
 
 LOG_FORMAT = "%(message)s"
-logging.basicConfig(level="INFO", format=LOG_FORMAT, datefmt="[%X] ", handlers=[RichHandler()])
+logging.basicConfig(
+    level="INFO", format=LOG_FORMAT, datefmt="[%X] ", handlers=[RichHandler()]
+)
 LOGGER = logging.getLogger(__name__)
 
 
 import math
 
 import torch
-from torch import nn
 import torch.nn.functional as F
+from torch import nn
 
-from annotated_mpnet.transformer_modules import SentenceEncoderLayer
-from annotated_mpnet.transformer_modules import LayerNorm
-from annotated_mpnet.transformer_modules import PositionalEmbedding
+from annotated_mpnet.transformer_modules import (
+    LayerNorm,
+    PositionalEmbedding,
+    SentenceEncoderLayer,
+)
 
 
 class SentenceEncoder(nn.Module):
@@ -128,7 +133,9 @@ class SentenceEncoder(nn.Module):
         self.learned_pos_embedding = learned_pos_embedding
 
         # Create the embedding layer that will convert token IDs into embeds
-        self.embed_tokens = nn.Embedding(self.vocab_size, self.embedding_dim, self.padding_idx)
+        self.embed_tokens = nn.Embedding(
+            self.vocab_size, self.embedding_dim, self.padding_idx
+        )
 
         # Store more args
         self.embed_scale = embed_scale
@@ -251,7 +258,9 @@ class SentenceEncoder(nn.Module):
         x = x.transpose(0, 1)
 
         # Compute the relative attention bias
-        positions_bias = self.compute_position_bias(x, self.relative_attention_num_buckets)
+        positions_bias = self.compute_position_bias(
+            x, self.relative_attention_num_buckets
+        )
 
         # If the user wants ALL hidden states, we keep track of it here
         inner_states = []
@@ -261,7 +270,9 @@ class SentenceEncoder(nn.Module):
         # Now process through all the encoder layers (and add each intermediate state if
         # last_state_only is False)
         for layer in self.layers:
-            x, _ = layer(x, self_attn_padding_mask=padding_mask, positions_bias=positions_bias)
+            x, _ = layer(
+                x, self_attn_padding_mask=padding_mask, positions_bias=positions_bias
+            )
             if not last_state_only:
                 inner_states.append(x)
 
@@ -295,7 +306,9 @@ class SentenceEncoder(nn.Module):
 
         relative_position = memory_position - context_position
 
-        rp_bucket = self.relative_position_bucket(relative_position, num_buckets=num_buckets)
+        rp_bucket = self.relative_position_bucket(
+            relative_position, num_buckets=num_buckets
+        )
         rp_bucket = rp_bucket.to(x.device)
         values = self.relative_attention_bias(rp_bucket)
         values = values.permute([2, 0, 1]).unsqueeze(0)
@@ -321,6 +334,8 @@ class SentenceEncoder(nn.Module):
             * (num_buckets - max_exact)
         ).to(torch.long)
 
-        val_if_large = torch.min(val_if_large, torch.full_like(val_if_large, num_buckets - 1))
+        val_if_large = torch.min(
+            val_if_large, torch.full_like(val_if_large, num_buckets - 1)
+        )
         ret += torch.where(is_small, n, val_if_large)
         return ret

@@ -4,11 +4,14 @@ as the data collator
 """
 
 import logging
-from typing import Dict, Sized, Iterator
+from typing import Dict, Iterator, Sized
+
 from rich.logging import RichHandler
 
 LOG_FORMAT = "%(message)s"
-logging.basicConfig(level="INFO", format=LOG_FORMAT, datefmt="[%X] ", handlers=[RichHandler()])
+logging.basicConfig(
+    level="INFO", format=LOG_FORMAT, datefmt="[%X] ", handlers=[RichHandler()]
+)
 LOGGER = logging.getLogger(__name__)
 
 import os
@@ -55,7 +58,9 @@ class MPNetDataset(torch.utils.data.Dataset):
         # memory, just something to keep in mind)
         with open(file_path, encoding="utf-8") as f:
             lines = [
-                line for line in f.read().splitlines() if (len(line) > 0 and not line.isspace())
+                line
+                for line in f.read().splitlines()
+                if (len(line) > 0 and not line.isspace())
             ]
 
         # Now we process batch encoding using the tokenizer passed in
@@ -70,7 +75,9 @@ class MPNetDataset(torch.utils.data.Dataset):
         # Extract the input IDs and store them in the "examples" dict. We do not need to save the
         # attention mask because it will be created for us in the two-stream self-attention module
         self.examples = batch_encoding["input_ids"]
-        self.examples = [{"input_ids": torch.tensor(e, dtype=torch.long)} for e in self.examples]
+        self.examples = [
+            {"input_ids": torch.tensor(e, dtype=torch.long)} for e in self.examples
+        ]
 
     def __len__(self) -> int:
         return len(self.examples)
@@ -345,19 +352,22 @@ class DataCollatorForMaskedPermutedLanguageModeling:
         # above to make sure that we aren't corrupting any tokens that were already slated for
         # maskin
         corrupt_indices = (
-            torch.bernoulli(torch.full(tokens.shape, corrupt_prob)).bool() & ~mask_indices
+            torch.bernoulli(torch.full(tokens.shape, corrupt_prob)).bool()
+            & ~mask_indices
         )
 
         # Now we mask and corrupt the tokens dictated by the indices above
         # We use the generate_random_tensor helper function to select random indices from the vocab
         tokens[mask_indices] = mask_idx
-        tokens[corrupt_indices] = self.generate_random_tensor(corrupt_indices.sum().tolist()).to(
-            tokens.device
-        )
+        tokens[corrupt_indices] = self.generate_random_tensor(
+            corrupt_indices.sum().tolist()
+        ).to(tokens.device)
 
         return tokens
 
-    def permute_inputs(self, inputs: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
+    def permute_inputs(
+        self, inputs: torch.Tensor, positions: torch.Tensor
+    ) -> torch.Tensor:
         """
         This function uses the positions we permuted earlier to permute the actual input_ids
 
@@ -394,7 +404,9 @@ class DataCollatorForMaskedPermutedLanguageModeling:
         # Set the numpy random seed if it's been provided
         if self.random_seed is not None:
             np.random.seed(self.random_seed)
-        return torch.from_numpy(np.random.choice(len(self.tokenizer.vocab), sz, p=self.weights))
+        return torch.from_numpy(
+            np.random.choice(len(self.tokenizer.vocab), sz, p=self.weights)
+        )
 
 
 class RandomSamplerWithSeed(Sampler[int]):

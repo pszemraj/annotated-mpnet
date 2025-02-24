@@ -4,18 +4,21 @@ between a token and its position
 """
 
 import logging
+
 from rich.logging import RichHandler
 
 LOG_FORMAT = "%(message)s"
-logging.basicConfig(level="INFO", format=LOG_FORMAT, datefmt="[%X] ", handlers=[RichHandler()])
+logging.basicConfig(
+    level="INFO", format=LOG_FORMAT, datefmt="[%X] ", handlers=[RichHandler()]
+)
 LOGGER = logging.getLogger(__name__)
 
 
 import math
 
 import torch
-from torch import nn
 import torch.onnx.operators
+from torch import nn
 
 from annotated_mpnet.utils import utils
 
@@ -65,8 +68,12 @@ class SinusoidalPositionalEmbedding(nn.Module):
         # see in the last step with sin() and cos() making an appearance)
         emb = math.log(10000) / (half_dim - 1)
         emb = torch.exp(torch.arange(half_dim, dtype=torch.float) * -emb)
-        emb = torch.arange(num_embeddings, dtype=torch.float).unsqueeze(1) * emb.unsqueeze(0)
-        emb = torch.cat([torch.sin(emb), torch.cos(emb)], dim=1).view(num_embeddings, -1)
+        emb = torch.arange(num_embeddings, dtype=torch.float).unsqueeze(
+            1
+        ) * emb.unsqueeze(0)
+        emb = torch.cat([torch.sin(emb), torch.cos(emb)], dim=1).view(
+            num_embeddings, -1
+        )
 
         # Next calculate padding. If embedding size is not divisible by 2, we need to pad out
         if embedding_dim % 2 == 1:
@@ -117,19 +124,27 @@ class SinusoidalPositionalEmbedding(nn.Module):
 
         # Use the typical `make_positions` util to get incremental positions. This will eventually
         # feed directly into the sinusoidal weights we defined before
-        positions = utils.make_positions(input, self.padding_idx, onnx_trace=self.onnx_trace)
+        positions = utils.make_positions(
+            input, self.padding_idx, onnx_trace=self.onnx_trace
+        )
 
         # If onnx_trace is set (which it shouldn't be), process additional below
         if self.onnx_trace:
             flat_embeddings = self.weights.detach().index_select(0, positions.view(-1))
-            embedding_shape = torch.cat((bsz.view(1), seq_len.view(1), torch.LongTensor([-1])))
+            embedding_shape = torch.cat(
+                (bsz.view(1), seq_len.view(1), torch.LongTensor([-1]))
+            )
             embeddings = torch.onnx.operators.reshape_from_tensor_shape(
                 flat_embeddings, embedding_shape
             )
             return embeddings
 
         # Return the weights selected by the positions generated above
-        return self.weights.index_select(0, positions.view(-1)).view(bsz, seq_len, -1).detach()
+        return (
+            self.weights.index_select(0, positions.view(-1))
+            .view(bsz, seq_len, -1)
+            .detach()
+        )
 
     # Helper function below
     def max_positions(self):

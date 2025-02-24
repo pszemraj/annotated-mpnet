@@ -1,5 +1,5 @@
 from .mpnet_data import (
-    MPNetDataset,
     DataCollatorForMaskedPermutedLanguageModeling,
+    MPNetDataset,
     RandomSamplerWithSeed,
 )

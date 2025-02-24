@@ -5,20 +5,22 @@ code
 
 import logging
 from typing import Tuple
+
 from rich.logging import RichHandler
 
 LOG_FORMAT = "%(message)s"
-logging.basicConfig(level="INFO", format=LOG_FORMAT, datefmt="[%X] ", handlers=[RichHandler()])
+logging.basicConfig(
+    level="INFO", format=LOG_FORMAT, datefmt="[%X] ", handlers=[RichHandler()]
+)
 LOGGER = logging.getLogger(__name__)
 
 
 import torch
-from torch import nn
 import torch.nn.functional as F
+from torch import nn
 
+from annotated_mpnet.transformer_modules import LayerNorm, SentenceEncoder
 from annotated_mpnet.utils import utils
-from annotated_mpnet.transformer_modules import LayerNorm
-from annotated_mpnet.transformer_modules import SentenceEncoder
 
 
 def init_final_params(module: nn.Module) -> None:
@@ -88,7 +90,9 @@ class MPNetForPretraining(nn.Module):
         """
         return self.lm_head(features, masked_tokens)
 
-    def forward(self, input_ids, positions, pred_size, return_mlm=False, **kwargs) -> torch.Tensor:
+    def forward(
+        self, input_ids, positions, pred_size, return_mlm=False, **kwargs
+    ) -> torch.Tensor:
         """
         Forward function for computing MPNet
         """
@@ -117,7 +121,13 @@ class MPNetForPretraining(nn.Module):
         # Do the attention calculations
         for i, layer in enumerate(self.sentence_encoder.layers):
             c, q = encode_two_stream_attention(
-                layer, c, q, content_mask, query_mask, content_position_bias, query_position_bias
+                layer,
+                c,
+                q,
+                content_mask,
+                query_mask,
+                content_position_bias,
+                query_position_bias,
             )
 
         # Process the final layer norm
@@ -141,7 +151,9 @@ class MPNetForPretraining(nn.Module):
 
     # We define some class static methods here that will be used quite a bit across the board
     @staticmethod
-    def encode_emb(self, input_ids: torch.Tensor, positions: torch.Tensor = None) -> torch.Tensor:
+    def encode_emb(
+        self, input_ids: torch.Tensor, positions: torch.Tensor = None
+    ) -> torch.Tensor:
         """
         Method for embedding the input tokens (i.e. input_ids)
 
@@ -160,7 +172,9 @@ class MPNetForPretraining(nn.Module):
 
         # Add in positions
         if positions is not None:
-            x += F.embedding(positions + 2, self.embed_positions.weight, self.padding_idx)
+            x += F.embedding(
+                positions + 2, self.embed_positions.weight, self.padding_idx
+            )
 
         # Do layer norm
         if self.emb_layer_norm is not None and not self.normalize_before:
@@ -207,7 +221,9 @@ class MPNetLMHead(nn.Module):
     Head for language modeling on the output of MPNet
     """
 
-    def __init__(self, embed_dim: int, output_dim: int, activation_fn: str, weight=None) -> None:
+    def __init__(
+        self, embed_dim: int, output_dim: int, activation_fn: str, weight=None
+    ) -> None:
         """
         Let's talk about these args so we can better understand what's happening in the LM head
 
@@ -419,7 +435,9 @@ def two_stream_self_attention(
         A reusable transpose function that matches the appropriate shape for this attention
         calculation (matching the head dimension and the number of attention heads)
         """
-        return x.contiguous().view(-1, bsz * self.num_heads, self.head_dim).transpose(0, 1)
+        return (
+            x.contiguous().view(-1, bsz * self.num_heads, self.head_dim).transpose(0, 1)
+        )
 
     def fill_mask(attn_weights: torch.Tensor, attn_mask: torch.Tensor) -> torch.Tensor:
         """
@@ -536,4 +554,6 @@ def make_query_and_content_mask(
 
         return torch.cat(mask, dim=-1).eq(0)
 
-    return make_query_mask().to(input_ids.device), make_content_mask().to(input_ids.device)
+    return make_query_mask().to(input_ids.device), make_content_mask().to(
+        input_ids.device
+    )
