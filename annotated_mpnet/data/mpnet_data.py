@@ -55,9 +55,15 @@ class MPNetDataset(torch.utils.data.Dataset):
         self.tokenizer = tokenizer
 
         if dataset is not None:
-            # Use the provided dataset
-            LOGGER.info(f"Creating features from pre-loaded dataset with {len(dataset)} samples")
-            lines = [example[field_name] for example in dataset]
+            # Use the provided dataset, which can be either a HF dataset or a list of examples
+            if isinstance(dataset, list):
+                # For a list of examples
+                LOGGER.info(f"Creating features from {len(dataset)} provided examples")
+                lines = [example[field_name] for example in dataset]
+            else:
+                # For a HF dataset
+                LOGGER.info(f"Creating features from pre-loaded dataset with {len(dataset)} samples")
+                lines = [example[field_name] for example in dataset]
         elif file_path is not None:
             # Check if the file path exists
             if os.path.isfile(file_path) is False:
@@ -65,8 +71,7 @@ class MPNetDataset(torch.utils.data.Dataset):
 
             LOGGER.info(f"Creating features from dataset file at {file_path}")
 
-            # We open the file and gather line by line (obviously this means the dataset must fit in
-            # memory, just something to keep in mind)
+            # We open the file and gather line by line
             with open(file_path, encoding="utf-8") as f:
                 lines = [
                     line
@@ -76,17 +81,12 @@ class MPNetDataset(torch.utils.data.Dataset):
         else:
             raise ValueError("Either file_path or dataset must be provided")
 
-        # Now we process batch encoding using the tokenizer passed in
-        # Options are:
-        # * Add special tokens in so we can have <s> and </s>
-        # * Truncation is true so we can cut any examples to the block size
-        # * Truncate at block size by setting max length to the block size
+        # Process batch encoding using the tokenizer passed in
         batch_encoding = tokenizer(
             lines, add_special_tokens=True, truncation=True, max_length=block_size
         )
 
-        # Extract the input IDs and store them in the "examples" dict. We do not need to save the
-        # attention mask because it will be created for us in the two-stream self-attention module
+        # Extract the input IDs and store them
         self.examples = batch_encoding["input_ids"]
         self.examples = [
             {"input_ids": torch.tensor(e, dtype=torch.long)} for e in self.examples
@@ -97,7 +97,6 @@ class MPNetDataset(torch.utils.data.Dataset):
 
     def __getitem__(self, i: int) -> Dict[str, torch.tensor]:
         return self.examples[i]
-
 
 class HFStreamingDataset(torch.utils.data.IterableDataset):
     """

@@ -118,12 +118,12 @@ def main(args) -> None:
 
         # Check if validation and test splits exist in the dataset
         try:
-            # First, check what splits are available
-            info = load_dataset(args.dataset_name, streaming=False)
+            # First, check what splits are available - USING STREAMING=TRUE
+            info = load_dataset(args.dataset_name, streaming=True)
             available_splits = list(info.keys())
             LOGGER.info(f"Available splits in {args.dataset_name}: {available_splits}")
 
-            if "validation" in available_splits and "test" in available_splits:
+            if 'validation' in available_splits and 'test' in available_splits:
                 # If validation and test splits exist, use them directly
                 LOGGER.info("Using existing validation and test splits")
 
@@ -138,7 +138,7 @@ def main(args) -> None:
                     min_text_length=args.min_text_length,
                     text_field=args.text_field,
                     collator=mplm,
-                    num_workers=args.num_workers if hasattr(args, "num_workers") else 4,
+                    num_workers=args.num_workers if hasattr(args, 'num_workers') else 4,
                 )
 
                 test_dataloader = create_hf_dataloader(
@@ -152,7 +152,7 @@ def main(args) -> None:
                     min_text_length=args.min_text_length,
                     text_field=args.text_field,
                     collator=mplm,
-                    num_workers=args.num_workers if hasattr(args, "num_workers") else 4,
+                    num_workers=args.num_workers if hasattr(args, 'num_workers') else 4,
                 )
 
                 # The training stream will use the "train" split
@@ -160,63 +160,74 @@ def main(args) -> None:
                 train_skip = 0  # No samples to skip
 
             else:
-                # If validation and/or test splits don't exist, create them from train split
-                LOGGER.info(
-                    f"Creating validation and test splits from train (each with {args.eval_samples} samples)"
-                )
+                # If validation and/or test splits don't exist, create them by taking samples from the train stream
+                LOGGER.info(f"Creating validation and test splits from streaming train data (each with {args.eval_samples} samples)")
 
-                # Load the train dataset in non-streaming mode to create validation and test sets
-                full_dataset = load_dataset(
-                    args.dataset_name, split="train", streaming=False
-                )
+                # Get a stream of training data
+                train_stream = info['train']
 
                 # Apply minimum text length filter if specified
                 if args.min_text_length > 0:
-                    full_dataset = full_dataset.filter(
-                        lambda example: len(example[args.text_field])
-                        >= args.min_text_length
+                    train_stream = train_stream.filter(
+                        lambda example: len(example[args.text_field]) >= args.min_text_length
                     )
 
-                # Check if there are enough samples for validation and test
-                if len(full_dataset) < args.eval_samples * 2:
-                    LOGGER.warning(
-                        f"Dataset only has {len(full_dataset)} samples, but {args.eval_samples * 2} are needed "
-                        f"for validation and test. Reducing eval_samples to {len(full_dataset) // 4}."
-                    )
-                    args.eval_samples = len(full_dataset) // 4
+                # Take examples for validation
+                valid_examples = []
+                test_examples = []
 
-                # Create validation and test datasets
-                valid_dataset = full_dataset.select(range(args.eval_samples))
-                test_dataset = full_dataset.select(
-                    range(args.eval_samples, args.eval_samples * 2)
+                # Take validation examples
+                valid_iter = iter(train_stream.take(args.eval_samples))
+                for i in range(args.eval_samples):
+                    try:
+                        valid_examples.append(next(valid_iter))
+                    except StopIteration:
+                        LOGGER.warning(f"Could only get {i} examples for validation")
+                        break
+
+                # Take test examples
+                test_iter = iter(train_stream.skip(args.eval_samples).take(args.eval_samples))
+                for i in range(args.eval_samples):
+                    try:
+                        test_examples.append(next(test_iter))
+                    except StopIteration:
+                        LOGGER.warning(f"Could only get {i} examples for testing")
+                        break
+
+                LOGGER.info(f"Created validation set with {len(valid_examples)} examples")
+                LOGGER.info(f"Created test set with {len(test_examples)} examples")
+
+                # Process validation and test examples
+                valid_dataset = MPNetDataset(
+                    tokenizer=tokenizer,
+                    dataset=valid_examples,
+                    block_size=args.max_tokens,
+                    field_name=args.text_field,
                 )
 
-                # Create dataloaders for validation and test
+                test_dataset = MPNetDataset(
+                    tokenizer=tokenizer,
+                    dataset=test_examples,
+                    block_size=args.max_tokens,
+                    field_name=args.text_field,
+                )
+
+                # Create dataloaders
                 valid_dataloader = torch.utils.data.DataLoader(
-                    MPNetDataset(
-                        tokenizer=tokenizer,
-                        dataset=valid_dataset,
-                        block_size=args.max_tokens,
-                        field_name=args.text_field,
-                    ),
+                    valid_dataset,
                     batch_size=args.batch_size,
                     collate_fn=mplm,
                 )
 
                 test_dataloader = torch.utils.data.DataLoader(
-                    MPNetDataset(
-                        tokenizer=tokenizer,
-                        dataset=test_dataset,
-                        block_size=args.max_tokens,
-                        field_name=args.text_field,
-                    ),
+                    test_dataset,
                     batch_size=args.batch_size,
                     collate_fn=mplm,
                 )
 
-                # The training stream will use the "train" split, but skip the first 2*eval_samples
+                # For training, skip the examples we used for validation and test
                 train_split = "train"
-                train_skip = args.eval_samples * 2  # Skip validation and test samples
+                train_skip = args.eval_samples * 2
 
             # Flag to indicate we're using streaming for training
             train_streaming = True
