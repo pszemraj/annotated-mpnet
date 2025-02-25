@@ -839,8 +839,8 @@ def cli_main():
     )
     parser.add_argument(
         "--beta2",
-        help="The beta_2 of the Adam optimizer. Will default to 0.999",
-        default=0.999,
+        help="The beta_2 of the Adam optimizer. Will default to 0.98",
+        default=0.98,
         type=float,
     )
     parser.add_argument(
