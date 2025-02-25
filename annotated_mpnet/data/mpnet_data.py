@@ -404,9 +404,12 @@ class DataCollatorForMaskedPermutedLanguageModeling:
         # Set the numpy random seed if it's been provided
         if self.random_seed is not None:
             np.random.seed(self.random_seed)
-        return torch.from_numpy(
-            np.random.choice(len(self.tokenizer.vocab), sz, p=self.weights)
-        )
+
+        # Generate the random choices first
+        random_indices = np.random.choice(len(self.tokenizer.vocab), sz, p=self.weights)
+
+        # Then convert to a torch tensor with the correct dtype
+        return torch.tensor(random_indices, dtype=torch.long)
 
 
 class RandomSamplerWithSeed(Sampler[int]):
