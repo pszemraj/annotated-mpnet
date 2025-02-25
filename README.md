@@ -10,14 +10,12 @@ Additionally, we have gone through the painstaking effort of carefully annotatin
 
 ## Installation
 
-This should be installed in editable mode currently, but plans for a PyPI package in the future are under way. We use `pipenv` to do dependency management, which will make your life much easier! All package dependencies are managed by Pipenv and will also create a virtual environment for you so that you won't have to worry about overwriting packages on your local machine. More on `pipenv` installation [here](https://github.com/pypa/pipenv/blob/main/README.md) if you don't already have it.
+Install as editable with `pip install -e .`
 
 ```bash
-git clone https://github.com/yext/annotated-mpnet.git
+git clone https://github.com/pszemraj/annotated-mpnet.git
 cd annotated-mpnet
-pipenv install
-# Call pipenv shell to open the venv with all the installed packages!
-pipenv shell
+pip install -e .
 ```
 
 ## Pretraining MPNet
