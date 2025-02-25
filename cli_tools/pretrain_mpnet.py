@@ -805,10 +805,10 @@ def cli_main():
     )
     parser.add_argument(
         "--dataset-name",
-        help="The name of the HuggingFace dataset to use (e.g., 'Zyphra/Zyda-2'). If specified, this "
+        help="The name of the HuggingFace dataset to use (e.g., 'HuggingFaceFW/fineweb-edu'). If specified, this "
         "will override --train-dir, --valid-file, and --test-file.",
         type=str,
-        default="Zyphra/Zyda-2",  # Default to Zyda-2 as requested
+        default="gair-prox/DCLM-pro",
     )
     parser.add_argument(
         "--text-field",
