@@ -3,6 +3,7 @@ Module containing the logic for handling the dataset for MPNet including the Dat
 as the data collator
 """
 
+import os
 import logging
 from typing import Dict, Iterator, Sized
 
@@ -13,8 +14,6 @@ logging.basicConfig(
     level="INFO", format=LOG_FORMAT, datefmt="[%X] ", handlers=[RichHandler()]
 )
 LOGGER = logging.getLogger(__name__)
-
-import os
 
 import numpy as np
 import torch
@@ -36,7 +35,7 @@ class MPNetDataset(torch.utils.data.Dataset):
         self,
         tokenizer: PreTrainedTokenizer,
         file_path: str = None,
-        dataset = None,
+        dataset=None,
         block_size: int = 512,
         field_name: str = "text",
     ) -> None:
@@ -62,7 +61,9 @@ class MPNetDataset(torch.utils.data.Dataset):
                 lines = [example[field_name] for example in dataset]
             else:
                 # For a HF dataset
-                LOGGER.info(f"Creating features from pre-loaded dataset with {len(dataset)} samples")
+                LOGGER.info(
+                    f"Creating features from pre-loaded dataset with {len(dataset)} samples"
+                )
                 lines = [example[field_name] for example in dataset]
         elif file_path is not None:
             # Check if the file path exists
@@ -98,6 +99,7 @@ class MPNetDataset(torch.utils.data.Dataset):
     def __getitem__(self, i: int) -> Dict[str, torch.tensor]:
         return self.examples[i]
 
+
 class HFStreamingDataset(torch.utils.data.IterableDataset):
     """
     Class for handling streaming datasets from HuggingFace for MPNet pretraining.
@@ -111,30 +113,28 @@ class HFStreamingDataset(torch.utils.data.IterableDataset):
     def __init__(
         self,
         tokenizer: PreTrainedTokenizer,
-        dataset_name: str,
+        dataset_name: str = None,
+        dataset_stream=None,
         split: str = "train",
         block_size: int = 512,
         buffer_size: int = 10000,
         seed: int = 42,
         min_text_length: int = 200,
         text_field: str = "text",
-        skip_samples: int = 0,
-        max_samples: int = None,
     ) -> None:
         """
         Initialize the streaming dataset
 
         Args:
             tokenizer: the tokenizer for the model
-            dataset_name: the name of the HuggingFace dataset
+            dataset_name: the name of the HuggingFace dataset (not used if dataset_stream is provided)
+            dataset_stream: an already loaded HF streaming dataset (overrides dataset_name if provided)
             split: the split to use (train, validation, test)
             block_size: the maximum amount of tokens in the block
             buffer_size: size of the buffer for streaming
             seed: random seed for reproducibility
             min_text_length: minimum text length to consider
             text_field: the field name containing the text in the dataset
-            skip_samples: number of samples to skip from the beginning
-            max_samples: maximum number of samples to use (None for all)
         """
         super().__init__()
 
@@ -144,25 +144,30 @@ class HFStreamingDataset(torch.utils.data.IterableDataset):
         self.seed = seed
         self.min_text_length = min_text_length
         self.text_field = text_field
-        self.skip_samples = skip_samples
-        self.max_samples = max_samples
 
         # Set random seed
         random.seed(seed)
 
-        # Load the dataset in streaming mode
-        LOGGER.info(f"Loading dataset {dataset_name}, split: {split} in streaming mode")
-        self.dataset = load_dataset(dataset_name, split=split, streaming=True)
-
-        # Apply filter for minimum text length if specified
-        if min_text_length > 0:
-            self.dataset = self.dataset.filter(
-                lambda example: len(example[text_field]) >= min_text_length
+        # Either use provided stream or load a new one
+        if dataset_stream is not None:
+            LOGGER.info("Using provided dataset stream")
+            self.dataset = dataset_stream
+        elif dataset_name is not None:
+            # Load the dataset in streaming mode
+            LOGGER.info(
+                f"Loading dataset {dataset_name}, split: {split} in streaming mode"
             )
+            self.dataset = load_dataset(dataset_name, split=split, streaming=True)
 
-        LOGGER.info(f"Dataset {dataset_name} loaded and filtered")
+            # Apply filter for minimum text length if specified
+            if min_text_length > 0:
+                self.dataset = self.dataset.filter(
+                    lambda example: len(example[text_field]) >= min_text_length
+                )
 
-        # We'll skip samples in the __iter__ method to ensure correct worker sharding
+            LOGGER.info(f"Dataset {dataset_name} loaded and filtered")
+        else:
+            raise ValueError("Either dataset_name or dataset_stream must be provided")
 
     def __iter__(self):
         """
@@ -184,32 +189,11 @@ class HFStreamingDataset(torch.utils.data.IterableDataset):
                     num_shards=worker_info.num_workers, index=worker_info.id
                 )
             )
-
-            # Each worker needs to skip its portion of the skip_samples
-            # For proper sharding, each worker skips (skip_samples // num_workers) samples,
-            # plus 1 more if the worker_id is less than the remainder
-            worker_skip = self.skip_samples // worker_info.num_workers
-            if worker_info.id < (self.skip_samples % worker_info.num_workers):
-                worker_skip += 1
-
-            # Skip the appropriate number of samples for this worker
-            for _ in range(worker_skip):
-                try:
-                    next(dataset_iter)
-                except StopIteration:
-                    break
         else:
-            # No worker sharding, just skip the specified number of samples
             dataset_iter = iter(self.dataset)
-            for _ in range(self.skip_samples):
-                try:
-                    next(dataset_iter)
-                except StopIteration:
-                    break
 
         # Initialize buffer
         buffer = []
-        samples_seen = 0
 
         # Fill the buffer initially
         for _ in range(self.buffer_size):
@@ -227,7 +211,6 @@ class HFStreamingDataset(torch.utils.data.IterableDataset):
 
             # Process the example
             processed = self._process_example(example)
-            samples_seen += 1
 
             # Replace the used example with a new one if available
             try:
@@ -235,10 +218,6 @@ class HFStreamingDataset(torch.utils.data.IterableDataset):
             except StopIteration:
                 # Remove the used example if no more examples
                 buffer.pop(idx)
-
-            # Stop if we've reached max_samples
-            if self.max_samples is not None and samples_seen >= self.max_samples:
-                break
 
             yield processed
 
