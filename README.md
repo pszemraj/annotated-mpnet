@@ -1,5 +1,15 @@
 # Annotated MPNet
 
+- [Annotated MPNet](#annotated-mpnet)
+  - [About](#about)
+  - [Installation](#installation)
+  - [Pretraining MPNet](#pretraining-mpnet)
+    - [HuggingFace dataset](#huggingface-dataset)
+    - [Local directory of text files](#local-directory-of-text-files)
+  - [Porting a checkpoint to HuggingFace's format](#porting-a-checkpoint-to-huggingfaces-format)
+
+## About
+
 This repository is based very closely on the wonderful code written by the authors of [MPNet: Masked and Permuted Pre-training for Language Understanding](https://arxiv.org/pdf/2004.09297.pdf) (Kaitao Song, Xu Tan, Tao Qin, Jianfeng Lu, Tie-Yan Liu). MPNet employs a pretraining method that has seen a great deal of success in NLP fine-tuning tasks like information retrieval and learning-to-rank.
 
 While many of the fine-tuned applications of this model exist out in the open, pretraining the model remains somewhat esoteric, as this code lives within the researcher's modified [fairseq codebase](https://github.com/microsoft/MPNet/tree/master) (HuggingFace's MPNet can only be used for fine-tuning, since it doesn't properly encode two-stream attention). This codebase works well, but it is fairly bloated and the code is, perhaps unintentionally, obfuscated by the many subdirectories and imports pointing all through the source code.
@@ -20,7 +30,21 @@ pip install -e .
 
 ## Pretraining MPNet
 
-Pretraining is as simple as calling the pretraining entrypoiny, which was just installed in the previous step. You can get a rundown of exactly which arguments are provided by typing `pretrain-mpnet -h`, but an example command is shown below:
+> [!NOTE]
+> Pretraining can be completed using a directory of text files (_original method_) or a HuggingFace dataset via streaming.
+
+Pretraining is as simple as calling the pretraining entrypoint, which was just installed in the previous step. You can get a rundown of exactly which arguments are provided by typing `pretrain-mpnet -h`, but example commands are shown below.
+
+### HuggingFace dataset
+
+```bash
+pretrain-mpnet --dataset-name HuggingFaceFW/fineweb-edu \
+--total-updates 10000 --warmup-updates 1000 \
+--batch-size 4 --update-freq 4 --lr 0.0002 \
+-save_steps 200 -log_dir checkpoints/experiments
+```
+
+### Local directory of text files
 
 ```bash
 pretrain-mpnet \
