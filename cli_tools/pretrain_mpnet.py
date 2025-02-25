@@ -666,7 +666,8 @@ def cli_main():
     Wrapper function so we can create a CLI entrypoint for this script
     """
     parser = argparse.ArgumentParser(
-        description="Pretrain MPNet by specifying encoder args and training filepath"
+        description="Pretrain MPNet by specifying encoder args and training filepath",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
         "--encoder-layers",
@@ -795,7 +796,7 @@ def cli_main():
     parser.add_argument(
         "--min-text-length",
         help="Minimum text length to consider for examples from the dataset.",
-        default=200,
+        default=64,
         type=int,
     )
     parser.add_argument(
@@ -815,14 +816,15 @@ def cli_main():
         "--batch-size",
         help="The batch size to process at once. You can also use the --update-freq argument to do "
         "gradient accumulation if larger batches don't fit on the device",
-        default=32,
+        default=16,
         type=int,
     )
     parser.add_argument(
+        "-gc_steps",
         "--update-freq",
         help="The amount of batches to process before updating the weights in the model. This is "
         "what gradient accumulation is",
-        default=1,
+        default=8,
         type=int,
     )
     parser.add_argument(
@@ -844,6 +846,7 @@ def cli_main():
         type=float,
     )
     parser.add_argument(
+        "-grad_clip",
         "--clip-grad-norm",
         help="The value above which to clip gradients down to. Usually should be 0 for pretraining "
         "and will be set that way by default",
@@ -857,6 +860,7 @@ def cli_main():
         type=float,
     )
     parser.add_argument(
+        "-end_lr",
         "--end-learning-rate",
         help="The learning rate that the polynomial scheduler will approach when decreasing after "
         "the warmup updates have wrapped up",
@@ -876,6 +880,7 @@ def cli_main():
         type=float,
     )
     parser.add_argument(
+        "-save_steps",
         "--checkpoint-interval",
         help="The number of steps to be taken before saving the model",
         default=-1,
@@ -888,6 +893,7 @@ def cli_main():
         type=str,
     )
     parser.add_argument(
+        "-log_dir",
         "--tensorboard-log-dir",
         help="The directory to which tensorboard logs should be written. If this is unset, we will "
         "log stats to the terminal",
@@ -908,7 +914,7 @@ def cli_main():
     parser.add_argument(
         "--num-workers",
         help="Number of worker processes for data loading.",
-        default=4,
+        default=int(os.cpu_count() // 2),
         type=int,
     )
 
