@@ -20,6 +20,8 @@ import numpy as np
 import torch
 from torch.utils.data import Sampler
 from transformers import PreTrainedTokenizer
+from datasets import load_dataset
+import random
 
 from annotated_mpnet.utils import utils
 from annotated_mpnet.utils.perm_utils_fast import make_span_perm
@@ -33,8 +35,10 @@ class MPNetDataset(torch.utils.data.Dataset):
     def __init__(
         self,
         tokenizer: PreTrainedTokenizer,
-        file_path: str,
-        block_size: int,
+        file_path: str = None,
+        dataset = None,
+        block_size: int = 512,
+        field_name: str = "text",
     ) -> None:
         """
         Init the dataset
@@ -42,26 +46,35 @@ class MPNetDataset(torch.utils.data.Dataset):
         Args:
             tokenizer: the tokenizer for the model
             file_path: the file path containing the data in text lines to be tokenized
+            dataset: a pre-loaded HuggingFace dataset (alternative to file_path)
             block_size: the maximum amount of tokens in the block
+            field_name: the field name containing text in the dataset (only used if dataset is provided)
         """
         super().__init__()
 
         self.tokenizer = tokenizer
 
-        # Check if the file path exists
-        if os.path.isfile(file_path) is False:
-            raise ValueError(f"Input file path {file_path} not found")
+        if dataset is not None:
+            # Use the provided dataset
+            LOGGER.info(f"Creating features from pre-loaded dataset with {len(dataset)} samples")
+            lines = [example[field_name] for example in dataset]
+        elif file_path is not None:
+            # Check if the file path exists
+            if os.path.isfile(file_path) is False:
+                raise ValueError(f"Input file path {file_path} not found")
 
-        LOGGER.info(f"Creating features from dataset file at {file_path}")
+            LOGGER.info(f"Creating features from dataset file at {file_path}")
 
-        # We open the file and gather line by line (obviously this means the dataset must fit in
-        # memory, just something to keep in mind)
-        with open(file_path, encoding="utf-8") as f:
-            lines = [
-                line
-                for line in f.read().splitlines()
-                if (len(line) > 0 and not line.isspace())
-            ]
+            # We open the file and gather line by line (obviously this means the dataset must fit in
+            # memory, just something to keep in mind)
+            with open(file_path, encoding="utf-8") as f:
+                lines = [
+                    line
+                    for line in f.read().splitlines()
+                    if (len(line) > 0 and not line.isspace())
+                ]
+        else:
+            raise ValueError("Either file_path or dataset must be provided")
 
         # Now we process batch encoding using the tokenizer passed in
         # Options are:
@@ -84,6 +97,235 @@ class MPNetDataset(torch.utils.data.Dataset):
 
     def __getitem__(self, i: int) -> Dict[str, torch.tensor]:
         return self.examples[i]
+
+
+class HFStreamingDataset(torch.utils.data.IterableDataset):
+    """
+    Class for handling streaming datasets from HuggingFace for MPNet pretraining.
+
+    This implements a buffer-based streaming approach to:
+    1. Enable efficient streaming of large datasets
+    2. Allow for random sampling from the stream
+    3. Support multi-worker data loading with appropriate sharding
+    """
+
+    def __init__(
+        self,
+        tokenizer: PreTrainedTokenizer,
+        dataset_name: str,
+        split: str = "train",
+        block_size: int = 512,
+        buffer_size: int = 10000,
+        seed: int = 42,
+        min_text_length: int = 200,
+        text_field: str = "text",
+        skip_samples: int = 0,
+        max_samples: int = None,
+    ) -> None:
+        """
+        Initialize the streaming dataset
+
+        Args:
+            tokenizer: the tokenizer for the model
+            dataset_name: the name of the HuggingFace dataset
+            split: the split to use (train, validation, test)
+            block_size: the maximum amount of tokens in the block
+            buffer_size: size of the buffer for streaming
+            seed: random seed for reproducibility
+            min_text_length: minimum text length to consider
+            text_field: the field name containing the text in the dataset
+            skip_samples: number of samples to skip from the beginning
+            max_samples: maximum number of samples to use (None for all)
+        """
+        super().__init__()
+
+        self.tokenizer = tokenizer
+        self.block_size = block_size
+        self.buffer_size = buffer_size
+        self.seed = seed
+        self.min_text_length = min_text_length
+        self.text_field = text_field
+        self.skip_samples = skip_samples
+        self.max_samples = max_samples
+
+        # Set random seed
+        random.seed(seed)
+
+        # Load the dataset in streaming mode
+        LOGGER.info(f"Loading dataset {dataset_name}, split: {split} in streaming mode")
+        self.dataset = load_dataset(dataset_name, split=split, streaming=True)
+
+        # Apply filter for minimum text length if specified
+        if min_text_length > 0:
+            self.dataset = self.dataset.filter(
+                lambda example: len(example[text_field]) >= min_text_length
+            )
+
+        LOGGER.info(f"Dataset {dataset_name} loaded and filtered")
+
+        # We'll skip samples in the __iter__ method to ensure correct worker sharding
+
+    def __iter__(self):
+        """
+        Iterator for the dataset.
+
+        Returns an iterator over text samples.
+        """
+        # Set worker seed for proper sharding
+        worker_info = torch.utils.data.get_worker_info()
+
+        if worker_info is not None:
+            # Use different seed for each worker
+            worker_seed = worker_info.id + self.seed
+            random.seed(worker_seed)
+
+            # Shard the dataset based on worker id
+            dataset_iter = iter(
+                self.dataset.shard(
+                    num_shards=worker_info.num_workers, index=worker_info.id
+                )
+            )
+
+            # Each worker needs to skip its portion of the skip_samples
+            # For proper sharding, each worker skips (skip_samples // num_workers) samples,
+            # plus 1 more if the worker_id is less than the remainder
+            worker_skip = self.skip_samples // worker_info.num_workers
+            if worker_info.id < (self.skip_samples % worker_info.num_workers):
+                worker_skip += 1
+
+            # Skip the appropriate number of samples for this worker
+            for _ in range(worker_skip):
+                try:
+                    next(dataset_iter)
+                except StopIteration:
+                    break
+        else:
+            # No worker sharding, just skip the specified number of samples
+            dataset_iter = iter(self.dataset)
+            for _ in range(self.skip_samples):
+                try:
+                    next(dataset_iter)
+                except StopIteration:
+                    break
+
+        # Initialize buffer
+        buffer = []
+        samples_seen = 0
+
+        # Fill the buffer initially
+        for _ in range(self.buffer_size):
+            try:
+                example = next(dataset_iter)
+                buffer.append(example)
+            except StopIteration:
+                break
+
+        # Continue as long as there are items in buffer
+        while buffer:
+            # Randomly select an example from the buffer
+            idx = random.randint(0, len(buffer) - 1)
+            example = buffer[idx]
+
+            # Process the example
+            processed = self._process_example(example)
+            samples_seen += 1
+
+            # Replace the used example with a new one if available
+            try:
+                buffer[idx] = next(dataset_iter)
+            except StopIteration:
+                # Remove the used example if no more examples
+                buffer.pop(idx)
+
+            # Stop if we've reached max_samples
+            if self.max_samples is not None and samples_seen >= self.max_samples:
+                break
+
+            yield processed
+
+    def _process_example(self, example: Dict) -> Dict[str, torch.tensor]:
+        """
+        Process a single example from the dataset.
+
+        Args:
+            example: Dataset example containing text
+
+        Returns:
+            Dictionary with processed input_ids
+        """
+        text = example[self.text_field]
+
+        # Tokenize the text
+        tokenized = self.tokenizer(
+            text,
+            max_length=self.block_size,
+            truncation=True,
+            padding="max_length",
+            return_tensors="pt",
+        )
+
+        # Extract the input IDs and return them in the expected format
+        return {"input_ids": tokenized["input_ids"].squeeze(0)}
+
+
+def create_hf_dataloader(
+    tokenizer,
+    dataset_name,
+    split="train",
+    batch_size=32,
+    block_size=512,
+    buffer_size=10000,
+    seed=42,
+    min_text_length=200,
+    text_field="text",
+    skip_samples=0,
+    max_samples=None,
+    collator=None,
+    num_workers=4,
+):
+    """
+    Create a dataloader for a HuggingFace dataset in streaming mode.
+
+    Args:
+        tokenizer: the tokenizer for the model
+        dataset_name: the name of the HuggingFace dataset
+        split: the split to use (train, validation, test)
+        batch_size: batch size for the dataloader
+        block_size: the maximum amount of tokens in the block
+        buffer_size: size of the buffer for streaming
+        seed: random seed for reproducibility
+        min_text_length: minimum text length to consider
+        text_field: the field name containing the text in the dataset
+        skip_samples: number of samples to skip from the beginning
+        max_samples: maximum number of samples to use (None for all)
+        collator: data collator function to use
+        num_workers: number of worker processes for loading data
+
+    Returns:
+        PyTorch DataLoader for the dataset
+    """
+    dataset = HFStreamingDataset(
+        tokenizer=tokenizer,
+        dataset_name=dataset_name,
+        split=split,
+        block_size=block_size,
+        buffer_size=buffer_size,
+        seed=seed,
+        min_text_length=min_text_length,
+        text_field=text_field,
+        skip_samples=skip_samples,
+        max_samples=max_samples,
+    )
+
+    dataloader = torch.utils.data.DataLoader(
+        dataset,
+        batch_size=batch_size,
+        collate_fn=collator,
+        num_workers=num_workers,
+        pin_memory=True,
+    )
+
+    return dataloader
 
 
 class DataCollatorForMaskedPermutedLanguageModeling:
