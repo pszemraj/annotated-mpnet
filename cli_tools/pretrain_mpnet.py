@@ -19,12 +19,14 @@ import os
 
 import torch
 import torch.nn.functional as F
+from datasets import load_dataset
 from rich.progress import track
 from torch.utils.tensorboard import SummaryWriter
 from transformers import AutoTokenizer
 
 from annotated_mpnet.data import (
     DataCollatorForMaskedPermutedLanguageModeling,
+    HFStreamingDataset,
     MPNetDataset,
     RandomSamplerWithSeed,
 )
@@ -110,29 +112,118 @@ def main(args) -> None:
     # Load the model up to the device
     model.to(device)
 
-    # Now load val and test datasets. We will save the train dataset logic for below (extract each
-    # of the files and then use them as epochs)
-    valid_dataset = MPNetDataset(
-        tokenizer=tokenizer, file_path=args.valid_file, block_size=args.max_tokens
-    )
-    test_dataset = MPNetDataset(
-        tokenizer=tokenizer, file_path=args.test_file, block_size=args.max_tokens
-    )
+    # Determine whether to use streaming dataset or file-based dataset
+    if args.dataset_name:
+        LOGGER.info(f"Using HuggingFace dataset: {args.dataset_name}")
 
-    # Let's get the dataloader now too
-    valid_dataloader = torch.utils.data.DataLoader(
-        valid_dataset, collate_fn=mplm, batch_size=args.batch_size
-    )
-    test_dataloader = torch.utils.data.DataLoader(
-        test_dataset, collate_fn=mplm, batch_size=args.batch_size
-    )
+        try:
+            # Load the dataset ONCE in streaming mode
+            LOGGER.info(f"Loading streaming dataset: {args.dataset_name}")
+            train_stream = load_dataset(
+                args.dataset_name, split="train", streaming=True
+            )
 
-    # Get each of the files in the training directory
-    train_files = [
-        f"{args.train_dir}{f}"
-        for f in os.listdir(args.train_dir)
-        if os.path.isfile(os.path.join(args.train_dir, f))
-    ]
+            # Apply minimum text length filter if specified
+            if args.min_text_length > 0:
+                train_stream = train_stream.filter(
+                    lambda example: len(example[args.text_field])
+                    >= args.min_text_length
+                )
+
+            # First, create validation and test sets by taking samples
+            LOGGER.info(
+                f"Creating validation and test splits from streaming data (each with {args.eval_samples} samples)"
+            )
+
+            # Take samples for validation
+            valid_examples = []
+            valid_iter = iter(train_stream.take(args.eval_samples))
+            for _ in range(args.eval_samples):
+                try:
+                    valid_examples.append(next(valid_iter))
+                except StopIteration:
+                    LOGGER.warning(
+                        f"Could only get {len(valid_examples)} examples for validation"
+                    )
+                    break
+
+            # Take samples for test (skipping validation samples)
+            test_examples = []
+            test_iter = iter(
+                train_stream.skip(args.eval_samples).take(args.eval_samples)
+            )
+            for _ in range(args.eval_samples):
+                try:
+                    test_examples.append(next(test_iter))
+                except StopIteration:
+                    LOGGER.warning(
+                        f"Could only get {len(test_examples)} examples for testing"
+                    )
+                    break
+
+            LOGGER.info(f"Created validation set with {len(valid_examples)} examples")
+            LOGGER.info(f"Created test set with {len(test_examples)} examples")
+
+            # Process validation and test examples
+            valid_dataset = MPNetDataset(
+                tokenizer=tokenizer,
+                dataset=valid_examples,
+                block_size=args.max_tokens,
+                field_name=args.text_field,
+            )
+
+            test_dataset = MPNetDataset(
+                tokenizer=tokenizer,
+                dataset=test_examples,
+                block_size=args.max_tokens,
+                field_name=args.text_field,
+            )
+
+            # Create dataloaders
+            valid_dataloader = torch.utils.data.DataLoader(
+                valid_dataset,
+                batch_size=args.batch_size,
+                collate_fn=mplm,
+            )
+
+            test_dataloader = torch.utils.data.DataLoader(
+                test_dataset,
+                batch_size=args.batch_size,
+                collate_fn=mplm,
+            )
+
+            # Skip validation and test samples in the training stream
+            train_stream = train_stream.skip(args.eval_samples * 2)
+            train_streaming = True
+
+        except Exception as e:
+            LOGGER.error(f"Error loading dataset {args.dataset_name}: {e}")
+            raise
+    else:
+        LOGGER.info("Using file-based datasets")
+        train_streaming = False
+
+        # Load validation and test datasets from files (original code)
+        valid_dataset = MPNetDataset(
+            tokenizer=tokenizer, file_path=args.valid_file, block_size=args.max_tokens
+        )
+        test_dataset = MPNetDataset(
+            tokenizer=tokenizer, file_path=args.test_file, block_size=args.max_tokens
+        )
+
+        valid_dataloader = torch.utils.data.DataLoader(
+            valid_dataset, collate_fn=mplm, batch_size=args.batch_size
+        )
+        test_dataloader = torch.utils.data.DataLoader(
+            test_dataset, collate_fn=mplm, batch_size=args.batch_size
+        )
+
+        # Get each of the files in the training directory
+        train_files = [
+            f"{args.train_dir}{f}"
+            for f in os.listdir(args.train_dir)
+            if os.path.isfile(os.path.join(args.train_dir, f))
+        ]
 
     # Finally, let's make sure the checkpoint directory exists. If not, let's create it
     if not os.path.exists(args.checkpoint_dir):
@@ -174,29 +265,54 @@ def main(args) -> None:
     best_loss = 10e6
 
     while steps <= args.total_updates:
-        # Get the current training file which we will alias as the epoch
-        current_train_file = train_files[epoch % len(train_files)]
+        # Handle either streaming or file-based training
+        if train_streaming:
+            LOGGER.info(f"Starting streaming training epoch {epoch}")
 
-        # Now load it as a dataset and get the dataloader
-        epoch_train_dataset = MPNetDataset(
-            tokenizer=tokenizer,
-            file_path=current_train_file,
-            block_size=args.max_tokens,
-        )
+            # Create a single dataloader from our stream - no need to reload the dataset
+            # Just shuffle with a different seed each epoch
+            current_stream = train_stream.shuffle(
+                buffer_size=args.buffer_size, seed=args.seed + epoch
+            )
 
-        # Let's get a seeded sampler so that we can have reproducible training results. Mainly, we
-        # want to change the seed with each epoch since we don't want the same pseudorandom ordering
-        # each epoch. We do this by adding the epoch argument
-        sampler = RandomSamplerWithSeed(
-            epoch_train_dataset, epoch=epoch, random_seed=args.seed
-        )
+            train_dataloader = HFStreamingDataset(
+                tokenizer=tokenizer,
+                dataset_stream=current_stream,  # Use the already loaded stream
+                block_size=args.max_tokens,
+                buffer_size=args.buffer_size,
+                seed=args.seed + epoch,  # Change seed each epoch for better variety
+                text_field=args.text_field,
+            )
 
-        epoch_train_dataloader = torch.utils.data.DataLoader(
-            epoch_train_dataset,
-            sampler=sampler,
-            collate_fn=mplm,
-            batch_size=args.batch_size,
-        )
+            train_dataloader = torch.utils.data.DataLoader(
+                train_dataloader,
+                batch_size=args.batch_size,
+                collate_fn=mplm,
+                num_workers=args.num_workers if hasattr(args, "num_workers") else 4,
+            )
+        else:
+            # File-based datasets: Use a different file for each epoch (original code)
+            current_train_file = train_files[epoch % len(train_files)]
+            LOGGER.info(f"Training epoch {epoch} using file: {current_train_file}")
+
+            # Load current file as dataset and set up dataloader
+            epoch_train_dataset = MPNetDataset(
+                tokenizer=tokenizer,
+                file_path=current_train_file,
+                block_size=args.max_tokens,
+            )
+
+            # Use seeded sampler for reproducibility
+            sampler = RandomSamplerWithSeed(
+                epoch_train_dataset, epoch=epoch, random_seed=args.seed
+            )
+
+            train_dataloader = torch.utils.data.DataLoader(
+                epoch_train_dataset,
+                sampler=sampler,
+                collate_fn=mplm,
+                batch_size=args.batch_size,
+            )
 
         # Zero out the gradients
         scheduler.optimizer.zero_grad()
@@ -220,9 +336,9 @@ def main(args) -> None:
         # Now we do our training steps
         # We enumerate the dataloader because we need to keep track of gradient accumulation steps
         for i, batch in track(
-            enumerate(epoch_train_dataloader),
+            enumerate(train_dataloader),
             description=f"Training epoch {epoch}",
-            total=len(epoch_train_dataloader),
+            total=len(train_dataloader) if not train_streaming else None,
         ):
             # Always check to make sure we haven't overstepped the total number of updates
             if steps > args.total_updates:
@@ -458,10 +574,14 @@ def main(args) -> None:
         # loader and garbage collect it
         epoch += 1
 
-        del epoch_train_dataloader
-        del epoch_train_dataset
-
-        gc.collect()
+        # Clean up datasets if using file-based approach
+        if not train_streaming:
+            del train_dataloader
+            del epoch_train_dataset
+            gc.collect()
+        else:
+            del train_dataloader
+            gc.collect()
 
     # If we've reached the end of the training cycle, i.e., hit total number of update steps, we can
     # use the test dataloader we built above to get a final test metric using the best checkpoint
@@ -536,14 +656,8 @@ def main(args) -> None:
         LOGGER.info(logging_dict)
 
     LOGGER.info(
-        "Training is finished! Here's a multicolored cat:\n"
-        "    _                ___       _.--.\n"
-        "    \`.|\..----...-'`   `-._.-'_.-'`\n"
-        "    /  ' `         ,       __.--'\n"
-        "    )/' _/     \   `-_,   /\n"
-        "    `-'\" `\"\_  ,_.-;_.-\_ ',\n"
-        "        _.-'_./   {_.'   ; /\n"
-        "       {_.-``-'         {_/\n",
+        f"Training is finished! See output in {args.checkpoint_dir} and "
+        f"tensorboard logs in {args.tensorboard_log_dir}"
     )
 
 
@@ -552,7 +666,8 @@ def cli_main():
     Wrapper function so we can create a CLI entrypoint for this script
     """
     parser = argparse.ArgumentParser(
-        description="Pretrain MPNet by specifying encoder args and training filepath"
+        description="Pretrain MPNet by specifying encoder args and training filepath",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
         "--encoder-layers",
@@ -637,15 +752,58 @@ def cli_main():
         help="The directory containing training files. This should generally be a directory since "
         "there are usually too many train files to fit in memory.",
         type=str,
+        default=None,
     )
     parser.add_argument(
-        "--valid-file", help="The file containing validation data.", type=str
+        "--valid-file",
+        help="The file containing validation data.",
+        type=str,
+        default=None,
     )
-    parser.add_argument("--test-file", help="The file containing test data.", type=str)
+    parser.add_argument(
+        "--test-file",
+        help="The file containing test data.",
+        type=str,
+        default=None,
+    )
+    parser.add_argument(
+        "--dataset-name",
+        help="The name of the HuggingFace dataset to use (e.g., 'HuggingFaceFW/fineweb-edu'). If specified, this "
+        "will override --train-dir, --valid-file, and --test-file.",
+        type=str,
+        default="gair-prox/DCLM-pro",
+    )
+    parser.add_argument(
+        "--text-field",
+        help="The field name in the dataset that contains the text to tokenize. Default is 'text'.",
+        type=str,
+        default="text",
+    )
+    parser.add_argument(
+        "--buffer-size",
+        help="Size of the buffer for streaming datasets. Larger buffers give better randomization but "
+        "use more memory.",
+        default=10000,
+        type=int,
+    )
+    parser.add_argument(
+        "--eval-samples",
+        help="Number of samples to use for validation and test sets if they are not available in the "
+        "dataset.",
+        default=500,
+        type=int,
+    )
+    parser.add_argument(
+        "--min-text-length",
+        help="Minimum text length to consider for examples from the dataset.",
+        default=64,
+        type=int,
+    )
     parser.add_argument(
         "--total-updates",
         help="The maximum number of updates to do when training. Since we probably won't ever get "
         "through all the data, we need to set this",
+        default=10000,
         type=int,
     )
     parser.add_argument(
@@ -658,13 +816,15 @@ def cli_main():
         "--batch-size",
         help="The batch size to process at once. You can also use the --update-freq argument to do "
         "gradient accumulation if larger batches don't fit on the device",
+        default=16,
         type=int,
     )
     parser.add_argument(
+        "-gc_steps",
         "--update-freq",
         help="The amount of batches to process before updating the weights in the model. This is "
         "what gradient accumulation is",
-        default=1,
+        default=8,
         type=int,
     )
     parser.add_argument(
@@ -675,8 +835,8 @@ def cli_main():
     )
     parser.add_argument(
         "--beta2",
-        help="The beta_2 of the Adam optimizer. Will default to 0.999",
-        default=0.999,
+        help="The beta_2 of the Adam optimizer. Will default to 0.98",
+        default=0.98,
         type=float,
     )
     parser.add_argument(
@@ -686,6 +846,7 @@ def cli_main():
         type=float,
     )
     parser.add_argument(
+        "-grad_clip",
         "--clip-grad-norm",
         help="The value above which to clip gradients down to. Usually should be 0 for pretraining "
         "and will be set that way by default",
@@ -695,9 +856,11 @@ def cli_main():
     parser.add_argument(
         "--lr",
         help="The learning rate that will be hit when the warmup updates have finished",
+        default=0.0002,
         type=float,
     )
     parser.add_argument(
+        "-end_lr",
         "--end-learning-rate",
         help="The learning rate that the polynomial scheduler will approach when decreasing after "
         "the warmup updates have wrapped up",
@@ -717,6 +880,7 @@ def cli_main():
         type=float,
     )
     parser.add_argument(
+        "-save_steps",
         "--checkpoint-interval",
         help="The number of steps to be taken before saving the model",
         default=-1,
@@ -729,6 +893,7 @@ def cli_main():
         type=str,
     )
     parser.add_argument(
+        "-log_dir",
         "--tensorboard-log-dir",
         help="The directory to which tensorboard logs should be written. If this is unset, we will "
         "log stats to the terminal",
@@ -746,8 +911,23 @@ def cli_main():
         default=12345,
         type=int,
     )
+    parser.add_argument(
+        "--num-workers",
+        help="Number of worker processes for data loading.",
+        default=int(os.cpu_count() // 2),
+        type=int,
+    )
 
     args = parser.parse_args()
+
+    # Check for validity of arguments
+    if args.dataset_name is None and (
+        args.train_dir is None or args.valid_file is None or args.test_file is None
+    ):
+        parser.error(
+            "Either --dataset-name or (--train-dir, --valid-file, and --test-file) must be provided."
+        )
+
     LOGGER.info(args)
     main(args)
 

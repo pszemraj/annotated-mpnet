@@ -57,9 +57,9 @@ extensions = [
 
 setup(
     name="annotated_mpnet",
-    version="0.1.0",
+    version="0.1.1",
     description="Raw Torch, heavily annotated, pretrainable MPNet",
-    url="https://github.com/yext/annotated-mpnet",
+    url="https://github.com/pszemraj/annotated-mpnet",
     long_description=readme,
     long_description_content_type="text/markdown",
     setup_requires=[
@@ -67,7 +67,15 @@ setup(
         "numpy",
         "setuptools>=18.0",
     ],
-    install_requires=["cython", "numpy", "rich", "tensorboard", "torch", "transformers"],
+    install_requires=[
+        "cython",
+        "datasets",
+        "numpy",
+        "rich",
+        "tensorboard",
+        "torch",
+        "transformers",
+    ],
     packages=find_packages(exclude=["cli_tools", "tests"]),
     ext_modules=extensions,
     test_suite="tests",
