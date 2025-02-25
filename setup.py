@@ -57,9 +57,9 @@ extensions = [
 
 setup(
     name="annotated_mpnet",
-    version="0.1.0",
+    version="0.1.1",
     description="Raw Torch, heavily annotated, pretrainable MPNet",
-    url="https://github.com/yext/annotated-mpnet",
+    url="https://github.com/pszemraj/annotated-mpnet",
     long_description=readme,
     long_description_content_type="text/markdown",
     setup_requires=[
