@@ -656,14 +656,8 @@ def main(args) -> None:
         LOGGER.info(logging_dict)
 
     LOGGER.info(
-        "Training is finished! Here's a multicolored cat:\n"
-        "    _                ___       _.--.\n"
-        "    \`.|\..----...-'`   `-._.-'_.-'`\n"
-        "    /  ' `         ,       __.--'\n"
-        "    )/' _/     \   `-_,   /\n"
-        "    `-'\" `\"\_  ,_.-;_.-\_ ',\n"
-        "        _.-'_./   {_.'   ; /\n"
-        "       {_.-``-'         {_/\n",
+        f"Training is finished! See output in {args.checkpoint_dir} and "
+        f"tensorboard logs in {args.tensorboard_log_dir}"
     )
 
 
