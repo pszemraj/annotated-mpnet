@@ -3,6 +3,7 @@ Pretraining script for MPNet
 """
 
 import logging
+import sys
 
 from rich.logging import RichHandler
 
@@ -66,6 +67,39 @@ def write_to_tensorboard(writer: SummaryWriter, logging_dict: dict, step: int) -
         writer.add_scalar(stat_name, stat, step)
 
 
+def check_and_activate_tf32():
+    """
+    Check if the GPU supports NVIDIA Ampere or later and enable FP32 in PyTorch if it does.
+    """
+    # Check if CUDA is available
+    if not torch.cuda.is_available():
+        logging.info("No GPU detected, running on CPU.")
+        return
+
+    try:
+        # Get the compute capability of the GPU
+        device = torch.cuda.current_device()
+        capability = torch.cuda.get_device_capability(device)
+        major, minor = capability
+
+        # Check if the GPU is Ampere or newer (compute capability >= 8.0)
+        if major >= 8:
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
+            gpu_name = torch.cuda.get_device_name(device)
+            print(
+                f"{gpu_name} (compute capability {major}.{minor}) supports NVIDIA Ampere or later, enabled TF32 in PyTorch."
+            )
+        else:
+            gpu_name = torch.cuda.get_device_name(device)
+            print(
+                f"{gpu_name} (compute capability {major}.{minor}) does not support NVIDIA Ampere or later."
+            )
+
+    except Exception as e:
+        logging.warning(f"Error occurred while checking GPU: {e}")
+
+
 def main(args) -> None:
     """
     The main function handling the training loop for MPNet pretraining
@@ -76,6 +110,12 @@ def main(args) -> None:
 
     # Specify the torch device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if device.type != "cuda":
+        sys.exit(
+            "CUDA is required for training MPNet. Please ensure that you have a CUDA enabled GPU."
+        )
+
+    check_and_activate_tf32()  # Check if the GPU supports NVIDIA Ampere or later and enable TF32
 
     # First test to see if max_positions and max_tokens are set differently. If they are, raise a
     # warning to the user to let them know this is very experimental and will most likely lead to
@@ -111,6 +151,11 @@ def main(args) -> None:
 
     # Load the model up to the device
     model.to(device)
+
+    # Compile the model
+    if args.compile:
+        LOGGER.info("Compiling the model...")
+        model = torch.compile(model)
 
     # Determine whether to use streaming dataset or file-based dataset
     if args.dataset_name:
@@ -243,6 +288,7 @@ def main(args) -> None:
         lr=6e-9,
         eps=args.adam_eps,
         weight_decay=args.weight_decay,
+        fused=True,
     )
     scheduler = PolynomialDecayLRScheduler(args, optimizer)
 
@@ -372,16 +418,12 @@ def main(args) -> None:
             # Update the count of total tokens processed during accumulation steps
             accumulation_tokens += device_batch["ntokens"]
 
-            # Now let's process these through the model!
-            outs = model(**device_batch)
+            # Now let's process these through the model with autocast for mixed precision using bf16
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                outs = model(**device_batch)
 
-            # Process these out logits through cross entropy loss. Cross entropy loss is basically
-            # softmax chained into negative log-likelihood loss. We chain these here so that we have
-            # full control over the functionality (instead of using the builtin CrossEntropyLoss
-            # function)
-            #
-            # We use the sum reduction because we will want to average out the loss (and the
-            # resulting gradients) by the sample size, i.e., the total number of prediction targets
+            # Process these out logits through cross entropy loss
+            # Note: we do this outside of autocast to maintain precision for the loss calculation
             loss = F.nll_loss(
                 F.log_softmax(
                     outs.view(-1, outs.size(-1)), dim=-1, dtype=torch.float32
@@ -520,9 +562,10 @@ def main(args) -> None:
 
             # Now we move to no_grad since we don't have to calculate weights
             with torch.no_grad():
-                outs = model(**device_batch)
+                with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                    outs = model(**device_batch)
 
-                # Calculate loss here
+                # Calculate loss here (outside autocast for precision)
                 loss = F.nll_loss(
                     F.log_softmax(
                         outs.view(-1, outs.size(-1)), dim=-1, dtype=torch.float32
@@ -586,7 +629,7 @@ def main(args) -> None:
     # If we've reached the end of the training cycle, i.e., hit total number of update steps, we can
     # use the test dataloader we built above to get a final test metric using the best checkpoint
 
-    # Beging by loading the model states and args from the best checkpoint
+    # Begin by loading the model states and args from the best checkpoint
     dicts = torch.load(os.path.join(args.checkpoint_dir, "best_checkpoint.pt"))
 
     # Load an empty shell of the model architecture using those args
@@ -617,9 +660,10 @@ def main(args) -> None:
 
         # Now we move to no_grad since we don't have to calculate weights
         with torch.no_grad():
-            outs = model(**device_batch)
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                outs = test_model(**device_batch)
 
-            # Calculate loss here
+            # Calculate loss here (outside autocast for precision)
             loss = F.nll_loss(
                 F.log_softmax(
                     outs.view(-1, outs.size(-1)), dim=-1, dtype=torch.float32
@@ -916,6 +960,12 @@ def cli_main():
         help="Number of worker processes for data loading.",
         default=int(os.cpu_count() // 2),
         type=int,
+    )
+    parser.add_argument(
+        "--compile",
+        help="Boolean that dictates whether or not to compile the model",
+        action="store_true",
+        default=False,
     )
 
     args = parser.parse_args()
