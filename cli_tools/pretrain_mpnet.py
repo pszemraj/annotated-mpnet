@@ -3,6 +3,7 @@ Pretraining script for MPNet
 """
 
 import logging
+import sys
 
 from rich.logging import RichHandler
 
@@ -66,6 +67,7 @@ def write_to_tensorboard(writer: SummaryWriter, logging_dict: dict, step: int) -
         writer.add_scalar(stat_name, stat, step)
 
 
+
 def main(args) -> None:
     """
     The main function handling the training loop for MPNet pretraining
@@ -76,6 +78,10 @@ def main(args) -> None:
 
     # Specify the torch device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if device.type != "cuda":
+        sys.exit(
+            "CUDA is required for training MPNet. Please ensure that you have a CUDA enabled GPU."
+        )
 
     # First test to see if max_positions and max_tokens are set differently. If they are, raise a
     # warning to the user to let them know this is very experimental and will most likely lead to
@@ -372,16 +378,12 @@ def main(args) -> None:
             # Update the count of total tokens processed during accumulation steps
             accumulation_tokens += device_batch["ntokens"]
 
-            # Now let's process these through the model!
-            outs = model(**device_batch)
+            # Now let's process these through the model with autocast for mixed precision using bf16
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                outs = model(**device_batch)
 
-            # Process these out logits through cross entropy loss. Cross entropy loss is basically
-            # softmax chained into negative log-likelihood loss. We chain these here so that we have
-            # full control over the functionality (instead of using the builtin CrossEntropyLoss
-            # function)
-            #
-            # We use the sum reduction because we will want to average out the loss (and the
-            # resulting gradients) by the sample size, i.e., the total number of prediction targets
+            # Process these out logits through cross entropy loss
+            # Note: we do this outside of autocast to maintain precision for the loss calculation
             loss = F.nll_loss(
                 F.log_softmax(
                     outs.view(-1, outs.size(-1)), dim=-1, dtype=torch.float32
@@ -520,9 +522,10 @@ def main(args) -> None:
 
             # Now we move to no_grad since we don't have to calculate weights
             with torch.no_grad():
-                outs = model(**device_batch)
+                with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                    outs = model(**device_batch)
 
-                # Calculate loss here
+                # Calculate loss here (outside autocast for precision)
                 loss = F.nll_loss(
                     F.log_softmax(
                         outs.view(-1, outs.size(-1)), dim=-1, dtype=torch.float32
@@ -586,7 +589,7 @@ def main(args) -> None:
     # If we've reached the end of the training cycle, i.e., hit total number of update steps, we can
     # use the test dataloader we built above to get a final test metric using the best checkpoint
 
-    # Beging by loading the model states and args from the best checkpoint
+    # Begin by loading the model states and args from the best checkpoint
     dicts = torch.load(os.path.join(args.checkpoint_dir, "best_checkpoint.pt"))
 
     # Load an empty shell of the model architecture using those args
@@ -617,9 +620,10 @@ def main(args) -> None:
 
         # Now we move to no_grad since we don't have to calculate weights
         with torch.no_grad():
-            outs = model(**device_batch)
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                outs = test_model(**device_batch)
 
-            # Calculate loss here
+            # Calculate loss here (outside autocast for precision)
             loss = F.nll_loss(
                 F.log_softmax(
                     outs.view(-1, outs.size(-1)), dim=-1, dtype=torch.float32
