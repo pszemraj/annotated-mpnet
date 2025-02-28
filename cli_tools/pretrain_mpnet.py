@@ -67,6 +67,38 @@ def write_to_tensorboard(writer: SummaryWriter, logging_dict: dict, step: int) -
         writer.add_scalar(stat_name, stat, step)
 
 
+def check_and_activate_tf32():
+    """
+    Check if the GPU supports NVIDIA Ampere or later and enable FP32 in PyTorch if it does.
+    """
+    # Check if CUDA is available
+    if not torch.cuda.is_available():
+        logging.info("No GPU detected, running on CPU.")
+        return
+
+    try:
+        # Get the compute capability of the GPU
+        device = torch.cuda.current_device()
+        capability = torch.cuda.get_device_capability(device)
+        major, minor = capability
+
+        # Check if the GPU is Ampere or newer (compute capability >= 8.0)
+        if major >= 8:
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
+            gpu_name = torch.cuda.get_device_name(device)
+            print(
+                f"{gpu_name} (compute capability {major}.{minor}) supports NVIDIA Ampere or later, enabled TF32 in PyTorch."
+            )
+        else:
+            gpu_name = torch.cuda.get_device_name(device)
+            print(
+                f"{gpu_name} (compute capability {major}.{minor}) does not support NVIDIA Ampere or later."
+            )
+
+    except Exception as e:
+        logging.warning(f"Error occurred while checking GPU: {e}")
+
 
 def main(args) -> None:
     """
@@ -82,6 +114,8 @@ def main(args) -> None:
         sys.exit(
             "CUDA is required for training MPNet. Please ensure that you have a CUDA enabled GPU."
         )
+
+    check_and_activate_tf32()  # Check if the GPU supports NVIDIA Ampere or later and enable TF32
 
     # First test to see if max_positions and max_tokens are set differently. If they are, raise a
     # warning to the user to let them know this is very experimental and will most likely lead to
@@ -249,6 +283,7 @@ def main(args) -> None:
         lr=6e-9,
         eps=args.adam_eps,
         weight_decay=args.weight_decay,
+        fused=True,
     )
     scheduler = PolynomialDecayLRScheduler(args, optimizer)
 
