@@ -152,6 +152,11 @@ def main(args) -> None:
     # Load the model up to the device
     model.to(device)
 
+    # Compile the model
+    if args.compile:
+        LOGGER.info("Compiling the model...")
+        model = torch.compile(model)
+
     # Determine whether to use streaming dataset or file-based dataset
     if args.dataset_name:
         LOGGER.info(f"Using HuggingFace dataset: {args.dataset_name}")
@@ -955,6 +960,12 @@ def cli_main():
         help="Number of worker processes for data loading.",
         default=int(os.cpu_count() // 2),
         type=int,
+    )
+    parser.add_argument(
+        "--compile",
+        help="Boolean that dictates whether or not to compile the model",
+        action="store_true",
+        default=False,
     )
 
     args = parser.parse_args()
