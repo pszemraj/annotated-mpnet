@@ -51,6 +51,10 @@ class MPNetForPretraining(nn.Module):
 
     def __init__(self, args, tokenizer) -> None:
         super().__init__()
+    
+        # Check for FlexAttention configuration
+        use_flex_attention = getattr(args, 'use_flex_attention', False)
+        sliding_window_size = getattr(args, 'sliding_window_size', None)
 
         # Let's define the encoder here
         self.args = args
@@ -69,6 +73,8 @@ class MPNetForPretraining(nn.Module):
             encoder_normalize_before=True,
             activation_fn=args.activation_fn,
             normalize_before=args.normalize_before,
+            use_flex_attention=use_flex_attention,
+            sliding_window_size=sliding_window_size,
         )
 
         # Add the language modeling head so that we can do pretraining
@@ -94,9 +100,8 @@ class MPNetForPretraining(nn.Module):
         self, input_ids, positions, pred_size, return_mlm=False, **kwargs
     ) -> torch.Tensor:
         """
-        Forward function for computing MPNet
+        Forward function for computing MPNet with FlexAttention support
         """
-
         # Calculate initial embeddings
         emb = self.encode_emb(self.sentence_encoder, input_ids, positions)
 
@@ -115,20 +120,62 @@ class MPNetForPretraining(nn.Module):
         # Get the sz of the inital src_length without the tokens to be predicted
         sz = c.size(0) - pred_size
 
-        # Get the query and content masks using the helper function below
-        query_mask, content_mask = make_query_and_content_mask(input_ids, sz, pred_size)
-
-        # Do the attention calculations
-        for i, layer in enumerate(self.sentence_encoder.layers):
-            c, q = encode_two_stream_attention(
-                layer,
-                c,
-                q,
-                content_mask,
-                query_mask,
-                content_position_bias,
-                query_position_bias,
+        # Get the query and content masks using the appropriate function
+        if getattr(self.args, 'use_flex_attention', False):
+            from annotated_mpnet.transformer_modules.flex_attention import make_flex_attention_mask
+            query_mask, content_mask = make_flex_attention_mask(
+                input_ids, 
+                sz, 
+                pred_size, 
+                getattr(self.args, 'sliding_window_size', None)
             )
+        else:
+            # Use the original mask creation function
+            query_mask, content_mask = make_query_and_content_mask(input_ids, sz, pred_size)
+
+        # Process through layers with appropriate attention mechanism
+        if getattr(self.args, 'use_flex_attention', False):
+            # Import the factory function to get the appropriate two_stream_self_attention
+            from annotated_mpnet.transformer_modules.flex_attention import  two_stream_self_attention_factory
+            
+            # Get the FlexAttention implementation
+            flex_two_stream_attention = two_stream_self_attention_factory(
+                use_flex_attention=True,
+                sliding_window_size=getattr(self.args, 'sliding_window_size', None)
+            )
+            
+            # Process through layers with FlexAttention
+            for i, layer in enumerate(self.sentence_encoder.layers):
+                # Override the standard two_stream_self_attention with FlexAttention version
+                # This is a bit of a hack but allows us to maintain the same interface
+                original_two_stream = layer.two_stream_self_attention
+                layer.two_stream_self_attention = flex_two_stream_attention
+                
+                # Process the layer
+                c, q = encode_two_stream_attention(
+                    layer,
+                    c,
+                    q,
+                    content_mask,
+                    query_mask,
+                    content_position_bias,
+                    query_position_bias,
+                )
+                
+                # Restore original method to avoid memory leaks
+                layer.two_stream_self_attention = original_two_stream
+        else:
+            # Use standard attention
+            for i, layer in enumerate(self.sentence_encoder.layers):
+                c, q = encode_two_stream_attention(
+                    layer,
+                    c,
+                    q,
+                    content_mask,
+                    query_mask,
+                    content_position_bias,
+                    query_position_bias,
+                )
 
         # Process the final layer norm
         q = self.maybe_final_norm(self.sentence_encoder, q)
@@ -139,7 +186,7 @@ class MPNetForPretraining(nn.Module):
         # Project the attention features out to the vocab size for masked token classification
         x = self.output_layer(q)
 
-        # If we also want MLM loss, we can branch to the below logic. Probably not useful for us
+        # If we also want MLM loss, handle the additional output
         if return_mlm is True:
             c = c[-pred_size:]
             c = self.maybe_final_norm(self.decoder.sentence_encoder, c)

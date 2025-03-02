@@ -74,6 +74,8 @@ class SentenceEncoder(nn.Module):
         relative_attention_num_buckets: int = 32,
         normalize_before: bool = False,
         export: bool = False,
+        use_flex_attention: bool = False,  
+        sliding_window_size: int = None,  
     ) -> None:
         """
         There is a LOT going on here, so I will try to summarize it all
@@ -180,6 +182,8 @@ class SentenceEncoder(nn.Module):
                     add_zero_attn=add_zero_attn,
                     normalize_before=normalize_before,
                     export=export,
+                    use_flex_attention=use_flex_attention,
+                    sliding_window_size=sliding_window_size
                 )
                 for _ in range(num_encoder_layers)
             ]

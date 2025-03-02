@@ -967,6 +967,19 @@ def cli_main():
         action="store_true",
         default=False,
     )
+    parser.add_argument(
+        "--use-flex-attention",
+        help="Use PyTorch's FlexAttention mechanism instead of the default attention implementation",
+        action="store_true",
+        default=False,
+    )
+    parser.add_argument(
+        "--sliding-window-size",
+        help="Size of the sliding window for attention when using FlexAttention. If set, enables "
+        "sliding window attention which can be more efficient for long sequences.",
+        type=int,
+        default=None,
+    )
 
     args = parser.parse_args()
 

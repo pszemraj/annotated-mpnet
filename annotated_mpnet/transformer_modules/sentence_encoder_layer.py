@@ -40,6 +40,8 @@ class SentenceEncoderLayer(nn.Module):
         add_zero_attn: bool = False,
         normalize_before: bool = True,
         export: bool = False,
+        use_flex_attention: bool = False,  # New parameter
+        sliding_window_size: int = None,  
     ) -> None:
         """
         Init function for the layer. I will try to summarize all the args here.
@@ -75,19 +77,28 @@ class SentenceEncoderLayer(nn.Module):
         self.embedding_dim = embedding_dim
         self.dropout = dropout
         self.activation_dropout = activation_dropout
+        self.use_flex_attention = use_flex_attention
+        self.sliding_window_size = sliding_window_size
 
         # Get the submodules we need
         self.activation_fn = utils.get_activation_fn(activation_fn)
 
         # Initialize the self attention module
-        self.self_attn = RelativeMultiHeadAttention(
-            self.embedding_dim,
-            num_attention_heads,
-            dropout=attention_dropout,
-            add_bias_kv=add_bias_kv,
-            add_zero_attn=add_zero_attn,
-            self_attention=True,
-        )
+        if use_flex_attention:
+            # Store parameters for later FlexAttention instantiation
+            self.num_heads = num_attention_heads
+            self.attention_dropout = attention_dropout
+            self._flex_attention = None  # Will be lazily initialized on first forward pass
+        else:
+            # Use the standard RelativeMultiHeadAttention
+            self.self_attn = RelativeMultiHeadAttention(
+                self.embedding_dim,
+                num_attention_heads,
+                dropout=attention_dropout,
+                add_bias_kv=add_bias_kv,
+                add_zero_attn=add_zero_attn,
+                self_attention=True,
+            )
 
         # Get the LayerNorm for the self_attention output
         self.self_attn_layer_norm = LayerNorm(self.embedding_dim, export=export)
@@ -123,20 +134,31 @@ class SentenceEncoderLayer(nn.Module):
         # kwarg against self.normalize_before arg and then either do nothing or normalize
         x = self.maybe_layer_norm(self.self_attn_layer_norm, x, before=True)
 
-        # Forward pass of self-attention
-        x, attn = self.self_attn(
-            query=x,
-            key=x,
-            value=x,
-            key_padding_mask=self_attn_padding_mask,
-            need_weights=False,
-            attn_mask=self_attn_mask,
-            positions_bias=positions_bias,
-        )
+        # Forward pass of self-attention with appropriate method based on configuration
+        if self.use_flex_attention:
+            # Use FlexAttention-based implementation
+            from annotated_mpnet.transformer_modules.flex_attention import encode_flex_two_stream_attention
+            x, attn = encode_flex_two_stream_attention(
+                self, 
+                x, x,  # content and query are the same for standard self-attention
+                content_mask=self_attn_mask,
+                query_mask=self_attn_mask,
+                content_position_bias=positions_bias,
+                query_position_bias=positions_bias,
+            )
+        else:
+            # Use standard RelativeMultiHeadAttention
+            x, attn = self.self_attn(
+                query=x,
+                key=x,
+                value=x,
+                key_padding_mask=self_attn_padding_mask,
+                need_weights=False,
+                attn_mask=self_attn_mask,
+                positions_bias=positions_bias,
+            )
 
-        # The below operations may look scary, but we will do our best to summarize their use
-
-        # Process the dropout after self-attention is calcualted and then make the skip connection
+        # Process the dropout after self-attention is calculated and then make the skip connection
         # by adding residual to x
         x = F.dropout(x, p=self.dropout, training=self.training)
         x = residual + x
@@ -144,35 +166,16 @@ class SentenceEncoderLayer(nn.Module):
         # Try the maybe_layer_norm function again to potentially normalize after self-attention
         x = self.maybe_layer_norm(self.self_attn_layer_norm, x, after=True)
 
-        # Now we must process the fully connected layer after self-attention. Similarly, there is
-        # also a LayerNorm that must be calculated before or after (and is determined by the
-        # normalize_before arg)
-
-        # Save the residual for the skip connection after FC layer
+        # Now we must process the fully connected layer after self-attention
         residual = x
-
-        # Process the layer norm
         x = self.maybe_layer_norm(self.final_layer_norm, x, before=True)
-
-        # Process the first layer of the feed-forward network which expands the embedding from
-        # embedding_dim to ffn_embedding_dim (Linear + activation)
+        
+        # Process feed-forward network
         x = self.activation_fn(self.fc1(x))
-
-        # Process the dropout once again
         x = F.dropout(x, p=self.activation_dropout, training=self.training)
-
-        # Calculate the second portion of the feed-forward net, converting the hidden size back to
-        # our embedding size of embedding_dim. This time we DO NOT add the activation function so
-        # as to not kill the neurons
         x = self.fc2(x)
-
-        # Process the droput again
         x = F.dropout(x, p=self.dropout, training=self.training)
-
-        # Calculate the skip connection with the residual and the output of the feed-forward net
         x = x + residual
-
-        # Finally, process the LayerNorm once again
         x = self.maybe_layer_norm(self.final_layer_norm, x, after=True)
 
         return x, attn
