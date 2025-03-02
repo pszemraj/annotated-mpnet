@@ -35,6 +35,8 @@ from annotated_mpnet.modeling import MPNetForPretraining
 from annotated_mpnet.scheduler import PolynomialDecayLRScheduler
 from annotated_mpnet.tracking import AverageMeter
 
+import torch._dynamo
+torch._dynamo.config.suppress_errors = True
 
 def accuracy(output: torch.Tensor, target: torch.Tensor) -> int:
     """

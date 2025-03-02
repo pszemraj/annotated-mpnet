@@ -78,7 +78,7 @@ class FlexTwoStreamAttention(nn.Module):
         Forward pass for FlexTwoStreamAttention.
         
         Args:
-            query: Tensor of shape [seq_len, batch_size, embedding_dim]
+            query: Tensor of shape [seq_len, batch_size, embedding_dim] or tuple of (c, q)
             key: Tensor of shape [seq_len, batch_size, embedding_dim]
             value: Tensor of shape [seq_len, batch_size, embedding_dim]
             key_padding_mask: Mask for padding tokens
@@ -87,7 +87,7 @@ class FlexTwoStreamAttention(nn.Module):
             need_weights: Whether to return attention weights
             
         Returns:
-            output: Tensor of shape [seq_len, batch_size, embedding_dim]
+            output: Tuple of (c_out, q_out) where each is [seq_len, batch_size, embedding_dim]
             attn_weights: Optional attention weights if need_weights is True
         """
         # For two-stream attention, query is actually a tuple of [c, q]
@@ -105,10 +105,15 @@ class FlexTwoStreamAttention(nn.Module):
         q_proj = self.q_proj(q)
         
         # Reshape for multi-head attention
+        # We keep track of the original sequence lengths before transposes
+        c_len = c_proj.size(0)
+        q_len = q_proj.size(0)
+        
+        # Reshape to [batch_size * num_heads, seq_len, head_dim]
         k = k.view(tgt_len, bsz * self.num_heads, self.head_dim).transpose(0, 1)
         v = v.view(tgt_len, bsz * self.num_heads, self.head_dim).transpose(0, 1)
-        c_proj = c_proj.view(-1, bsz * self.num_heads, self.head_dim).transpose(0, 1)
-        q_proj = q_proj.view(-1, bsz * self.num_heads, self.head_dim).transpose(0, 1)
+        c_proj = c_proj.view(c_len, bsz * self.num_heads, self.head_dim).transpose(0, 1)
+        q_proj = q_proj.view(q_len, bsz * self.num_heads, self.head_dim).transpose(0, 1)
         
         # Scale queries
         c_proj = c_proj * self.scaling
@@ -165,6 +170,17 @@ class FlexTwoStreamAttention(nn.Module):
                 return score + bias_value
             return score
         
+        # Fix tensor dimensions for FlexAttention: [batch, heads, seq_len, head_dim]
+        # Currently: [batch*heads, seq_len, head_dim]
+        seq_len_q = query.size(1)
+        seq_len_k = key.size(1)
+        seq_len_v = value.size(1)
+        
+        # Reshape to correct dimensions: [batch, heads, seq_len, head_dim]
+        query = query.view(batch_size, self.num_heads, seq_len_q, self.head_dim)
+        key = key.view(batch_size, self.num_heads, seq_len_k, self.head_dim)
+        value = value.view(batch_size, self.num_heads, seq_len_v, self.head_dim)
+        
         # Handle sliding window attention if enabled
         if self.use_sliding_window:
             def sliding_window_mask(b, h, q_idx, kv_idx):
@@ -174,35 +190,34 @@ class FlexTwoStreamAttention(nn.Module):
                 return causal_mask & window_mask
             
             # Create block mask for sliding window attention
-            seq_len = query.size(1)
             block_mask = create_block_mask(
                 sliding_window_mask, 
                 batch_size, 
                 self.num_heads, 
-                seq_len, 
-                seq_len
+                seq_len_q, 
+                seq_len_k
             )
             
             # Apply FlexAttention with sliding window mask
             attn_output = flex_attention(
-                query.transpose(0, 1),  # [batch_size * num_heads, seq_len, head_dim]
-                key.transpose(0, 1),    # [batch_size * num_heads, seq_len, head_dim]
-                value.transpose(0, 1),  # [batch_size * num_heads, seq_len, head_dim]
+                query,  # [batch, heads, seq_len, head_dim]
+                key,    # [batch, heads, seq_len, head_dim]
+                value,  # [batch, heads, seq_len, head_dim]
                 score_mod=score_mod_with_bias,
                 block_mask=block_mask,
             )
         else:
             # Apply standard FlexAttention with content mask
             attn_output = flex_attention(
-                query.transpose(0, 1),  # [batch_size * num_heads, seq_len, head_dim]
-                key.transpose(0, 1),    # [batch_size * num_heads, seq_len, head_dim]
-                value.transpose(0, 1),  # [batch_size * num_heads, seq_len, head_dim]
+                query,  # [batch, heads, seq_len, head_dim]
+                key,    # [batch, heads, seq_len, head_dim]
+                value,  # [batch, heads, seq_len, head_dim]
                 score_mod=score_mod_with_bias,
             )
         
-        # Reshape output
-        attn_output = attn_output.transpose(0, 1).contiguous()
-        attn_output = attn_output.view(attn_output.size(0), batch_size, self.embed_dim)
+        # Reshape output back: [seq_len, batch, embed_dim]
+        attn_output = attn_output.permute(2, 0, 1, 3).contiguous()
+        attn_output = attn_output.view(seq_len_q, batch_size, self.embed_dim)
         
         # Apply output projection
         attn_output = self.out_proj(attn_output)

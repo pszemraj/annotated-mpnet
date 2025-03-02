@@ -136,7 +136,7 @@ class MPNetForPretraining(nn.Module):
         # Process through layers with appropriate attention mechanism
         if getattr(self.args, 'use_flex_attention', False):
             # Import the factory function to get the appropriate two_stream_self_attention
-            from annotated_mpnet.transformer_modules.flex_attention import  two_stream_self_attention_factory
+            from annotated_mpnet.transformer_modules.flex_attention import two_stream_self_attention_factory
             
             # Get the FlexAttention implementation
             flex_two_stream_attention = two_stream_self_attention_factory(
@@ -144,15 +144,53 @@ class MPNetForPretraining(nn.Module):
                 sliding_window_size=getattr(self.args, 'sliding_window_size', None)
             )
             
+            # Create a wrapper function that integrates the FlexAttention implementation
+            def encode_flex_two_stream_attention_wrapper(layer, c, q, content_mask, query_mask, 
+                                                         content_position_bias, query_position_bias):
+                # First apply the standard layer operations (layer norm, etc.)
+                residual_c = c
+                residual_q = q
+                
+                # Apply layer norm before attention if specified
+                c = layer.maybe_layer_norm(layer.self_attn_layer_norm, c, before=True)
+                q = layer.maybe_layer_norm(layer.self_attn_layer_norm, q, before=True)
+                
+                # Apply the FlexAttention implementation
+                c, q = flex_two_stream_attention(
+                    layer,
+                    [c, q],
+                    key=c,
+                    value=c,
+                    query_mask=query_mask,
+                    content_mask=content_mask,
+                    query_position_bias=query_position_bias,
+                    content_position_bias=content_position_bias,
+                )
+                
+                # Process skip connection and feed-forward network - similar to encode_two_stream_attention
+                def skip_norm_ff_fn(x, residual):
+                    x = F.dropout(x, p=layer.dropout, training=layer.training)
+                    x = x + residual
+                    x = layer.maybe_layer_norm(layer.self_attn_layer_norm, x, after=True)
+                    residual = x
+                    x = layer.maybe_layer_norm(layer.final_layer_norm, x, before=True)
+                    x = layer.activation_fn(layer.fc1(x))
+                    x = F.dropout(x, p=layer.activation_dropout, training=layer.training)
+                    x = layer.fc2(x)
+                    x = F.dropout(x, p=layer.dropout, training=layer.training)
+                    x = x + residual
+                    x = layer.maybe_layer_norm(layer.final_layer_norm, x, after=True)
+                    return x
+                
+                c = skip_norm_ff_fn(c, residual_c)
+                q = skip_norm_ff_fn(q, residual_q)
+                
+                return c, q
+            
             # Process through layers with FlexAttention
             for i, layer in enumerate(self.sentence_encoder.layers):
-                # Override the standard two_stream_self_attention with FlexAttention version
-                # This is a bit of a hack but allows us to maintain the same interface
-                original_two_stream = layer.two_stream_self_attention
-                layer.two_stream_self_attention = flex_two_stream_attention
-                
-                # Process the layer
-                c, q = encode_two_stream_attention(
+                # Use our wrapper function
+                c, q = encode_flex_two_stream_attention_wrapper(
                     layer,
                     c,
                     q,
@@ -161,9 +199,6 @@ class MPNetForPretraining(nn.Module):
                     content_position_bias,
                     query_position_bias,
                 )
-                
-                # Restore original method to avoid memory leaks
-                layer.two_stream_self_attention = original_two_stream
         else:
             # Use standard attention
             for i, layer in enumerate(self.sentence_encoder.layers):
