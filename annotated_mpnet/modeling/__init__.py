@@ -1,1 +1,2 @@
 from .mpnet_for_pretraining import MPNetForPretraining
+from .mpnet_flex_for_pretraining import MPNetFlexForPretraining

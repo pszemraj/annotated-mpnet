@@ -35,6 +35,21 @@ pip install -e .
 
 Pretraining is as simple as calling the pretraining entrypoint, which was just installed in the previous step. You can get a rundown of exactly which arguments are provided by typing `pretrain-mpnet -h`, but example commands are shown below.
 
+### FlexAttention Support
+
+This implementation now supports FlexAttention with sliding window attention, which can significantly improve performance and reduce memory usage when training with long sequences. To use this feature, use the `pretrain-mpnet-flex` command instead:
+
+```bash
+pretrain-mpnet-flex \
+--dataset-name HuggingFaceFW/fineweb-edu \
+--sliding-window-size 128 \
+--total-updates 10000 --warmup-updates 1000 \
+--batch-size 4 --update-freq 4 --lr 0.0002 \
+-save_steps 200 -log_dir checkpoints/experiments
+```
+
+See `flex_attention_usage.md` for more details on using FlexAttention with MPNet.
+
 ### HuggingFace dataset
 
 ```bash
@@ -67,3 +82,6 @@ convert-to-hf \
 --mpnet-checkpoint-path ./checkpoints/best_checkpoint.pt \
 --hf-model-folder-path ./my_cool_hf_model/
 ```
+
+
+

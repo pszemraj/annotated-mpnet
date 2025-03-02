@@ -82,6 +82,7 @@ setup(
     entry_points={
         "console_scripts": [
             "pretrain-mpnet = cli_tools.pretrain_mpnet:cli_main",
+            "pretrain-mpnet-flex = cli_tools.pretrain_mpnet_flex:cli_main",
             "convert-to-hf = cli_tools.convert_pretrained_mpnet_to_hf_model:cli_main",
         ]
     },

@@ -1,5 +1,7 @@
+#!/usr/bin/env python3
 """
-Pretraining script for MPNet
+Pretraining script for MPNet with FlexAttention support
+This extends the original pretraining script with sliding window attention support.
 """
 
 import logging
@@ -31,7 +33,7 @@ from annotated_mpnet.data import (
     MPNetDataset,
     RandomSamplerWithSeed,
 )
-from annotated_mpnet.modeling import MPNetForPretraining
+from annotated_mpnet.modeling import MPNetFlexForPretraining
 from annotated_mpnet.scheduler import PolynomialDecayLRScheduler
 from annotated_mpnet.tracking import AverageMeter
 
@@ -39,11 +41,11 @@ from annotated_mpnet.tracking import AverageMeter
 def accuracy(output: torch.Tensor, target: torch.Tensor) -> int:
     """
     Helper function for comparing output logits to labels in target
-
+    
     Args:
         output: the output logits of the model
         target: the labels generated from the collation process
-
+        
     Returns:
         An accuracy prediction
     """
@@ -56,13 +58,13 @@ def accuracy(output: torch.Tensor, target: torch.Tensor) -> int:
 def write_to_tensorboard(writer: SummaryWriter, logging_dict: dict, step: int) -> None:
     """
     This function takes in a logging dict and sends it to tensorboard
-
+    
     Args:
         writer: the SummaryWriter from tensorboard that writes the stats
         logging_dict: the dictionary containing the stats
         step: the current step
     """
-
+    
     for stat_name, stat in logging_dict.items():
         writer.add_scalar(stat_name, stat, step)
 
@@ -102,7 +104,7 @@ def check_and_activate_tf32():
 
 def main(args) -> None:
     """
-    The main function handling the training loop for MPNet pretraining
+    The main function handling the training loop for MPNet pretraining with FlexAttention
     """
     # Start by updating the LOGGER to run at debug level if the debug arg is true
     if args.debug:
@@ -117,9 +119,13 @@ def main(args) -> None:
 
     check_and_activate_tf32()  # Check if the GPU supports NVIDIA Ampere or later and enable TF32
 
-    # First test to see if max_positions and max_tokens are set differently. If they are, raise a
-    # warning to the user to let them know this is very experimental and will most likely lead to
-    # unexpect behavior
+    # Check if sliding window size is set
+    if args.sliding_window_size is not None:
+        LOGGER.info(f"Using sliding window attention with window size: {args.sliding_window_size}")
+    else:
+        LOGGER.info("Using standard attention (no sliding window)")
+
+    # First test to see if max_positions and max_tokens are set differently
     if args.max_positions is not None:
         if args.max_positions != args.max_tokens:
             LOGGER.warning(
@@ -129,8 +135,7 @@ def main(args) -> None:
                 "DOING!!!"
             )
 
-    # If max_positions is unset (as expected) we set max_positions to the same number as max_tokens
-    # here
+    # If max_positions is unset, set max_positions to the same number as max_tokens
     if args.max_positions is None:
         args.max_positions = args.max_tokens
 
@@ -146,7 +151,7 @@ def main(args) -> None:
         }
 
     # Next, we instantiate the model and the data collator
-    model = MPNetForPretraining(args, tokenizer)
+    model = MPNetFlexForPretraining(args, tokenizer)
     mplm = DataCollatorForMaskedPermutedLanguageModeling(tokenizer=tokenizer)
 
     # Load the model up to the device
@@ -162,7 +167,7 @@ def main(args) -> None:
         LOGGER.info(f"Using HuggingFace dataset: {args.dataset_name}")
 
         try:
-            # Load the dataset ONCE in streaming mode
+            # Load the dataset in streaming mode
             LOGGER.info(f"Loading streaming dataset: {args.dataset_name}")
             train_stream = load_dataset(
                 args.dataset_name, split="train", streaming=True
@@ -175,9 +180,9 @@ def main(args) -> None:
                     >= args.min_text_length
                 )
 
-            # First, create validation and test sets by taking samples
+            # Create validation and test sets by taking samples
             LOGGER.info(
-                f"Creating validation and test splits from streaming data (each with {args.eval_samples} samples)"
+                f"Creating validation and test splits (each with {args.eval_samples} samples)"
             )
 
             # Take samples for validation
@@ -248,7 +253,7 @@ def main(args) -> None:
         LOGGER.info("Using file-based datasets")
         train_streaming = False
 
-        # Load validation and test datasets from files (original code)
+        # Load validation and test datasets from files
         valid_dataset = MPNetDataset(
             tokenizer=tokenizer, file_path=args.valid_file, block_size=args.max_tokens
         )
@@ -270,18 +275,15 @@ def main(args) -> None:
             if os.path.isfile(os.path.join(args.train_dir, f))
         ]
 
-    # Finally, let's make sure the checkpoint directory exists. If not, let's create it
+    # Create checkpoint directory if it doesn't exist
     if not os.path.exists(args.checkpoint_dir):
         os.makedirs(args.checkpoint_dir)
 
-    # Before defining the scheduler and optimizer, let's make sure warmup_updates is set. If it
-    # isn't, we need to set it to 10% the amount of total_updates
+    # Set warmup_updates if not specified (10% of total_updates)
     if args.warmup_updates is None:
         args.warmup_updates = round(0.1 * args.total_updates)
 
-    # Let's define an optimizer with our Polynomial decay scheduler on top of it
-    # We set the optimizer with an arbitrary learning rate since it will be updated by the scheduler
-    # anyway
+    # Define optimizer and scheduler
     optimizer = torch.optim.AdamW(
         filter(lambda p: p.requires_grad, model.parameters()),
         betas=(args.beta1, args.beta2),
@@ -292,11 +294,11 @@ def main(args) -> None:
     )
     scheduler = PolynomialDecayLRScheduler(args, optimizer)
 
-    # We create a step counter and an epoch counter here
+    # Initialize counters
     steps = 0
     epoch = 0
 
-    # Create meters for all the relevant logging statistics using the Meters module
+    # Create meters for tracking statistics
     meters = {
         "train_loss": AverageMeter(),
         "train_acc": AverageMeter(),
@@ -307,26 +309,26 @@ def main(args) -> None:
         "token_throughput": AverageMeter(),
     }
 
-    # Additionally, we create a best loss counter that will be set arbitrarily high
+    # Initialize best loss with a high value
     best_loss = 10e6
 
+    # Main training loop
     while steps <= args.total_updates:
         # Handle either streaming or file-based training
         if train_streaming:
             LOGGER.info(f"Starting streaming training epoch {epoch}")
 
-            # Create a single dataloader from our stream - no need to reload the dataset
-            # Just shuffle with a different seed each epoch
+            # Create dataloader from stream
             current_stream = train_stream.shuffle(
                 buffer_size=args.buffer_size, seed=args.seed + epoch
             )
 
             train_dataloader = HFStreamingDataset(
                 tokenizer=tokenizer,
-                dataset_stream=current_stream,  # Use the already loaded stream
+                dataset_stream=current_stream,
                 block_size=args.max_tokens,
                 buffer_size=args.buffer_size,
-                seed=args.seed + epoch,  # Change seed each epoch for better variety
+                seed=args.seed + epoch,
                 text_field=args.text_field,
             )
 
@@ -337,11 +339,11 @@ def main(args) -> None:
                 num_workers=args.num_workers if hasattr(args, "num_workers") else 4,
             )
         else:
-            # File-based datasets: Use a different file for each epoch (original code)
+            # File-based datasets
             current_train_file = train_files[epoch % len(train_files)]
             LOGGER.info(f"Training epoch {epoch} using file: {current_train_file}")
 
-            # Load current file as dataset and set up dataloader
+            # Load current file as dataset
             epoch_train_dataset = MPNetDataset(
                 tokenizer=tokenizer,
                 file_path=current_train_file,
@@ -360,37 +362,33 @@ def main(args) -> None:
                 batch_size=args.batch_size,
             )
 
-        # Zero out the gradients
+        # Zero out gradients
         scheduler.optimizer.zero_grad()
 
-        # Set the model in training mode to activate dropouts etc.
+        # Set model to training mode
         model.train()
 
-        # Create an accumulation loss and accumulation accuracy counter
+        # Initialize accumulation counters
         accumulation_loss = 0
         accumulation_acc = 0
         accumulation_tokens = 0
-
-        # Create a counter that will keep track of total number of samples passed during a gradient
-        # accumulation
         accumulation_sample_sizes = 0
 
-        # Always reset the meters before beginning the next training epoch (except token throughput)
+        # Reset meters for new epoch
         for stat in ["train_loss", "train_acc", "valid_loss", "valid_acc"]:
             meters[stat].reset()
 
-        # Now we do our training steps
-        # We enumerate the dataloader because we need to keep track of gradient accumulation steps
+        # Training steps
         for i, batch in track(
             enumerate(train_dataloader),
             description=f"Training epoch {epoch}",
             total=len(train_dataloader) if not train_streaming else None,
         ):
-            # Always check to make sure we haven't overstepped the total number of updates
+            # Check if we've reached total updates
             if steps > args.total_updates:
                 break
 
-            # Next check to see if we've hit a step interval and save that to the checkpoint dir
+            # Save checkpoint at specified intervals
             if (
                 (steps + 1) % args.checkpoint_interval == 0
                 and args.checkpoint_interval > 0
@@ -401,29 +399,28 @@ def main(args) -> None:
                     os.path.join(args.checkpoint_dir, f"checkpoint{steps + 1}.pt"),
                 )
 
-            # Load the tensors onto the appropriate device
+            # Move batch to device
             device_batch = {
                 data_type: (t.to(device) if isinstance(t, torch.Tensor) else t)
                 for data_type, t in batch.items()
                 if data_type != "attention_mask"
             }
 
-            # Extract the targets since we'll use them a bunch below
+            # Extract targets
             targets = device_batch["targets"]
 
-            # Get the "sample_size" of the current batch, i.e., how many total targets there are to
-            # be predicted. This will help us normalize the accumulated loss below
+            # Update accumulation counters
             accumulation_sample_sizes += targets.numel()
-
-            # Update the count of total tokens processed during accumulation steps
             accumulation_tokens += device_batch["ntokens"]
 
-            # Now let's process these through the model with autocast for mixed precision using bf16
+            # Forward pass with autocast for mixed precision
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                outs = model(**device_batch)
+                outs = model(
+                    **device_batch, 
+                    use_flex_attention=True  # Enable flex attention with sliding window
+                )
 
-            # Process these out logits through cross entropy loss
-            # Note: we do this outside of autocast to maintain precision for the loss calculation
+            # Compute loss
             loss = F.nll_loss(
                 F.log_softmax(
                     outs.view(-1, outs.size(-1)), dim=-1, dtype=torch.float32
@@ -436,30 +433,22 @@ def main(args) -> None:
             # Calculate accuracy
             acc = accuracy(outs, targets)
 
-            # Keep track of the accumulated accuracy to be divided by the total number of
-            # accumulation steps before being written to tensorboard
+            # Update accumulation counters
             accumulation_acc += acc
-
-            # Keep track of accumulated loss, to be divided by the total number of accumulation
-            # steps later before being written to tensorboard
             accumulation_loss += loss.item()
 
-            # Do the backward processing (but we won't step until we reach the gradient accumulation
-            # number)
+            # Backward pass
             loss.backward()
 
             # Check if we've reached a gradient accumulation step
             if (i + 1) % args.update_freq == 0:
-                # Before stepping the optimizer, we need to normalize the gradients by the
-                # accumulated sample sizes as described above
+                # Normalize gradients
                 if accumulation_sample_sizes > 0:
                     for p in model.parameters():
                         if p.grad is not None:
                             p.grad.data.mul_(1 / accumulation_sample_sizes)
 
-                # We should also do a grad clip norm as well if it's been specified
-                # If it hasn't been specified, we will calculate the gradient norm the old fashioned
-                # way so that it can be logged
+                # Apply gradient clipping if specified
                 if args.clip_grad_norm > 0.0:
                     gnorm = torch.nn.utils.clip_grad_norm_(
                         model.parameters(), args.clip_grad_norm
@@ -473,49 +462,28 @@ def main(args) -> None:
                         )
                     )
 
-                # Now we step the scheduler (and return the LR so that we can store it)
+                # Step scheduler and optimizer
                 lr = scheduler.step(steps)
-
-                # Reset gradients now
                 scheduler.optimizer.zero_grad()
 
-                # Calculate the accumulation normalized metrics by normalizing over the total number
-                # of samples that have passed through each batch
+                # Calculate normalized metrics
                 normal_acc = accumulation_acc / accumulation_sample_sizes
                 normal_loss = (
                     accumulation_loss / accumulation_sample_sizes / math.log(2)
                 )
 
-                # Log some debugging values here
+                # Debug output
                 LOGGER.debug("Accumulated batch information is below:")
                 LOGGER.debug(accumulation_sample_sizes)
                 LOGGER.debug(accumulation_loss)
                 LOGGER.debug(accumulation_tokens)
 
-                # Update the meters below
+                # Update meters
                 meters["train_acc"].update(normal_acc, accumulation_sample_sizes)
                 meters["train_loss"].update(normal_loss, accumulation_sample_sizes)
                 meters["token_throughput"].update(accumulation_tokens)
 
-                # Create a logging dict that will be passed to a tensorboard writer
-                #
-                # Quick rundown of the stats:
-                # acc:
-                #   model prediction accuracy, meter reset for each epoch
-                # loss:
-                #   loss output of the simulated batch (i.e. bsz times update_freq)
-                # sbal:
-                #   simulated batch averaged loss, keeping a running average of loss by simulated
-                #   batch over the epoch (i.e. the meter is reset at the start of each epoch)
-                # lr:
-                #   keeping track of the learning rate
-                # gnorm:
-                #   keeping track of the norm of the gradient vector for the batch
-                # ttp:
-                #   total tokens processed, keeping a running count of the amount of training
-                #   tokens the model has seen
-                # tpb:
-                #   tokens per batch, averaging out the tokens processed per batch
+                # Create logging dict for tensorboard
                 logging_dict = {
                     "acc": meters["train_acc"].avg,
                     "loss": normal_loss,
@@ -526,46 +494,49 @@ def main(args) -> None:
                     "tpb": meters["token_throughput"].avg,
                 }
 
-                # Now write to tensorboard
+                # Log to tensorboard or console
                 if args.tensorboard_log_dir is not None:
                     write_to_tensorboard(writers["train"], logging_dict, steps)
                 else:
                     LOGGER.info(logging_dict)
 
-                # Reset accumulation counters here for the next set of accumulation steps
+                # Reset accumulation counters
                 accumulation_acc = 0
                 accumulation_loss = 0
                 accumulation_sample_sizes = 0
                 accumulation_tokens = 0
 
-                # Increment the step counter
+                # Increment step counter
                 steps += 1
 
-        # Set the model for validation
+        # Set model to evaluation mode for validation
         model.eval()
 
-        # Once the training loop is done, we begin the validation loop
+        # Validation loop
         for i, batch in track(
             enumerate(valid_dataloader),
             description=f"Validation epoch {epoch}",
             total=len(valid_dataloader),
         ):
-            # Load the tensors onto the appropriate device
+            # Move batch to device
             device_batch = {
                 data_type: (t.to(device) if isinstance(t, torch.Tensor) else t)
                 for data_type, t in batch.items()
                 if data_type != "attention_mask"
             }
 
-            # Extract the targets since we'll use them a bunch below
+            # Extract targets
             targets = device_batch["targets"]
 
-            # Now we move to no_grad since we don't have to calculate weights
+            # Forward pass without gradient computation
             with torch.no_grad():
                 with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                    outs = model(**device_batch)
+                    outs = model(
+                        **device_batch,
+                        use_flex_attention=True  # Enable flex attention with sliding window
+                    )
 
-                # Calculate loss here (outside autocast for precision)
+                # Compute loss
                 loss = F.nll_loss(
                     F.log_softmax(
                         outs.view(-1, outs.size(-1)), dim=-1, dtype=torch.float32
@@ -577,47 +548,43 @@ def main(args) -> None:
 
                 normal_loss = loss.item() / targets.numel() / math.log(2)
 
-                # Calculate accuracy here
+                # Calculate accuracy
                 normal_acc = accuracy(outs, targets) / targets.view(-1).size(0)
 
-                # Update the meters appropriately
+                # Update meters
                 meters["valid_loss"].update(normal_loss, targets.numel())
                 meters["valid_acc"].update(normal_acc, targets.numel())
 
-        # Now we calculate post validation stats
+        # Calculate validation metrics
         final_valid_loss = meters["valid_loss"].avg
         final_valid_accuracy = meters["valid_acc"].avg
 
-        # Now let's save a best_val_checkpoint model
+        # Save best model checkpoint
         if final_valid_loss < best_loss:
-            # Reset the best loss to the new best loss for this epoch
             best_loss = final_valid_loss
-
-            # Now let's go ahead and save this in the checkpoints directory
             torch.save(
                 {"args": args, "model_states": model.state_dict()},
                 os.path.join(args.checkpoint_dir, "best_checkpoint.pt"),
             )
 
-        # Load these into a logging dict and pass it on to be written in tensorboard
+        # Create logging dict for validation results
         logging_dict = {
             "loss": final_valid_loss,
             "acc": final_valid_accuracy,
             "best_loss": best_loss,
         }
 
-        # Log to tensorboard or print out the dict
+        # Log validation results
         if args.tensorboard_log_dir:
             write_to_tensorboard(writers["valid"], logging_dict, steps)
         else:
             LOGGER.info("Validation stats:")
             LOGGER.info(logging_dict)
 
-        # Now, before looping back, we increment the epoch counter and we delete the train data
-        # loader and garbage collect it
+        # Increment epoch counter
         epoch += 1
 
-        # Clean up datasets if using file-based approach
+        # Clean up datasets
         if not train_streaming:
             del train_dataloader
             del epoch_train_dataset
@@ -626,44 +593,41 @@ def main(args) -> None:
             del train_dataloader
             gc.collect()
 
-    # If we've reached the end of the training cycle, i.e., hit total number of update steps, we can
-    # use the test dataloader we built above to get a final test metric using the best checkpoint
-
-    # Begin by loading the model states and args from the best checkpoint
+    # Testing phase with best checkpoint
+    LOGGER.info("Running final evaluation on test set with best checkpoint")
+    
+    # Load best checkpoint
     dicts = torch.load(os.path.join(args.checkpoint_dir, "best_checkpoint.pt"))
-
-    # Load an empty shell of the model architecture using those args
-    test_model = MPNetForPretraining(dicts["args"], tokenizer)
-
-    # Now apply the model states to this newly instantiated model
+    test_model = MPNetFlexForPretraining(dicts["args"], tokenizer)
     test_model.load_state_dict(dicts["model_states"])
-
-    # Finally make sure the model is in eval mode and is sent to the proper device
     test_model.to(device)
     test_model.eval()
 
-    # Now we iterate through the test dataloader
+    # Test loop
     for i, batch in track(
         enumerate(test_dataloader),
-        description="Test epoch",
+        description="Test evaluation",
         total=len(test_dataloader),
     ):
-        # Load the tensors onto the appropriate device
+        # Move batch to device
         device_batch = {
             data_type: (t.to(device) if isinstance(t, torch.Tensor) else t)
             for data_type, t in batch.items()
             if data_type != "attention_mask"
         }
 
-        # Extract the targets since we'll use them a bunch below
+        # Extract targets
         targets = device_batch["targets"]
 
-        # Now we move to no_grad since we don't have to calculate weights
+        # Forward pass without gradient computation
         with torch.no_grad():
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                outs = test_model(**device_batch)
+                outs = test_model(
+                    **device_batch,
+                    use_flex_attention=True  # Enable flex attention with sliding window
+                )
 
-            # Calculate loss here (outside autocast for precision)
+            # Compute loss
             loss = F.nll_loss(
                 F.log_softmax(
                     outs.view(-1, outs.size(-1)), dim=-1, dtype=torch.float32
@@ -675,24 +639,24 @@ def main(args) -> None:
 
             normal_loss = loss.item() / targets.numel() / math.log(2)
 
-            # Calculate accuracy here
+            # Calculate accuracy
             normal_acc = accuracy(outs, targets) / targets.view(-1).size(0)
 
-            # Update the meters appropriately
+            # Update meters
             meters["test_loss"].update(normal_loss, targets.numel())
             meters["test_acc"].update(normal_acc, targets.numel())
 
-    # Now we calculate post test stats
+    # Calculate test metrics
     final_test_loss = meters["test_loss"].avg
     final_test_accuracy = meters["test_acc"].avg
 
-    # Load these into a logging dict and pass it on to be written in tensorboard
+    # Create logging dict for test results
     logging_dict = {
         "loss": final_test_loss,
         "acc": final_test_accuracy,
     }
 
-    # Log to tensorboard or print out the dict
+    # Log test results
     if args.tensorboard_log_dir:
         write_to_tensorboard(writers["test"], logging_dict, steps)
     else:
@@ -707,270 +671,272 @@ def main(args) -> None:
 
 def cli_main():
     """
-    Wrapper function so we can create a CLI entrypoint for this script
+    Wrapper function for the command-line interface
     """
     parser = argparse.ArgumentParser(
-        description="Pretrain MPNet by specifying encoder args and training filepath",
+        description="Pretrain MPNet with FlexAttention",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
+    
+    # Model architecture arguments
     parser.add_argument(
         "--encoder-layers",
-        help="The number of encoder layers within the encoder block of MPNet. Defaults to 12, but "
-        "can be increased for larger input sequences",
+        help="The number of encoder layers",
         default=12,
         type=int,
     )
     parser.add_argument(
         "--encoder-embed-dim",
-        help="The dimension of the embedding layer inside each encoder block. Should generally "
-        "always be 768, but some folks like OpenAI have seen good performance with large embeds",
+        help="The dimension of the embedding layer",
         default=768,
         type=int,
     )
     parser.add_argument(
         "--encoder-ffn-dim",
-        help="The dimension of the feed-forward hidden layer after each self-attention "
-        "calculation. Defaults to 3072, but this can be any large number",
+        help="The dimension of the feed-forward hidden layer",
         default=3072,
         type=int,
     )
     parser.add_argument(
         "--encoder-attention-heads",
-        help="The number of attention heads in each layer. Defaults to 12 which is what's used in"
-        "bert-base and mpnet-base, but this can lend itself to some experimentation",
+        help="The number of attention heads in each layer",
         default=12,
         type=int,
     )
+    
+    # FlexAttention specific arguments
+    parser.add_argument(
+        "--sliding-window-size",
+        help="Size of the sliding window for attention. None means full attention",
+        default=None,
+        type=int,
+    )
+    
+    # Dropout arguments
     parser.add_argument(
         "--dropout",
-        help="The standard dropout probability for the full encoder model. Defaults to 0.1",
+        help="The standard dropout probability",
         default=0.1,
         type=float,
     )
     parser.add_argument(
         "--attention-dropout",
-        help="The standard dropout probability for the attention layers of the encoder model. "
-        "Defaults to 0.1",
+        help="The dropout probability for attention layers",
         default=0.1,
         type=float,
     )
     parser.add_argument(
         "--activation-dropout",
-        help="The dropout probability after the activation function in the hidden layer of the "
-        "feed-forward network after the attention calculation. Defaults to 0.1",
+        help="The dropout probability after activation function",
         default=0.1,
         type=float,
     )
+    
+    # Position and token arguments
     parser.add_argument(
         "--max-positions",
-        help="Max number of positional embeddings for the model. This should USUALLY always be the "
-        "same number as the max sequence length (--max-tokens), but theoretically they could be "
-        "different. However, this is not advised, so you should only set one of these",
+        help="Max number of positional embeddings",
         type=int,
     )
     parser.add_argument(
         "--max-tokens",
-        help="Max number of tokens for input to the model. This should USUALLY always be the "
-        "same number as the max positions (--max-positions), but theoretically they could be "
-        "different. However, this is not advised, so you should only set one of these. Max tokens "
-        "will default to 512",
+        help="Max number of tokens for input",
         default=512,
         type=int,
     )
+    
+    # Activation and normalization arguments
     parser.add_argument(
         "--activation-fn",
-        help="The activation function used throughout the model. This will default to GELU, since "
-        "most research on language models has shown optimal performance with GELU",
+        help="The activation function used throughout the model",
         default="gelu",
         type=str,
     )
     parser.add_argument(
         "--normalize-before",
-        help="This boolean determines when layer norm should be applied within each encoder layer. "
-        "Generally, we normalize after, but you can specify normalizing before here",
+        help="Whether to normalize before attention",
         action="store_true",
         default=False,
     )
+    
+    # Data source arguments
     parser.add_argument(
         "--train-dir",
-        help="The directory containing training files. This should generally be a directory since "
-        "there are usually too many train files to fit in memory.",
+        help="Directory containing training files",
         type=str,
         default=None,
     )
     parser.add_argument(
         "--valid-file",
-        help="The file containing validation data.",
+        help="File containing validation data",
         type=str,
         default=None,
     )
     parser.add_argument(
         "--test-file",
-        help="The file containing test data.",
+        help="File containing test data",
         type=str,
         default=None,
     )
     parser.add_argument(
         "--dataset-name",
-        help="The name of the HuggingFace dataset to use (e.g., 'HuggingFaceFW/fineweb-edu'). If specified, this "
-        "will override --train-dir, --valid-file, and --test-file.",
+        help="HuggingFace dataset name (overrides file-based options)",
         type=str,
-        default="gair-prox/DCLM-pro",
+        default=None,
     )
     parser.add_argument(
         "--text-field",
-        help="The field name in the dataset that contains the text to tokenize. Default is 'text'.",
+        help="Field name in dataset containing text",
         type=str,
         default="text",
     )
     parser.add_argument(
         "--buffer-size",
-        help="Size of the buffer for streaming datasets. Larger buffers give better randomization but "
-        "use more memory.",
+        help="Size of buffer for streaming datasets",
         default=10000,
         type=int,
     )
     parser.add_argument(
         "--eval-samples",
-        help="Number of samples to use for validation and test sets if they are not available in the "
-        "dataset.",
+        help="Number of samples for validation and test sets",
         default=500,
         type=int,
     )
     parser.add_argument(
         "--min-text-length",
-        help="Minimum text length to consider for examples from the dataset.",
+        help="Minimum text length to consider",
         default=64,
         type=int,
     )
+    
+    # Training control arguments
     parser.add_argument(
         "--total-updates",
-        help="The maximum number of updates to do when training. Since we probably won't ever get "
-        "through all the data, we need to set this",
+        help="Maximum number of updates for training",
         default=10000,
         type=int,
     )
     parser.add_argument(
         "--warmup-updates",
-        help="The number of warmup updates to increase the learning rate to --peak-lr before "
-        "decreasing it again. Will default to 0.1 of --total-updates if left unset",
+        help="Number of warmup updates",
         type=int,
     )
     parser.add_argument(
         "--batch-size",
-        help="The batch size to process at once. You can also use the --update-freq argument to do "
-        "gradient accumulation if larger batches don't fit on the device",
+        help="Batch size for processing",
         default=16,
         type=int,
     )
     parser.add_argument(
         "-gc_steps",
         "--update-freq",
-        help="The amount of batches to process before updating the weights in the model. This is "
-        "what gradient accumulation is",
+        help="Gradient accumulation steps",
         default=8,
         type=int,
     )
+    
+    # Optimizer arguments
     parser.add_argument(
         "--beta1",
-        help="The beta_1 of the Adam optimizer. Will default to 0.9",
+        help="Beta_1 of Adam optimizer",
         default=0.9,
         type=float,
     )
     parser.add_argument(
         "--beta2",
-        help="The beta_2 of the Adam optimizer. Will default to 0.98",
+        help="Beta_2 of Adam optimizer",
         default=0.98,
         type=float,
     )
     parser.add_argument(
         "--weight-decay",
-        help="The weight decay fed into the Adam optimizer. Usually always set to 0.01",
+        help="Weight decay for optimizer",
         default=0.01,
         type=float,
     )
     parser.add_argument(
         "-grad_clip",
         "--clip-grad-norm",
-        help="The value above which to clip gradients down to. Usually should be 0 for pretraining "
-        "and will be set that way by default",
+        help="Gradient clipping value",
         default=0.0,
         type=float,
     )
     parser.add_argument(
         "--lr",
-        help="The learning rate that will be hit when the warmup updates have finished",
+        help="Peak learning rate",
         default=0.0002,
         type=float,
     )
     parser.add_argument(
         "-end_lr",
         "--end-learning-rate",
-        help="The learning rate that the polynomial scheduler will approach when decreasing after "
-        "the warmup updates have wrapped up",
+        help="Final learning rate",
         default=0.0,
         type=float,
     )
     parser.add_argument(
         "--adam-eps",
-        help="The epsilon factor for the Adam optimizer that prevents divide by zero errors",
+        help="Epsilon for Adam optimizer",
         default=1e-6,
         type=float,
     )
     parser.add_argument(
         "--power",
-        help="The power of the polynomial decay of the LR scheduler",
+        help="Power of polynomial decay for scheduler",
         default=1.0,
         type=float,
     )
+    
+    # Checkpoint and logging arguments
     parser.add_argument(
         "-save_steps",
         "--checkpoint-interval",
-        help="The number of steps to be taken before saving the model",
+        help="Steps between model checkpoints",
         default=-1,
         type=int,
     )
     parser.add_argument(
         "--checkpoint-dir",
-        help="The directory where model checkpoints are saved (inlucing 'best' and 'interval')",
+        help="Directory for saving checkpoints",
         default="./checkpoints",
         type=str,
     )
     parser.add_argument(
         "-log_dir",
         "--tensorboard-log-dir",
-        help="The directory to which tensorboard logs should be written. If this is unset, we will "
-        "log stats to the terminal",
+        help="Directory for tensorboard logs",
         type=str,
     )
+    
+    # Other arguments
     parser.add_argument(
         "--debug",
-        help="Boolean that dictates whether or not to output debug logs",
+        help="Enable debug logging",
         action="store_true",
         default=False,
     )
     parser.add_argument(
         "--seed",
-        help="Set the random seed for training. Will default to 12345.",
+        help="Random seed for training",
         default=12345,
         type=int,
     )
     parser.add_argument(
         "--num-workers",
-        help="Number of worker processes for data loading.",
+        help="Number of worker processes for data loading",
         default=int(os.cpu_count() // 2),
         type=int,
     )
     parser.add_argument(
         "--compile",
-        help="Boolean that dictates whether or not to compile the model",
+        help="Whether to compile the model",
         action="store_true",
         default=False,
     )
 
     args = parser.parse_args()
 
-    # Check for validity of arguments
+    # Validate arguments
     if args.dataset_name is None and (
         args.train_dir is None or args.valid_file is None or args.test_file is None
     ):
