@@ -614,28 +614,26 @@ def make_query_and_content_mask(
                              [ 0 0 0 0 1 1 1 0 0 0 ]
                              [ 0 0 0 0 1 1 1 0 0 0 ]
     """
+    # Get the device from input_ids
+    device = input_ids.device
 
     # Define helper function to keep things organized
     def make_query_mask():
-        # Create the mask portion (i.e. ones)
-        mask = torch.triu(torch.ones(pred_size, pred_size), 0)
-
-        mask = (torch.ones(pred_size, seq_len - pred_size), 1 - mask, mask)
-
+        # Create the mask portion (i.e. ones) - ensure all tensors use the same device
+        mask = torch.triu(torch.ones(pred_size, pred_size, device=device), 0)
+        mask = (torch.ones(pred_size, seq_len - pred_size, device=device), 1 - mask, mask)
         return torch.cat(mask, dim=-1).eq(0)
 
     def make_content_mask():
         mask = [
-            torch.zeros(seq_len - pred_size, pred_size),
-            torch.tril(torch.ones(pred_size, pred_size), 0),
+            torch.zeros(seq_len - pred_size, pred_size, device=device),
+            torch.tril(torch.ones(pred_size, pred_size, device=device), 0),
         ]
 
-        mask.append(torch.zeros(pred_size, pred_size))
+        mask.append(torch.zeros(pred_size, pred_size, device=device))
         mask = torch.cat(mask, dim=0)
-        mask = (torch.ones(seq_len + pred_size, seq_len - pred_size), mask, 1 - mask)
-
+        mask = (torch.ones(seq_len + pred_size, seq_len - pred_size, device=device), mask, 1 - mask)
         return torch.cat(mask, dim=-1).eq(0)
 
-    return make_query_mask().to(input_ids.device), make_content_mask().to(
-        input_ids.device
-    )
+    # Return masks directly as they're already on the correct device
+    return make_query_mask(), make_content_mask()

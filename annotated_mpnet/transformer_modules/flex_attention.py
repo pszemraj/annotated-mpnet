@@ -327,21 +327,21 @@ def make_flex_attention_mask(
     """
     device = input_ids.device
     
-    # Create base causal masks
+    # Create base causal masks - ensure all tensors are on the same device
     def make_query_mask():
         # Create the mask portion (i.e. ones)
-        mask = torch.triu(torch.ones(pred_size, pred_size), 0)
-        mask = (torch.ones(pred_size, seq_len - pred_size), 1 - mask, mask)
+        mask = torch.triu(torch.ones(pred_size, pred_size, device=device), 0)
+        mask = (torch.ones(pred_size, seq_len - pred_size, device=device), 1 - mask, mask)
         return torch.cat(mask, dim=-1).eq(0)
 
     def make_content_mask():
         mask = [
-            torch.zeros(seq_len - pred_size, pred_size),
-            torch.tril(torch.ones(pred_size, pred_size), 0),
+            torch.zeros(seq_len - pred_size, pred_size, device=device),
+            torch.tril(torch.ones(pred_size, pred_size, device=device), 0),
         ]
-        mask.append(torch.zeros(pred_size, pred_size))
+        mask.append(torch.zeros(pred_size, pred_size, device=device))
         mask = torch.cat(mask, dim=0)
-        mask = (torch.ones(seq_len + pred_size, seq_len - pred_size), mask, 1 - mask)
+        mask = (torch.ones(seq_len + pred_size, seq_len - pred_size, device=device), mask, 1 - mask)
         return torch.cat(mask, dim=-1).eq(0)
     
     # Apply sliding window if specified
@@ -349,22 +349,36 @@ def make_flex_attention_mask(
         query_mask = make_query_mask()
         content_mask = make_content_mask()
         
-        # Add sliding window constraint to both masks
+        # Add sliding window constraint to query mask
         q_len, k_len = query_mask.size()
-        query_indices = torch.arange(q_len, device=device).unsqueeze(1)
-        key_indices = torch.arange(k_len, device=device).unsqueeze(0)
+        q_indices = torch.arange(q_len, device=device).unsqueeze(1)
+        k_indices = torch.arange(k_len, device=device).unsqueeze(0)
         
         # Apply sliding window constraint: |query_pos - key_pos| <= sliding_window_size
-        window_mask = (query_indices - key_indices).abs() > sliding_window_size
+        q_window_mask = (q_indices - k_indices).abs() > sliding_window_size
+        
+        # Add sliding window constraint to content mask
+        c_len, ck_len = content_mask.size()
+        c_indices = torch.arange(c_len, device=device).unsqueeze(1)
+        ck_indices = torch.arange(ck_len, device=device).unsqueeze(0)
+        
+        # Apply sliding window constraint: |content_pos - key_pos| <= sliding_window_size
+        c_window_mask = (c_indices - ck_indices).abs() > sliding_window_size
+        
+        # Ensure all masks are on the same device before combining
+        q_window_mask = q_window_mask.to(device)
+        c_window_mask = c_window_mask.to(device)
+        query_mask = query_mask.to(device)
+        content_mask = content_mask.to(device)
         
         # Combine with existing masks
-        query_mask = query_mask | window_mask
-        content_mask = content_mask | window_mask
+        query_mask = query_mask | q_window_mask
+        content_mask = content_mask | c_window_mask
         
-        return query_mask.to(device), content_mask.to(device)
+        return query_mask, content_mask
     
     # Return standard masks
-    return make_query_mask().to(device), make_content_mask().to(device)
+    return make_query_mask(), make_content_mask()
 
 
 def two_stream_self_attention_factory(use_flex_attention=False, sliding_window_size=None):

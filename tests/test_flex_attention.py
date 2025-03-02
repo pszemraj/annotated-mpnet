@@ -102,6 +102,34 @@ def test_mpnet_with_flex_attention():
         print(f"Error: {e}")
         return False
 
+def test_flex_attention_mask_device():
+    """Test that flex_attention_mask handles devices correctly."""
+    print("Testing device handling in make_flex_attention_mask...")
+    
+    # Create tensor on cuda device if available
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    input_ids = torch.randint(0, 30000, (2, 16), device=device)
+    
+    from annotated_mpnet.transformer_modules.flex_attention import make_flex_attention_mask
+    
+    # Test with sliding window
+    query_mask, content_mask = make_flex_attention_mask(
+        input_ids, seq_len=10, pred_size=6, sliding_window_size=3
+    )
+    
+    # Check device
+    print(f"Input device: {input_ids.device}")
+    print(f"Query mask device: {query_mask.device}")
+    print(f"Content mask device: {content_mask.device}")
+    
+    # Verify devices match
+    assert query_mask.device == input_ids.device, "Query mask device doesn't match input device"
+    assert content_mask.device == input_ids.device, "Content mask device doesn't match input device"
+    
+    print("Flex attention mask device test passed!")
+    return True
+
 if __name__ == "__main__":
     if test_flex_two_stream_attention():
-        test_mpnet_with_flex_attention()
+        if test_mpnet_with_flex_attention():
+            test_flex_attention_mask_device()
