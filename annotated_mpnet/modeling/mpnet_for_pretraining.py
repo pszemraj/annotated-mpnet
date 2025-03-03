@@ -1,10 +1,9 @@
 """
-Module containing the necessary classes for MPNet pretraining, ported directly from fairseq research
-code
+Module containing the necessary classes for MPNet pretraining with torch.compile compatibility
 """
 
 import logging
-from typing import Tuple
+from typing import Tuple, Optional, Dict, Any, Union
 
 from rich.logging import RichHandler
 
@@ -40,7 +39,7 @@ def init_final_params(module: nn.Module) -> None:
             module.bias.data.zero_()
     if isinstance(module, nn.Embedding):
         module.weight.data.normal_(mean=0.0, std=0.02)
-        if module.padding_idx:
+        if module.padding_idx is not None:
             module.weight.data[module.padding_idx].zero_()
 
 
@@ -53,8 +52,8 @@ class MPNetForPretraining(nn.Module):
         super().__init__()
     
         # Check for FlexAttention configuration
-        use_flex_attention = getattr(args, 'use_flex_attention', False)
-        sliding_window_size = getattr(args, 'sliding_window_size', None)
+        self.use_flex_attention = getattr(args, 'use_flex_attention', False)
+        self.sliding_window_size = getattr(args, 'sliding_window_size', None)
 
         # Let's define the encoder here
         self.args = args
@@ -73,8 +72,8 @@ class MPNetForPretraining(nn.Module):
             encoder_normalize_before=True,
             activation_fn=args.activation_fn,
             normalize_before=args.normalize_before,
-            use_flex_attention=use_flex_attention,
-            sliding_window_size=sliding_window_size,
+            use_flex_attention=self.use_flex_attention,
+            sliding_window_size=self.sliding_window_size,
         )
 
         # Add the language modeling head so that we can do pretraining
@@ -97,19 +96,33 @@ class MPNetForPretraining(nn.Module):
         return self.lm_head(features, masked_tokens)
 
     def forward(
-        self, input_ids, positions, pred_size, return_mlm=False, **kwargs
+        self, 
+        input_ids: torch.Tensor, 
+        positions: torch.Tensor, 
+        pred_size: int, 
+        return_mlm: bool = False, 
+        **kwargs
     ) -> torch.Tensor:
         """
         Forward function for computing MPNet with FlexAttention support
+        
+        Args:
+            input_ids: Input token IDs
+            positions: Position indices
+            pred_size: Size of prediction portion
+            return_mlm: Whether to return MLM loss
+            
+        Returns:
+            Model output or tuple of outputs if return_mlm is True
         """
         # Calculate initial embeddings
         emb = self.encode_emb(self.sentence_encoder, input_ids, positions)
 
         # Reverse the tensor for easier extraction
-        x = reverse_tensor(emb)
+        x = self._reverse_tensor(emb)
 
         # Separate out content and query streams
-        c, q = split_tensor(x, pred_size)
+        c, q = self._split_tensor(x, pred_size)
 
         # Get the content and query position biases
         content_position_bias = self.encode_relative_emb(
@@ -120,89 +133,40 @@ class MPNetForPretraining(nn.Module):
         # Get the sz of the inital src_length without the tokens to be predicted
         sz = c.size(0) - pred_size
 
-        # Get the query and content masks using the appropriate function
-        if getattr(self.args, 'use_flex_attention', False):
+        # Create query and content masks
+        if self.use_flex_attention:
+            # Import here to avoid circular imports
             from annotated_mpnet.transformer_modules.flex_attention import make_flex_attention_mask
             query_mask, content_mask = make_flex_attention_mask(
                 input_ids, 
                 sz, 
                 pred_size, 
-                getattr(self.args, 'sliding_window_size', None)
+                self.sliding_window_size
             )
         else:
             # Use the original mask creation function
-            query_mask, content_mask = make_query_and_content_mask(input_ids, sz, pred_size)
+            query_mask, content_mask = self._make_query_and_content_mask(input_ids, sz, pred_size)
 
         # Process through layers with appropriate attention mechanism
-        if getattr(self.args, 'use_flex_attention', False):
-            # Import the factory function to get the appropriate two_stream_self_attention
-            from annotated_mpnet.transformer_modules.flex_attention import two_stream_self_attention_factory
-            
-            # Get the FlexAttention implementation
-            flex_two_stream_attention = two_stream_self_attention_factory(
-                use_flex_attention=True,
-                sliding_window_size=getattr(self.args, 'sliding_window_size', None)
-            )
-            
-            # Create a wrapper function that integrates the FlexAttention implementation
-            def encode_flex_two_stream_attention_wrapper(layer, c, q, content_mask, query_mask, 
-                                                         content_position_bias, query_position_bias):
-                # First apply the standard layer operations (layer norm, etc.)
-                residual_c = c
-                residual_q = q
-                
-                # Apply layer norm before attention if specified
-                c = layer.maybe_layer_norm(layer.self_attn_layer_norm, c, before=True)
-                q = layer.maybe_layer_norm(layer.self_attn_layer_norm, q, before=True)
-                
-                # Apply the FlexAttention implementation
-                c, q = flex_two_stream_attention(
-                    layer,
-                    [c, q],
-                    key=c,
-                    value=c,
-                    query_mask=query_mask,
-                    content_mask=content_mask,
-                    query_position_bias=query_position_bias,
-                    content_position_bias=content_position_bias,
-                )
-                
-                # Process skip connection and feed-forward network - similar to encode_two_stream_attention
-                def skip_norm_ff_fn(x, residual):
-                    x = F.dropout(x, p=layer.dropout, training=layer.training)
-                    x = x + residual
-                    x = layer.maybe_layer_norm(layer.self_attn_layer_norm, x, after=True)
-                    residual = x
-                    x = layer.maybe_layer_norm(layer.final_layer_norm, x, before=True)
-                    x = layer.activation_fn(layer.fc1(x))
-                    x = F.dropout(x, p=layer.activation_dropout, training=layer.training)
-                    x = layer.fc2(x)
-                    x = F.dropout(x, p=layer.dropout, training=layer.training)
-                    x = x + residual
-                    x = layer.maybe_layer_norm(layer.final_layer_norm, x, after=True)
-                    return x
-                
-                c = skip_norm_ff_fn(c, residual_c)
-                q = skip_norm_ff_fn(q, residual_q)
-                
-                return c, q
+        if self.use_flex_attention:
+            # Import the necessary function for FlexAttention
+            from annotated_mpnet.transformer_modules.flex_attention import encode_flex_two_stream_attention
             
             # Process through layers with FlexAttention
             for i, layer in enumerate(self.sentence_encoder.layers):
-                # Use our wrapper function
-                c, q = encode_flex_two_stream_attention_wrapper(
+                c, q = encode_flex_two_stream_attention(
                     layer,
                     c,
                     q,
-                    content_mask,
-                    query_mask,
-                    content_position_bias,
-                    query_position_bias,
+                    content_mask=content_mask,
+                    query_mask=query_mask,
+                    content_position_bias=content_position_bias,
+                    query_position_bias=query_position_bias,
                 )
         else:
             # Use standard attention
             for i, layer in enumerate(self.sentence_encoder.layers):
-                c, q = encode_two_stream_attention(
+                c, q = self._encode_two_stream_attention(
                     layer,
                     c,
                     q,
@@ -216,7 +180,7 @@ class MPNetForPretraining(nn.Module):
         q = self.maybe_final_norm(self.sentence_encoder, q)
 
         # Re-reverse the tensor so we can have it back in the correct format
-        q = reverse_tensor(q)
+        q = self._reverse_tensor(q)
 
         # Project the attention features out to the vocab size for masked token classification
         x = self.output_layer(q)
@@ -224,12 +188,144 @@ class MPNetForPretraining(nn.Module):
         # If we also want MLM loss, handle the additional output
         if return_mlm is True:
             c = c[-pred_size:]
-            c = self.maybe_final_norm(self.decoder.sentence_encoder, c)
-            c = reverse_tensor(c)
+            c = self.maybe_final_norm(self.sentence_encoder, c)
+            c = self._reverse_tensor(c)
             c = self.output_layer(c)
             return x, c
 
         return x
+
+    # Helper methods with clear inputs/outputs for better torch.compile compatibility
+    @staticmethod
+    def _reverse_tensor(x: torch.Tensor) -> torch.Tensor:
+        """Reverses a tensor by transposing dimensions 0 and 1"""
+        return x.transpose(0, 1)
+
+    @staticmethod
+    def _split_tensor(x: torch.Tensor, split_size: int) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Splits a tensor into content and query portions"""
+        sz = x.size(0) - split_size
+        return x[:sz].contiguous(), x[sz:].contiguous()
+
+    @staticmethod
+    def _make_query_and_content_mask(
+        input_ids: torch.Tensor, seq_len: int, pred_size: int
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Creates query and content masks for attention"""
+        device = input_ids.device
+
+        # Create query mask
+        query_mask = torch.zeros(pred_size, seq_len + pred_size, device=device)
+        query_mask[:, :seq_len] = 1
+        triu_mask = torch.triu(torch.ones(pred_size, pred_size, device=device), diagonal=1)
+        query_mask[:, seq_len:] = 1 - triu_mask
+        query_mask = query_mask.eq(0)
+
+        # Create content mask
+        content_mask = torch.zeros(seq_len + pred_size, seq_len + pred_size, device=device)
+        content_mask[seq_len:, seq_len:] = torch.tril(
+            torch.ones(pred_size, pred_size, device=device), diagonal=0
+        )
+        content_mask = torch.cat([
+            torch.ones(seq_len + pred_size, seq_len - pred_size, device=device),
+            content_mask,
+            1 - content_mask
+        ], dim=1)
+        content_mask = content_mask.eq(0)
+
+        return query_mask, content_mask
+
+    @staticmethod
+    def _encode_two_stream_attention(
+        layer,
+        c: torch.Tensor,
+        q: torch.Tensor,
+        content_mask: Optional[torch.Tensor] = None,
+        query_mask: Optional[torch.Tensor] = None,
+        content_position_bias: Optional[torch.Tensor] = None,
+        query_position_bias: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Stable implementation of two-stream attention for torch.compile compatibility"""
+        # Define skip-connection and normalization helper
+        def skip_norm_ff(x: torch.Tensor, residual: torch.Tensor) -> torch.Tensor:
+            x = F.dropout(x, p=layer.dropout, training=layer.training)
+            x = x + residual
+            x = layer.maybe_layer_norm(layer.self_attn_layer_norm, x, after=True)
+            residual = x
+            x = layer.maybe_layer_norm(layer.final_layer_norm, x, before=True)
+            x = layer.activation_fn(layer.fc1(x))
+            x = F.dropout(x, p=layer.activation_dropout, training=layer.training)
+            x = layer.fc2(x)
+            x = F.dropout(x, p=layer.dropout, training=layer.training)
+            x = x + residual
+            x = layer.maybe_layer_norm(layer.final_layer_norm, x, after=True)
+            return x
+
+        # Save residuals for skip connections
+        residual_c = c
+        residual_q = q
+
+        # Apply layer norm if needed
+        c = layer.maybe_layer_norm(layer.self_attn_layer_norm, c, before=True)
+        q = layer.maybe_layer_norm(layer.self_attn_layer_norm, q, before=True)
+
+        # Process through two-stream attention
+        # This is a simplified version of two_stream_self_attention for better compatibility
+        # Get dimensions
+        bsz, embed_dim = c.size(1), c.size(2)
+        
+        # Project queries, keys, and values
+        k = layer.self_attn.in_proj_k(c)
+        v = layer.self_attn.in_proj_v(c)
+        q_proj = layer.self_attn.in_proj_q(q)
+        c_proj = layer.self_attn.in_proj_q(c)
+        
+        # Reshape for attention calculation
+        head_dim = embed_dim // layer.self_attn.num_heads
+        scaling = head_dim ** -0.5
+        
+        def reshape_for_attention(x):
+            return x.contiguous().view(-1, bsz * layer.self_attn.num_heads, head_dim).transpose(0, 1)
+        
+        k = reshape_for_attention(k)
+        v = reshape_for_attention(v)
+        q_proj = reshape_for_attention(q_proj) * scaling
+        c_proj = reshape_for_attention(c_proj) * scaling
+        
+        # Apply attention with masks and biases
+        def apply_attention(query, mask, bias):
+            # Calculate attention weights
+            attn_weights = torch.bmm(query, k.transpose(1, 2))
+            
+            # Apply position bias if provided
+            if bias is not None:
+                attn_weights += bias
+                
+            # Apply mask if provided
+            if mask is not None:
+                attn_weights = attn_weights.masked_fill(
+                    mask.unsqueeze(0),
+                    float("-inf"),
+                )
+                
+            # Apply softmax and dropout
+            attn_weights = F.softmax(attn_weights, dim=-1)
+            attn_weights = F.dropout(attn_weights, p=layer.self_attn.dropout, training=layer.training)
+            
+            # Get attention output
+            attn = torch.bmm(attn_weights, v)
+            attn = attn.transpose(0, 1).contiguous().view(-1, bsz, embed_dim)
+            return layer.self_attn.out_proj(attn)
+        
+        # Process content and query streams
+        c_out = apply_attention(c_proj, content_mask, content_position_bias)
+        q_out = apply_attention(q_proj, query_mask, query_position_bias)
+        
+        # Apply skip connections and feed-forward
+        c = skip_norm_ff(c_out, residual_c)
+        q = skip_norm_ff(q_out, residual_q)
+        
+        return c, q
 
     # We define some class static methods here that will be used quite a bit across the board
     @staticmethod
@@ -357,283 +453,3 @@ class MPNetLMHead(nn.Module):
         x = F.linear(x, self.weight) + self.bias
 
         return x
-
-
-# Helper functions below!
-def reverse_tensor(x: torch.Tensor) -> torch.Tensor:
-    """
-    This function simply reverses a tensor. This will be used to make extracting content and query
-    streams easier later on
-    """
-    return x.transpose(0, 1)
-
-
-def split_tensor(x: torch.Tensor, split_size: int) -> Tuple[torch.Tensor, torch.Tensor]:
-    """
-    This helper function separates the query stream from the content stream in the input IDs
-
-    Args:
-        x: the tensor to split
-        split_size: the pred_size of the input ID sequence
-    """
-    # Get the content stream size by subtracting out the pred_size aka split_size
-    sz = x.size(0) - split_size
-
-    return x[:sz].contiguous(), x[sz:].contiguous()
-
-
-def encode_two_stream_attention(
-    self,
-    c: torch.Tensor,
-    q: torch.Tensor,
-    content_mask: torch.Tensor = None,
-    query_mask: torch.Tensor = None,
-    content_position_bias: torch.Tensor = None,
-    query_position_bias: torch.Tensor = None,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    """
-    This helper function wraps the two-stream attention calculation and calculates the skip
-    connection as well as layer norm. This function is actually used by passing in a class instance
-    under the self arg for each LAYER in the encoder
-
-    Args:
-        c: the content portion of the input sequence (can be thought of as containing the
-            appropriate information to encode the bidirectional nature of the encoder attention, but
-            is kept separately otherwise the query attention mechanism would always be able to
-            predict its own content trivially)
-        q: the query portion of the input sequence (can be thought of as the <mask> tokens we
-            are looking to predict using language modeling)
-        content_mask: the attention mask for the content stream
-        query_mask: the attention mask for the query stream
-        content_position_bias: position bias for the content portion
-        query_position_bias: position bias for the query portion
-
-    Returns:
-        A tuple containing the content and query tensors after the attention calculation is done for
-        the given layer in self
-    """
-
-    def skip_norm_ff_fn(x: torch.Tensor, residual: torch.Tensor) -> torch.Tensor:
-        """
-        Inner function that process all the normalization, skip connection, and the feed-forward net
-        after the attention calculation. Since we do this for c and q, it's easier to keep this as
-        a reusable function
-        """
-
-        # Calculate dropout
-        x = F.dropout(x, p=self.dropout, training=self.training)
-
-        # Process skip connection
-        x = x + residual
-
-        # Do normalization where appropriate based on the normalize_before param
-        x = self.maybe_layer_norm(self.self_attn_layer_norm, x, after=True)
-
-        # Save x as residual for the skip connection AFTER the feed-forard net
-        residual = x
-
-        # Normalize again
-        x = self.maybe_layer_norm(self.final_layer_norm, x, before=True)
-
-        # Process the feed-forward net connections with specified activation function and dropout
-        x = self.activation_fn(self.fc1(x))
-        x = F.dropout(x, p=self.activation_dropout, training=self.training)
-        x = self.fc2(x)
-        x = F.dropout(x, p=self.dropout, training=self.training)
-
-        # Process the skip connection after running through the FF net
-        x = x + residual
-
-        # Do a layer norm based on args
-        x = self.maybe_layer_norm(self.final_layer_norm, x, after=True)
-
-        return x
-
-    # Save c and q as residuals for skip connection after attention calculation
-    residual_c = c
-    residual_q = q
-
-    # Do a normalization before if the class args allow for it
-    c = self.maybe_layer_norm(self.self_attn_layer_norm, c, before=True)
-    q = self.maybe_layer_norm(self.self_attn_layer_norm, q, before=True)
-
-    # Wrapper function on top of each layer's self attention mechanism that calculates the proper
-    # two stream attention that is required for MPNet
-    c, q = two_stream_self_attention(
-        self.self_attn,
-        query=[c, q],
-        key=c,
-        value=c,
-        query_mask=query_mask,
-        content_mask=content_mask,
-        query_position_bias=query_position_bias,
-        content_position_bias=content_position_bias,
-    )
-
-    # Calculate skip connection, inner layer norms, and feed forward after attention calculation
-    # using the resuable function we built above
-    c = skip_norm_ff_fn(c, residual_c)
-    q = skip_norm_ff_fn(q, residual_q)
-
-    # Finally return the tensors after the full layer calculation
-    return c, q
-
-
-def two_stream_self_attention(
-    self,
-    query: torch.Tensor,
-    key: torch.Tensor = None,
-    value: torch.Tensor = None,
-    query_mask: torch.Tensor = None,
-    content_mask: torch.Tensor = None,
-    query_position_bias: torch.Tensor = None,
-    content_position_bias: torch.Tensor = None,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    """
-    This function is a wrapper on top of the encoder self attention (which is passed in using the
-    `self` class instance keyword) that properly calculates the two stream self attention that is
-    required for MPNet.
-
-    Args:
-        query: the tensors represening the Q matrix in self attention. We acttually pass in two here
-            because of two stream attention
-        key: the K matrix of the attention calculation
-        value: the V matrix of the attention calculation
-        query_mask: the attention mask for the query stream
-        content_mask: the attention mask for the content stream
-        query_position_bias: position bias for the query portion
-        content_position_bias: position bias for the content portion
-    """
-
-    # Unpack the content and query tensors from the (poorly) named query arg
-    c, q = query
-
-    # Get dimensions
-    bsz, embed_dim = key.size(1), key.size(2)
-
-    # Define a few in-scope helper functions that we will be reusing a bunch
-    def transpose_fn(x: torch.Tensor) -> torch.Tensor:
-        """
-        A reusable transpose function that matches the appropriate shape for this attention
-        calculation (matching the head dimension and the number of attention heads)
-        """
-        return (
-            x.contiguous().view(-1, bsz * self.num_heads, self.head_dim).transpose(0, 1)
-        )
-
-    def fill_mask(attn_weights: torch.Tensor, attn_mask: torch.Tensor) -> torch.Tensor:
-        """
-        Helper function that will apply the attention mask to the tensor containing the weights.
-        This is done using the builtin `masked_fill` function, but we need to apply some additional
-        processing on top
-        """
-        return attn_weights.masked_fill(attn_mask.unsqueeze(0), float("-inf"))
-
-    def attn_fn(
-        _q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        mask: torch.Tensor = None,
-        bias: torch.Tensor = None,
-    ) -> torch.Tensor:
-        """
-        This is the adjusted attention function that still uses the core weights of the encoder, but
-        processes everything differently to fit the two stream attention scheme
-        """
-        # Process the query matrix through both the scaling and the input layer of self_attention
-        _q = transpose_fn(self.scaling * self.in_proj_q(_q))
-
-        # Calculate the energy by multiplying Q and K
-        attn_weights = torch.bmm(_q, k.transpose(1, 2))
-
-        # Process bias if applicable
-        if bias is not None:
-            attn_weights += bias
-
-        # Process attention masking
-        if mask is not None:
-            attn_weights = fill_mask(attn_weights, mask)
-
-        # Softmax the energy to get the final attention weights
-        attn_weights = F.softmax(attn_weights, dim=-1).type_as(attn_weights)
-
-        # Do the attention dropout
-        attn_weights = F.dropout(attn_weights, p=self.dropout, training=self.training)
-
-        # Combine the final post-softmax/dropout weights with the V matrix to get the attention
-        attn = torch.bmm(attn_weights, v)
-
-        # Finally, transpose back to the embed dimension and return
-        attn = attn.transpose(0, 1).contiguous().view(-1, bsz, embed_dim)
-
-        return self.out_proj(attn)
-
-    # Get K and V matrices by processing them through the input layer for each matrix and transpose
-    # them to be the right shape
-    k = transpose_fn(self.in_proj_k(key))
-    v = transpose_fn(self.in_proj_v(value))
-
-    # Calculate query attention and content attention using the function above
-    c = attn_fn(c, k, v, mask=content_mask, bias=content_position_bias)
-    q = attn_fn(q, k, v, mask=query_mask, bias=query_position_bias)
-
-    return c, q
-
-
-def make_query_and_content_mask(
-    input_ids: torch.Tensor, seq_len: int, pred_size: int
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    """
-    This function makes the rather unique content and query mask that is required for MPNet.
-
-    Args:
-        input_ids: the batch of input IDs that the forward pass takes in. It is only used to send
-            the mask to the right device, so it's a little useless. A refactor would just pass the
-            device name in
-        seq_len: the sequence length of the input
-        pred_size: the size of the subsequence that is being converted to mask/corrupt tokens
-
-    It looks like the below with comparisons to how it's different than XLNet-style PLM:
-        Query Mask:
-        | <-   PLM   -> |    | <-      MPNet    -> |
-        [ 0 0 0 0 1 1 1 ]    [ 0 0 0 0 1 1 1 0 0 0 ]
-        [ 0 0 0 0 0 1 1 ]    [ 0 0 0 0 0 1 1 1 0 0 ]
-        [ 0 0 0 0 0 0 1 ]    [ 0 0 0 0 0 0 1 1 1 0 ]
-        Content Mask:
-        | <-   PLM   -> |    | <-      MPNet    -> |
-                               x x x x x x x m m m
-                               1 2 3 4 5 6 7 5 6 7
-        [ 0 0 0 0 1 1 1 ]    [ 0 0 0 0 1 1 1 0 0 0 ]
-        [ 0 0 0 0 1 1 1 ]    [ 0 0 0 0 1 1 1 0 0 0 ]
-        [ 0 0 0 0 1 1 1 ]    [ 0 0 0 0 1 1 1 0 0 0 ]
-        [ 0 0 0 0 1 1 1 ]    [ 0 0 0 0 1 1 1 0 0 0 ]
-        [ 0 0 0 0 0 1 1 ]    [ 0 0 0 0 0 1 1 1 0 0 ]
-        [ 0 0 0 0 0 0 1 ]    [ 0 0 0 0 0 0 1 1 1 0 ]
-        [ 0 0 0 0 0 0 0 ]    [ 0 0 0 0 0 0 0 1 1 1 ]
-                             [ 0 0 0 0 1 1 1 0 0 0 ]
-                             [ 0 0 0 0 1 1 1 0 0 0 ]
-                             [ 0 0 0 0 1 1 1 0 0 0 ]
-    """
-    # Get the device from input_ids
-    device = input_ids.device
-
-    # Define helper function to keep things organized
-    def make_query_mask():
-        # Create the mask portion (i.e. ones) - ensure all tensors use the same device
-        mask = torch.triu(torch.ones(pred_size, pred_size, device=device), 0)
-        mask = (torch.ones(pred_size, seq_len - pred_size, device=device), 1 - mask, mask)
-        return torch.cat(mask, dim=-1).eq(0)
-
-    def make_content_mask():
-        mask = [
-            torch.zeros(seq_len - pred_size, pred_size, device=device),
-            torch.tril(torch.ones(pred_size, pred_size, device=device), 0),
-        ]
-
-        mask.append(torch.zeros(pred_size, pred_size, device=device))
-        mask = torch.cat(mask, dim=0)
-        mask = (torch.ones(seq_len + pred_size, seq_len - pred_size, device=device), mask, 1 - mask)
-        return torch.cat(mask, dim=-1).eq(0)
-
-    # Return masks directly as they're already on the correct device
-    return make_query_mask(), make_content_mask()

@@ -1,9 +1,9 @@
 """
-Module for defining the encoder sublayer. This will eventually wrap into the full SentenceEncoder
-class
+Module for defining the encoder sublayer with better torch.compile compatibility
 """
 
 import logging
+from typing import Tuple, Optional
 
 from rich.logging import RichHandler
 
@@ -40,36 +40,11 @@ class SentenceEncoderLayer(nn.Module):
         add_zero_attn: bool = False,
         normalize_before: bool = True,
         export: bool = False,
-        use_flex_attention: bool = False,  # New parameter
-        sliding_window_size: int = None,  
+        use_flex_attention: bool = False,
+        sliding_window_size: Optional[int] = None,
     ) -> None:
         """
-        Init function for the layer. I will try to summarize all the args here.
-
-        Args:
-            embedding_dim: the embedding dimension for the layer. Should always be 768 really
-            ffn_embedding_dim: this is the size of the hidden layer in the fully-connected
-                subsection of the layer right AFTER self-attention. Also known as the feed-forward
-                network component of the encoder layer
-            num_attention_heads: the number of attention heads for each layer. Default here is 8,
-                but you will usually want to bump this higher if your model is accepting longer
-                sequence lengths
-            dropout: pretty straightforward, but this is the dropout prob for the FC layers in the
-                forward pass
-            attention_dropout: similar to above, but is the dropout prob within the self-attention
-                mechanism
-            activation_fn: the activation function you will be using in this network. Although ReLU
-                is the default, more and more evidence points towards GELU being better for large
-                NLP-based transformers
-            add_bias_kv: boolean that dictates whether or not to add a bias parameter to the K, V
-                matrices in the self-attention mechanism
-            add_zero_attn: boolean that dictate whether or not to add zero attention to the
-                self-attention mechanism
-            normalize_before: boolean that determines if the LayerNorm will be applied BEFORE or
-                AFTER the self-attention calculation. Functionally they are very similar, but the
-                standard is to normalize before
-            export: boolean that would enable ONNX tracing for exporting, but I think we won't be
-                using this
+        Init function for the layer with torch.compile optimizations
         """
         super().__init__()
 
@@ -79,18 +54,14 @@ class SentenceEncoderLayer(nn.Module):
         self.activation_dropout = activation_dropout
         self.use_flex_attention = use_flex_attention
         self.sliding_window_size = sliding_window_size
+        self.num_heads = num_attention_heads  # Store for consistent access
 
         # Get the submodules we need
         self.activation_fn = utils.get_activation_fn(activation_fn)
 
-        # Initialize the self attention module
-        if use_flex_attention:
-            # Store parameters for later FlexAttention instantiation
-            self.num_heads = num_attention_heads
-            self.attention_dropout = attention_dropout
-            self._flex_attention = None  # Will be lazily initialized on first forward pass
-        else:
-            # Use the standard RelativeMultiHeadAttention
+        # Initialize the appropriate attention mechanism
+        if not use_flex_attention:
+            # Use standard RelativeMultiHeadAttention
             self.self_attn = RelativeMultiHeadAttention(
                 self.embedding_dim,
                 num_attention_heads,
@@ -99,12 +70,17 @@ class SentenceEncoderLayer(nn.Module):
                 add_zero_attn=add_zero_attn,
                 self_attention=True,
             )
+        else:
+            # For FlexAttention, we'll lazily initialize it in forward
+            # This avoids circular imports and makes tracing easier
+            self._flex_attention = None
+            self.num_attention_heads = num_attention_heads
+            self.attention_dropout = attention_dropout
 
         # Get the LayerNorm for the self_attention output
         self.self_attn_layer_norm = LayerNorm(self.embedding_dim, export=export)
 
-        # Get the FC linear layers for the hidden connections in each layer after the self-attention
-        # is calculated
+        # Get the FC linear layers for the hidden connections
         self.fc1 = nn.Linear(self.embedding_dim, ffn_embedding_dim)
         self.fc2 = nn.Linear(ffn_embedding_dim, self.embedding_dim)
 
@@ -116,38 +92,47 @@ class SentenceEncoderLayer(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        self_attn_mask: torch.Tensor = None,
-        self_attn_padding_mask: torch.Tensor = None,
-        positions_bias: torch.Tensor = None,
-    ):
+        self_attn_mask: Optional[torch.Tensor] = None,
+        self_attn_padding_mask: Optional[torch.Tensor] = None,
+        positions_bias: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
-        Forward pass of the encoder layer. Calculates self-attention, does normalization (before or
-        after depending on args), processes the skip connection, and uses the linear layers at the
-        end
+        Forward pass optimized for torch.compile
         """
-
-        # Keep the residual for the skip connection after self-attention calculation
+        # Store residual for skip connection
         residual = x
 
-        # This is a bit of an overloaded function that will check if normalization should be
-        # processed before or after self-attention. It will cross reference the "before" or "after"
-        # kwarg against self.normalize_before arg and then either do nothing or normalize
+        # Apply layer norm if needed
         x = self.maybe_layer_norm(self.self_attn_layer_norm, x, before=True)
 
-        # Forward pass of self-attention with appropriate method based on configuration
+        # Choose appropriate attention implementation
         if self.use_flex_attention:
-            # Use FlexAttention-based implementation
-            from annotated_mpnet.transformer_modules.flex_attention import encode_flex_two_stream_attention
-            x, attn = encode_flex_two_stream_attention(
-                self, 
-                x, x,  # content and query are the same for standard self-attention
-                content_mask=self_attn_mask,
-                query_mask=self_attn_mask,
-                content_position_bias=positions_bias,
-                query_position_bias=positions_bias,
+            # Defer the import to avoid circular imports
+            from annotated_mpnet.transformer_modules.flex_attention import FlexTwoStreamAttention
+            
+            # Create FlexAttention module if it doesn't exist yet
+            if self._flex_attention is None:
+                self._flex_attention = FlexTwoStreamAttention(
+                    embed_dim=self.embedding_dim,
+                    num_heads=self.num_attention_heads,
+                    dropout=self.attention_dropout,
+                    use_sliding_window=self.sliding_window_size is not None,
+                    sliding_window_size=self.sliding_window_size or 0,
+                ).to(x.device)
+            
+            # Use FlexAttention
+            # For standard self-attention, content and query are the same
+            (x, _), attn = self._flex_attention(
+                (x, x),  # content and query are the same
+                key=x,
+                value=x,
+                key_padding_mask=self_attn_padding_mask,
+                attn_mask=self_attn_mask,
+                positions_bias=positions_bias,
+                need_weights=False,
             )
         else:
-            # Use standard RelativeMultiHeadAttention
+            # Use standard attention
             x, attn = self.self_attn(
                 query=x,
                 key=x,
@@ -158,19 +143,15 @@ class SentenceEncoderLayer(nn.Module):
                 positions_bias=positions_bias,
             )
 
-        # Process the dropout after self-attention is calculated and then make the skip connection
-        # by adding residual to x
+        # Process dropout and skip connection
         x = F.dropout(x, p=self.dropout, training=self.training)
         x = residual + x
-
-        # Try the maybe_layer_norm function again to potentially normalize after self-attention
         x = self.maybe_layer_norm(self.self_attn_layer_norm, x, after=True)
 
-        # Now we must process the fully connected layer after self-attention
+        # Process feed-forward network
         residual = x
         x = self.maybe_layer_norm(self.final_layer_norm, x, before=True)
         
-        # Process feed-forward network
         x = self.activation_fn(self.fc1(x))
         x = F.dropout(x, p=self.activation_dropout, training=self.training)
         x = self.fc2(x)
@@ -181,13 +162,11 @@ class SentenceEncoderLayer(nn.Module):
         return x, attn
 
     def maybe_layer_norm(
-        self, layer_norm: nn.Module, x: torch.Tensor, before=False, after=False
+        self, layer_norm: nn.Module, x: torch.Tensor, before: bool = False, after: bool = False
     ) -> torch.Tensor:
         """
-        The key helper function that will only trigger if the before/after bool passed in matches
-        what is dictated by the self.normalize_before
+        Helper function for conditional layer normalization
         """
-        # First make sure before and after both aren't true with a quick XOR
         assert before ^ after, "You must set only one of 'before' or 'after'"
 
         if after ^ self.normalize_before:

@@ -35,8 +35,72 @@ from annotated_mpnet.modeling import MPNetForPretraining
 from annotated_mpnet.scheduler import PolynomialDecayLRScheduler
 from annotated_mpnet.tracking import AverageMeter
 
-import torch._dynamo
-torch._dynamo.config.suppress_errors = True
+# Add these imports at the top of pretrain_mpnet.py
+import torch._dynamo.config
+import torch._inductor.config
+import warnings
+
+# Add this function before the main() function
+def configure_torch_compile():
+    """
+    Configure torch.compile for optimal performance with FlexAttention
+    """
+    # Suppress compilation warnings
+    warnings.filterwarnings(
+        "ignore", 
+        category=UserWarning, 
+        message=".*TensorFloat32.*"
+    )
+    warnings.filterwarnings(
+        "ignore", 
+        category=UserWarning, 
+        message=".*torch.compile.*"
+    )
+    
+    # Key compiler configurations
+    torch._dynamo.config.suppress_errors = True
+    torch._dynamo.config.cache_size_limit = 128  # Increase cache size
+    torch._dynamo.config.dynamic_shapes = False  # Better for fixed shapes
+    
+    # Inductor-specific optimizations
+    torch._inductor.config.triton.cudagraphs = True
+    torch._inductor.config.epilogue_fusion = True
+    torch._inductor.config.coordinate_descent_tuning = True
+    torch._inductor.config.permute_fusion = True
+    
+    # Recommended settings when using FlexAttention with torch.compile
+    torch._inductor.config.fx_graph_cache = True
+    
+    # Debug options (uncomment if needed)
+    # torch._dynamo.config.verbose = True
+    # torch._inductor.config.debug = True
+    
+    LOGGER.info("torch.compile configuration applied for optimized performance")
+
+# Modify the model compilation in main() to look like this:
+def compile_model(model, args):
+    """Compile the model with optimized settings"""
+    LOGGER.info("Compiling the model with optimized settings...")
+    
+    # Different compilation settings for different cases
+    if args.use_flex_attention:
+        # Best mode for FlexAttention
+        return torch.compile(
+            model,
+            mode="reduce-overhead",  # Best for FlexAttention's dynamic masking
+            fullgraph=False,  # Allow some ops to fall back to eager
+            dynamic=False,  # Better for fixed sequence lengths
+            backend="inductor",  # Most optimized backend
+        )
+    else:
+        # Standard compilation
+        return torch.compile(
+            model,
+            mode="max-autotune",
+            fullgraph=True,
+            dynamic=True,
+        )
+
 
 def accuracy(output: torch.Tensor, target: torch.Tensor) -> int:
     """
@@ -154,10 +218,16 @@ def main(args) -> None:
     # Load the model up to the device
     model.to(device)
 
-    # Compile the model
+    # Call the configuration function
+    configure_torch_compile()
+
+    # Load the model up to the device
+    model.to(device)
+
+    # Compile the model with optimized settings
     if args.compile:
         LOGGER.info("Compiling the model...")
-        model = torch.compile(model)
+        model = compile_model(model, args)
 
     # Determine whether to use streaming dataset or file-based dataset
     if args.dataset_name:
@@ -336,7 +406,7 @@ def main(args) -> None:
                 train_dataloader,
                 batch_size=args.batch_size,
                 collate_fn=mplm,
-                num_workers=args.num_workers if hasattr(args, "num_workers") else 4,
+                num_workers=4,
             )
         else:
             # File-based datasets: Use a different file for each epoch (original code)
