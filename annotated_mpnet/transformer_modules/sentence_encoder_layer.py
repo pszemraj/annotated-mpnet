@@ -18,7 +18,11 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from annotated_mpnet.transformer_modules import LayerNorm, RelativeMultiHeadAttention
+from annotated_mpnet.transformer_modules import (
+    LayerNorm, 
+    RelativeMultiHeadAttention,
+    RoPERelativeMultiHeadAttention
+)
 from annotated_mpnet.utils import utils
 
 
@@ -40,6 +44,10 @@ class SentenceEncoderLayer(nn.Module):
         add_zero_attn: bool = False,
         normalize_before: bool = True,
         export: bool = False,
+        use_rope: bool = False,
+        max_position_embeddings: int = 512,
+        rope_base: int = 10000,
+        rope_scaling: float = 1.0,
     ) -> None:
         """
         Init function for the layer. I will try to summarize all the args here.
@@ -68,6 +76,10 @@ class SentenceEncoderLayer(nn.Module):
                 standard is to normalize before
             export: boolean that would enable ONNX tracing for exporting, but I think we won't be
                 using this
+            use_rope: whether to use Rotary Position Embeddings
+            max_position_embeddings: maximum sequence length for position embeddings
+            rope_base: base value for RoPE frequency bands
+            rope_scaling: scaling factor for RoPE frequencies
         """
         super().__init__()
 
@@ -79,15 +91,28 @@ class SentenceEncoderLayer(nn.Module):
         # Get the submodules we need
         self.activation_fn = utils.get_activation_fn(activation_fn)
 
-        # Initialize the self attention module
-        self.self_attn = RelativeMultiHeadAttention(
-            self.embedding_dim,
-            num_attention_heads,
-            dropout=attention_dropout,
-            add_bias_kv=add_bias_kv,
-            add_zero_attn=add_zero_attn,
-            self_attention=True,
-        )
+        # Initialize the self attention module based on whether we use RoPE or not
+        if use_rope:
+            self.self_attn = RoPERelativeMultiHeadAttention(
+                self.embedding_dim,
+                num_attention_heads,
+                dropout=attention_dropout,
+                add_bias_kv=add_bias_kv,
+                add_zero_attn=add_zero_attn,
+                self_attention=True,
+                max_position_embeddings=max_position_embeddings,
+                rope_base=rope_base,
+                rope_scaling=rope_scaling,
+            )
+        else:
+            self.self_attn = RelativeMultiHeadAttention(
+                self.embedding_dim,
+                num_attention_heads,
+                dropout=attention_dropout,
+                add_bias_kv=add_bias_kv,
+                add_zero_attn=add_zero_attn,
+                self_attention=True,
+            )
 
         # Get the LayerNorm for the self_attention output
         self.self_attn_layer_norm = LayerNorm(self.embedding_dim, export=export)

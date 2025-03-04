@@ -35,6 +35,7 @@ from annotated_mpnet.modeling import MPNetForPretraining
 from annotated_mpnet.scheduler import PolynomialDecayLRScheduler
 from annotated_mpnet.tracking import AverageMeter
 
+from annotated_mpnet.modeling.mpnet_for_pretraining_rope import MPNetForPretrainingRoPE
 
 def accuracy(output: torch.Tensor, target: torch.Tensor) -> int:
     """
@@ -146,7 +147,12 @@ def main(args) -> None:
         }
 
     # Next, we instantiate the model and the data collator
-    model = MPNetForPretraining(args, tokenizer)
+    if args.use_rope:
+        model = MPNetForPretrainingRoPE(args, tokenizer)
+        LOGGER.info("Using MPNet with Rotary Position Embeddings (RoPE)")
+    else:
+        model = MPNetForPretraining(args, tokenizer)
+        LOGGER.info("Using standard MPNet with traditional position embeddings")
     mplm = DataCollatorForMaskedPermutedLanguageModeling(tokenizer=tokenizer)
 
     # Load the model up to the device
@@ -334,7 +340,7 @@ def main(args) -> None:
                 train_dataloader,
                 batch_size=args.batch_size,
                 collate_fn=mplm,
-                num_workers=args.num_workers if hasattr(args, "num_workers") else 4,
+                num_workers=4,
             )
         else:
             # File-based datasets: Use a different file for each epoch (original code)
@@ -966,6 +972,25 @@ def cli_main():
         help="Boolean that dictates whether or not to compile the model",
         action="store_true",
         default=False,
+    )
+
+    parser.add_argument(
+        "--use-rope",
+        help="Whether to use Rotary Position Embeddings (RoPE) instead of traditional positional embeddings",
+        action="store_true",
+        default=False,
+    )
+    parser.add_argument(
+        "--rope-base",
+        help="Base value for RoPE frequency calculation. Lower values lead to faster position-dependent rotations",
+        default=10000,
+        type=int,
+    )
+    parser.add_argument(
+        "--rope-scaling",
+        help="Scaling factor for RoPE frequencies. Values < 1.0 can help with extrapolation to longer sequences",
+        default=1.0,
+        type=float,
     )
 
     args = parser.parse_args()

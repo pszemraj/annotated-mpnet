@@ -3,5 +3,7 @@ from .learned_positional_embedding import LearnedPositionalEmbedding
 from .sinusoidal_positional_embedding import SinusoidalPositionalEmbedding
 from .positional_embedding import PositionalEmbedding
 from .rel_multihead_attention import RelativeMultiHeadAttention
+from .rel_multihead_attention_rope import RoPERelativeMultiHeadAttention
+from .rope import RotaryPositionEmbedding
 from .sentence_encoder_layer import SentenceEncoderLayer
 from .sentence_encoder import SentenceEncoder
