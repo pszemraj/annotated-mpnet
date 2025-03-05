@@ -399,7 +399,7 @@ def main(args) -> None:
                 and steps > 0
             ):
                 torch.save(
-                    {"args": args, "model_states": model.state_dict()},
+                    {"args": vars(args), "model_states": model.state_dict()},
                     os.path.join(args.checkpoint_dir, f"checkpoint{steps + 1}.pt"),
                 )
 
@@ -597,7 +597,7 @@ def main(args) -> None:
 
             # Now let's go ahead and save this in the checkpoints directory
             torch.save(
-                {"args": args, "model_states": model.state_dict()},
+                {"args": vars(args), "model_states": model.state_dict()},
                 os.path.join(args.checkpoint_dir, "best_checkpoint.pt"),
             )
 
