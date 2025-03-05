@@ -2,8 +2,13 @@
 Pretraining script for MPNet
 """
 
+import argparse
+import gc
 import logging
+import math
+import os
 import sys
+from argparse import Namespace
 
 from rich.logging import RichHandler
 
@@ -13,15 +18,12 @@ logging.basicConfig(
 )
 LOGGER = logging.getLogger(__name__)
 
-import argparse
-import gc
-import math
-import os
 
 import torch
 import torch.nn.functional as F
 from datasets import load_dataset
 from rich.progress import track
+from torch.serialization import safe_globals
 from torch.utils.tensorboard import SummaryWriter
 from transformers import AutoTokenizer
 
@@ -630,13 +632,23 @@ def main(args) -> None:
     # use the test dataloader we built above to get a final test metric using the best checkpoint
 
     # Begin by loading the model states and args from the best checkpoint
-    dicts = torch.load(os.path.join(args.checkpoint_dir, "best_checkpoint.pt"))
+    with safe_globals([Namespace]):
+        dicts = torch.load(os.path.join(args.checkpoint_dir, "best_checkpoint.pt"))
+
+    # Handle args that might be dict or Namespace
+    loaded_args = dicts["args"]
+    if isinstance(loaded_args, dict):
+        loaded_args = Namespace(**loaded_args)
+
+    # Handle potential _orig_mod prefix in state dict from compiled models
+    model_states = dicts["model_states"]
+    model_states = {k.replace("_orig_mod.", ""): v for k, v in model_states.items()}
 
     # Load an empty shell of the model architecture using those args
-    test_model = MPNetForPretraining(dicts["args"], tokenizer)
+    test_model = MPNetForPretraining(loaded_args, tokenizer)
 
     # Now apply the model states to this newly instantiated model
-    test_model.load_state_dict(dicts["model_states"])
+    test_model.load_state_dict(model_states)
 
     # Finally make sure the model is in eval mode and is sent to the proper device
     test_model.to(device)
