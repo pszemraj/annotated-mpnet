@@ -53,12 +53,14 @@ def convert_mpnet_checkpoint_to_pytorch(
     # Extract the model args so that we can properly set the config later on
     # Extract the weights so we can set them within the constructs of the model
     mpnet_args = state_dicts["args"]
-    mpnet_weight = state_dicts["model_states"]
+    if isinstance(mpnet_args, dict):
+        mpnet_args = Namespace(**mpnet_args)
 
+    mpnet_weight = state_dicts["model_states"]
     # Fix for torch.compile() _orig_mod prefix
     mpnet_weight = {k.replace("_orig_mod.", ""): v for k, v in mpnet_weight.items()}
 
-    print("Keys after removing _orig_mod prefix:")
+    print("Keys after removing _orig_mod prefix (if present):")
     print(list(mpnet_weight.keys())[:5])  # Print first few keys to verify
 
     # Now we use the args (and one componennt of the weight to get the vocab size) to set the
