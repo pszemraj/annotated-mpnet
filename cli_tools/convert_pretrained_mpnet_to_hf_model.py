@@ -6,7 +6,10 @@ MPNetForPretraining, as well as commenting each step of the logic so that poster
 doing here.
 """
 
+import argparse
 import logging
+import pathlib
+from argparse import Namespace
 
 from rich.logging import RichHandler
 
@@ -16,10 +19,9 @@ logging.basicConfig(
 )
 LOGGER = logging.getLogger(__name__)
 
-import argparse
-import pathlib
 
 import torch
+from torch.serialization import safe_globals
 from transformers import MPNetConfig, MPNetForMaskedLM
 from transformers.models.mpnet import MPNetLayer
 from transformers.utils import logging as hf_logging
@@ -45,12 +47,19 @@ def convert_mpnet_checkpoint_to_pytorch(
 
     # Load up the state dicts (one for the weights and one for the args) from the provided
     # serialization path
-    state_dicts = torch.load(mpnet_checkpoint_path)
+    with safe_globals([Namespace]):
+        state_dicts = torch.load(mpnet_checkpoint_path)
 
     # Extract the model args so that we can properly set the config later on
     # Extract the weights so we can set them within the constructs of the model
     mpnet_args = state_dicts["args"]
     mpnet_weight = state_dicts["model_states"]
+
+    # Fix for torch.compile() _orig_mod prefix
+    mpnet_weight = {k.replace("_orig_mod.", ""): v for k, v in mpnet_weight.items()}
+
+    print("Keys after removing _orig_mod prefix:")
+    print(list(mpnet_weight.keys())[:5])  # Print first few keys to verify
 
     # Now we use the args (and one componennt of the weight to get the vocab size) to set the
     # MPNetConfig object, which will properly instantiate the MPNetForMaskedLM model to the specs
