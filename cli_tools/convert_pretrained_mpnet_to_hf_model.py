@@ -216,8 +216,9 @@ def cli_main():
     """
     Wrapper function so we can define a CLI entrypoint when setting up this package
     """
-    parser = argparse.ArgumentParser()
-    # Required parameters
+    parser = argparse.ArgumentParser(
+        description="Convert MPNet .pt checkpoint to Huggingface model"
+    )
     parser.add_argument(
         "--mpnet-checkpoint-path",
         default=None,
