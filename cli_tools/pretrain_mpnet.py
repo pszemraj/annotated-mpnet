@@ -147,7 +147,7 @@ def main(args) -> None:
 
     if target_vocab_size > original_vocab_size:
         LOGGER.info(
-            f"Padding model's vocab_size from {original_vocab_size} to {target_vocab_size}"
+            f"Padding model's vocab_size from {original_vocab_size} to {target_vocab_size} "
             "(div. by 128) for GPU performance"
         )
         # Store both sizes in args for reference during conversion
@@ -157,7 +157,7 @@ def main(args) -> None:
         args.original_vocab_size = original_vocab_size
         args.padded_vocab_size = original_vocab_size
 
-    # Instantiate the tensorboard writers here as well
+    # Instantiate the tensorboard writers here
     if args.tensorboard_log_dir is not None:
         writers = {
             "train": SummaryWriter(os.path.join(args.tensorboard_log_dir, "train")),
