@@ -52,11 +52,14 @@ class MPNetForPretraining(nn.Module):
     def __init__(self, args, tokenizer) -> None:
         super().__init__()
 
+        # Use padded_vocab_size if available, otherwise use the tokenizer's vocab_size
+        vocab_size = getattr(args, "padded_vocab_size", tokenizer.vocab_size)
+
         # Let's define the encoder here
         self.args = args
         self.sentence_encoder = SentenceEncoder(
             padding_idx=tokenizer.vocab[tokenizer.pad_token],
-            vocab_size=tokenizer.vocab_size,
+            vocab_size=vocab_size,  # Use the padded vocab size
             num_encoder_layers=args.encoder_layers,
             embedding_dim=args.encoder_embed_dim,
             ffn_embedding_dim=args.encoder_ffn_dim,
@@ -71,15 +74,15 @@ class MPNetForPretraining(nn.Module):
             normalize_before=args.normalize_before,
         )
 
-        # Add the language modeling head so that we can do pretraining
+        # Add the language modeling head
         self.lm_head = MPNetLMHead(
             embed_dim=args.encoder_embed_dim,
-            output_dim=tokenizer.vocab_size,
+            output_dim=vocab_size,  # Use the padded vocab size
             activation_fn=args.activation_fn,
             weight=self.sentence_encoder.embed_tokens.weight,
         )
 
-        # Finally initialize the weights according to the guidelines in the original BERT paper
+        # Initialize the weights
         self.apply(init_final_params)
 
     def output_layer(

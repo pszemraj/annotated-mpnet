@@ -139,6 +139,24 @@ def main(args) -> None:
     # Now let's instantiate the tokenizer
     tokenizer = AutoTokenizer.from_pretrained("microsoft/mpnet-base")
 
+    # Check and adjust vocab_size parameter for better GPU performance
+    original_vocab_size = tokenizer.vocab_size
+    target_vocab_size = (
+        (original_vocab_size + 127) // 128
+    ) * 128  # Round up to nearest multiple of 128
+
+    if target_vocab_size > original_vocab_size:
+        LOGGER.info(
+            f"Padding model's vocab_size from {original_vocab_size} to {target_vocab_size}"
+            "(div. by 128) for GPU performance"
+        )
+        # Store both sizes in args for reference during conversion
+        args.original_vocab_size = original_vocab_size
+        args.padded_vocab_size = target_vocab_size
+    else:
+        args.original_vocab_size = original_vocab_size
+        args.padded_vocab_size = original_vocab_size
+
     # Instantiate the tensorboard writers here as well
     if args.tensorboard_log_dir is not None:
         writers = {
