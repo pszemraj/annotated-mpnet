@@ -36,6 +36,7 @@ from annotated_mpnet.data import (
 from annotated_mpnet.modeling import MPNetForPretraining
 from annotated_mpnet.scheduler import PolynomialDecayLRScheduler
 from annotated_mpnet.tracking import AverageMeter
+from annotated_mpnet.utils.utils import SUPPORTED_ACTIVATIONS
 
 
 def accuracy(output: torch.Tensor, target: torch.Tensor) -> int:
@@ -305,7 +306,7 @@ def main(args) -> None:
     optimizer = torch.optim.AdamW(
         filter(lambda p: p.requires_grad, model.parameters()),
         betas=(args.beta1, args.beta2),
-        lr=6e-9,
+        lr=6e-9,  # starting learning rate during warmup
         eps=args.adam_eps,
         weight_decay=args.weight_decay,
         fused=True,
@@ -740,7 +741,8 @@ def cli_main():
     Wrapper function so we can create a CLI entrypoint for this script
     """
     parser = argparse.ArgumentParser(
-        description="Pretrain MPNet by specifying encoder args and training filepath",
+        description="Pretrain an MPNet model with a huggingface dataset "
+        "or path(s) to local training/eval data",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
@@ -808,9 +810,10 @@ def cli_main():
         type=int,
     )
     parser.add_argument(
+        "-activation",
         "--activation-fn",
-        help="The activation function used throughout the model. This will default to GELU, since "
-        "most research on language models has shown optimal performance with GELU",
+        help="The activation function used throughout the model. Supported activations:\t"
+        f"{', '.join(SUPPORTED_ACTIVATIONS)}",
         default="gelu",
         type=str,
     )

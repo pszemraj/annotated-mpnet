@@ -13,6 +13,16 @@ import torch.nn.functional as F
 
 INCREMENTAL_STATE_INSTANCE_ID = defaultdict(lambda: 0)
 
+SUPPORTED_ACTIVATIONS = [
+    "relu",
+    "gelu",
+    "gelu_accurate",
+    "silu",
+    "relu2",
+    "tanh",
+    "linear",
+]
+
 
 def _get_full_incremental_state_key(module_instance, key):
     module_name = module_instance.__class__.__name__
@@ -72,7 +82,9 @@ def get_activation_fn(activation: str) -> Callable:
     elif activation == "linear":
         return lambda x: x
     else:
-        raise RuntimeError(f"{activation} is not supported here.")
+        raise ValueError(
+            f"{activation} is not supported. Supported activations:\t{SUPPORTED_ACTIVATIONS}"
+        )
 
 
 def gelu_accurate(x: torch.Tensor) -> torch.Tensor:
