@@ -818,9 +818,9 @@ def cli_main():
         type=str,
     )
     parser.add_argument(
+        "-prenorm",
         "--normalize-before",
-        help="This boolean determines when layer norm should be applied within each encoder layer. "
-        "Generally, we normalize after, but you can specify normalizing before here",
+        help="Determines when layer norm should be applied within each encoder layer.",
         action="store_true",
         default=False,
     )
@@ -884,6 +884,7 @@ def cli_main():
         type=int,
     )
     parser.add_argument(
+        "-warmup_steps",
         "--warmup-updates",
         help="The number of warmup updates to increase the learning rate to --peak-lr before "
         "decreasing it again. Will default to 0.1 of --total-updates if left unset",
@@ -899,8 +900,9 @@ def cli_main():
     parser.add_argument(
         "-gc_steps",
         "--update-freq",
-        help="The amount of batches to process before updating the weights in the model. This is "
-        "what gradient accumulation is",
+        help="Amount of batches to process before updating the weights in the model, "
+        "also known as gradient accumulation. Used to increase effective batch size without "
+        "having to fit it all into memory.",
         default=8,
         type=int,
     )
@@ -917,8 +919,9 @@ def cli_main():
         type=float,
     )
     parser.add_argument(
+        "-wd",
         "--weight-decay",
-        help="The weight decay fed into the Adam optimizer. Usually always set to 0.01",
+        help="The weight decay for the AdamW optimizer.",
         default=0.01,
         type=float,
     )
@@ -931,15 +934,14 @@ def cli_main():
     )
     parser.add_argument(
         "--lr",
-        help="The learning rate that will be hit when the warmup updates have finished",
+        help="Peak learning rate that will be hit when the warmup updates have finished",
         default=6e-4,
         type=float,
     )
     parser.add_argument(
         "-end_lr",
         "--end-learning-rate",
-        help="The learning rate that the polynomial scheduler will approach when decreasing after "
-        "the warmup updates have wrapped up",
+        help="Target learning rate that the polynomial scheduler will slowly decrease to after warm-up.",
         default=0.0,
         type=float,
     )
@@ -977,7 +979,7 @@ def cli_main():
     )
     parser.add_argument(
         "--debug",
-        help="Boolean that dictates whether or not to output debug logs",
+        help="Whether or not to output debug logs",
         action="store_true",
         default=False,
     )
@@ -995,7 +997,7 @@ def cli_main():
     )
     parser.add_argument(
         "--compile",
-        help="Boolean that dictates whether or not to compile the model",
+        help="Whether or not to compile the model",
         action="store_true",
         default=False,
     )
