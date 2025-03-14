@@ -744,32 +744,32 @@ def cli_main():
         description="Pretrain an MPNet model with a huggingface dataset "
         "or path(s) to local training/eval data",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        epilog="Default args follow the MPNet-base params described in the paper: "
+        "https://arxiv.org/abs/2004.09297",
     )
     parser.add_argument(
         "--encoder-layers",
-        help="The number of encoder layers within the encoder block of MPNet. Defaults to 12, but "
-        "can be increased for larger input sequences",
+        help="The number of encoder layers within the encoder block of MPNet. Subsequent "
+        "papers typically use 12-24 encoder layers.",
         default=12,
         type=int,
     )
     parser.add_argument(
         "--encoder-embed-dim",
-        help="The dimension of the embedding layer inside each encoder block. Should generally "
-        "always be 768, but some folks like OpenAI have seen good performance with large embeds",
+        help="The dimension of the embedding layer inside each encoder block. Generally 768-1024.",
         default=768,
         type=int,
     )
     parser.add_argument(
         "--encoder-ffn-dim",
         help="The dimension of the feed-forward hidden layer after each self-attention "
-        "calculation. Defaults to 3072, but this can be any large number",
+        "calculation. Typically 3-4x the embedding dimension",
         default=3072,
         type=int,
     )
     parser.add_argument(
         "--encoder-attention-heads",
-        help="The number of attention heads in each layer. Defaults to 12 which is what's used in"
-        "bert-base and mpnet-base, but this can lend itself to some experimentation",
+        help="The number of attention heads in each layer. Typically 8-16",
         default=12,
         type=int,
     )
