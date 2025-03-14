@@ -925,9 +925,8 @@ def cli_main():
     parser.add_argument(
         "-grad_clip",
         "--clip-grad-norm",
-        help="The value above which to clip gradients down to. Usually should be 0 for pretraining "
-        "and will be set that way by default",
-        default=0.0,
+        help="The value above which to clip gradients down to.",
+        default=1.0,
         type=float,
     )
     parser.add_argument(
