@@ -932,7 +932,7 @@ def cli_main():
     parser.add_argument(
         "--lr",
         help="The learning rate that will be hit when the warmup updates have finished",
-        default=0.0002,
+        default=6e-4,
         type=float,
     )
     parser.add_argument(
