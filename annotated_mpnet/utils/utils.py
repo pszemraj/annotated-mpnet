@@ -65,6 +65,8 @@ def get_activation_fn(activation: str) -> Callable:
         return gelu_accurate
     elif activation == "silu":
         return F.silu
+    elif activation == "relu2":
+        return relu_squared
     elif activation == "tanh":
         return torch.tanh
     elif activation == "linear":
@@ -92,6 +94,15 @@ def gelu(x: torch.Tensor) -> torch.Tensor:
         return torch.nn.functional.gelu(x.float()).type_as(x)
     else:
         return x * 0.5 * (1.0 + torch.erf(x / math.sqrt(2.0)))
+
+
+def relu_squared(x: torch.Tensor) -> torch.Tensor:
+    """
+    Applies the relu^2 activation introduced in https://arxiv.org/abs/2109.08668v2
+    """
+    relu_applied = F.relu(x)
+    squared = torch.square(relu_applied)
+    return squared
 
 
 @contextlib.contextmanager
