@@ -63,6 +63,8 @@ def get_activation_fn(activation: str) -> Callable:
         return gelu
     elif activation == "gelu_accurate":
         return gelu_accurate
+    elif activation == "silu":
+        return F.silu
     elif activation == "tanh":
         return torch.tanh
     elif activation == "linear":
