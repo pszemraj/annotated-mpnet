@@ -4,6 +4,7 @@ Pretraining script for MPNet
 
 import argparse
 import gc
+import json
 import logging
 import math
 import os
@@ -36,6 +37,7 @@ from annotated_mpnet.data import (
 from annotated_mpnet.modeling import MPNetForPretraining
 from annotated_mpnet.scheduler import PolynomialDecayLRScheduler
 from annotated_mpnet.tracking import AverageMeter
+from annotated_mpnet.utils.utils import SUPPORTED_ACTIVATIONS
 
 
 def accuracy(output: torch.Tensor, target: torch.Tensor) -> int:
@@ -305,7 +307,7 @@ def main(args) -> None:
     optimizer = torch.optim.AdamW(
         filter(lambda p: p.requires_grad, model.parameters()),
         betas=(args.beta1, args.beta2),
-        lr=6e-9,
+        lr=6e-9,  # starting learning rate during warmup
         eps=args.adam_eps,
         weight_decay=args.weight_decay,
         fused=True,
@@ -329,6 +331,8 @@ def main(args) -> None:
 
     # Additionally, we create a best loss counter that will be set arbitrarily high
     best_loss = 10e6
+    # Flag to track if non-trainable model repo files were saved at first checkpoint.
+    initial_outputs_saved = False
 
     while steps <= args.total_updates:
         # Handle either streaming or file-based training
@@ -420,6 +424,17 @@ def main(args) -> None:
                     {"args": vars(args), "model_states": model.state_dict()},
                     os.path.join(args.checkpoint_dir, f"checkpoint{steps + 1}.pt"),
                 )
+
+                # Save the args if this is the first checkpoint
+                if not initial_outputs_saved:
+                    args_dict = vars(args) if not isinstance(args, dict) else args
+
+                    with open(
+                        os.path.join(args.checkpoint_dir, "training_args.json"), "w"
+                    ) as f:
+                        json.dump(args_dict, f, indent=4)
+
+                    initial_outputs_saved = True
 
             # Load the tensors onto the appropriate device
             device_batch = {
@@ -740,34 +755,35 @@ def cli_main():
     Wrapper function so we can create a CLI entrypoint for this script
     """
     parser = argparse.ArgumentParser(
-        description="Pretrain MPNet by specifying encoder args and training filepath",
+        description="Pretrain an MPNet model with a huggingface dataset "
+        "or path(s) to local training/eval data",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        epilog="Default args follow the MPNet-base params described in the paper: "
+        "https://arxiv.org/abs/2004.09297",
     )
     parser.add_argument(
         "--encoder-layers",
-        help="The number of encoder layers within the encoder block of MPNet. Defaults to 12, but "
-        "can be increased for larger input sequences",
+        help="The number of encoder layers within the encoder block of MPNet. Subsequent "
+        "papers typically use 12-24 encoder layers.",
         default=12,
         type=int,
     )
     parser.add_argument(
         "--encoder-embed-dim",
-        help="The dimension of the embedding layer inside each encoder block. Should generally "
-        "always be 768, but some folks like OpenAI have seen good performance with large embeds",
+        help="The dimension of the embedding layer inside each encoder block. Generally 768-1024.",
         default=768,
         type=int,
     )
     parser.add_argument(
         "--encoder-ffn-dim",
         help="The dimension of the feed-forward hidden layer after each self-attention "
-        "calculation. Defaults to 3072, but this can be any large number",
+        "calculation. Typically 3-4x the embedding dimension",
         default=3072,
         type=int,
     )
     parser.add_argument(
         "--encoder-attention-heads",
-        help="The number of attention heads in each layer. Defaults to 12 which is what's used in"
-        "bert-base and mpnet-base, but this can lend itself to some experimentation",
+        help="The number of attention heads in each layer. Typically 8-16",
         default=12,
         type=int,
     )
@@ -808,16 +824,17 @@ def cli_main():
         type=int,
     )
     parser.add_argument(
+        "-activation",
         "--activation-fn",
-        help="The activation function used throughout the model. This will default to GELU, since "
-        "most research on language models has shown optimal performance with GELU",
+        help="The activation function used throughout the model. Supported activations:\t"
+        f"{', '.join(SUPPORTED_ACTIVATIONS)}",
         default="gelu",
         type=str,
     )
     parser.add_argument(
+        "-prenorm",
         "--normalize-before",
-        help="This boolean determines when layer norm should be applied within each encoder layer. "
-        "Generally, we normalize after, but you can specify normalizing before here",
+        help="Determines when layer norm should be applied within each encoder layer.",
         action="store_true",
         default=False,
     )
@@ -881,6 +898,7 @@ def cli_main():
         type=int,
     )
     parser.add_argument(
+        "-warmup_steps",
         "--warmup-updates",
         help="The number of warmup updates to increase the learning rate to --peak-lr before "
         "decreasing it again. Will default to 0.1 of --total-updates if left unset",
@@ -896,8 +914,9 @@ def cli_main():
     parser.add_argument(
         "-gc_steps",
         "--update-freq",
-        help="The amount of batches to process before updating the weights in the model. This is "
-        "what gradient accumulation is",
+        help="Amount of batches to process before updating the weights in the model, "
+        "also known as gradient accumulation. Used to increase effective batch size without "
+        "having to fit it all into memory.",
         default=8,
         type=int,
     )
@@ -914,30 +933,29 @@ def cli_main():
         type=float,
     )
     parser.add_argument(
+        "-wd",
         "--weight-decay",
-        help="The weight decay fed into the Adam optimizer. Usually always set to 0.01",
+        help="The weight decay for the AdamW optimizer.",
         default=0.01,
         type=float,
     )
     parser.add_argument(
         "-grad_clip",
         "--clip-grad-norm",
-        help="The value above which to clip gradients down to. Usually should be 0 for pretraining "
-        "and will be set that way by default",
-        default=0.0,
+        help="The value above which to clip gradients down to.",
+        default=1.0,
         type=float,
     )
     parser.add_argument(
         "--lr",
-        help="The learning rate that will be hit when the warmup updates have finished",
-        default=0.0002,
+        help="Peak learning rate that will be hit when the warmup updates have finished",
+        default=6e-4,
         type=float,
     )
     parser.add_argument(
         "-end_lr",
         "--end-learning-rate",
-        help="The learning rate that the polynomial scheduler will approach when decreasing after "
-        "the warmup updates have wrapped up",
+        help="Target learning rate that the polynomial scheduler will slowly decrease to after warm-up.",
         default=0.0,
         type=float,
     )
@@ -975,7 +993,7 @@ def cli_main():
     )
     parser.add_argument(
         "--debug",
-        help="Boolean that dictates whether or not to output debug logs",
+        help="Whether or not to output debug logs",
         action="store_true",
         default=False,
     )
@@ -993,7 +1011,7 @@ def cli_main():
     )
     parser.add_argument(
         "--compile",
-        help="Boolean that dictates whether or not to compile the model",
+        help="Whether or not to compile the model",
         action="store_true",
         default=False,
     )
