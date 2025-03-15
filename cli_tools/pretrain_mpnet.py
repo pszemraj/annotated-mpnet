@@ -4,6 +4,7 @@ Pretraining script for MPNet
 
 import argparse
 import gc
+import json
 import logging
 import math
 import os
@@ -330,6 +331,8 @@ def main(args) -> None:
 
     # Additionally, we create a best loss counter that will be set arbitrarily high
     best_loss = 10e6
+    # Flag to track if non-trainable model repo files were saved at first checkpoint.
+    initial_outputs_saved = False
 
     while steps <= args.total_updates:
         # Handle either streaming or file-based training
@@ -421,6 +424,17 @@ def main(args) -> None:
                     {"args": vars(args), "model_states": model.state_dict()},
                     os.path.join(args.checkpoint_dir, f"checkpoint{steps + 1}.pt"),
                 )
+
+                # Save the args if this is the first checkpoint
+                if not initial_outputs_saved:
+                    args_dict = vars(args) if not isinstance(args, dict) else args
+
+                    with open(
+                        os.path.join(args.checkpoint_dir, "training_args.json"), "w"
+                    ) as f:
+                        json.dump(args_dict, f, indent=4)
+
+                    initial_outputs_saved = True
 
             # Load the tensors onto the appropriate device
             device_batch = {
