@@ -485,16 +485,7 @@ def main(args) -> None:
 
             # Check if we've reached a gradient accumulation step
             if (i + 1) % args.update_freq == 0:
-                # Before stepping the optimizer, we need to normalize the gradients by the
-                # accumulated sample sizes as described above
-                if accumulation_sample_sizes > 0:
-                    for p in model.parameters():
-                        if p.grad is not None:
-                            p.grad.data.mul_(1 / accumulation_sample_sizes)
-
-                # We should also do a grad clip norm as well if it's been specified
-                # If it hasn't been specified, we will calculate the gradient norm the old fashioned
-                # way so that it can be logged
+                # Apply clipping to raw accumulated gradients first (before any normalization)
                 if args.clip_grad_norm > 0.0:
                     gnorm = torch.nn.utils.clip_grad_norm_(
                         model.parameters(), args.clip_grad_norm
@@ -507,6 +498,13 @@ def main(args) -> None:
                             if p.grad is not None
                         )
                     )
+
+                # Before stepping the optimizer, we need to normalize the gradients by the
+                # accumulated sample sizes as described above
+                if accumulation_sample_sizes > 0:
+                    for p in model.parameters():
+                        if p.grad is not None:
+                            p.grad.data.mul_(1 / accumulation_sample_sizes)
 
                 # Now we step the scheduler (and return the LR so that we can store it)
                 lr = scheduler.step(steps)
