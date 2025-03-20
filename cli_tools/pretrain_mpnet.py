@@ -474,9 +474,9 @@ def main(args) -> None:
             accumulation_acc += acc
             accumulation_loss += loss.item()  # Save the original loss value for metrics
 
-            # Scale the loss by update_freq before backward
-            # This ensures gradients are properly scaled from the start
-            scaled_loss = loss / args.update_freq
+            # Divide by batch_size to normalize per-token
+            # Divide by update_freq to account for gradient accumulation
+            scaled_loss = loss / batch_size / args.update_freq
             scaled_loss.backward()
 
             # Check if we've reached a gradient accumulation step
