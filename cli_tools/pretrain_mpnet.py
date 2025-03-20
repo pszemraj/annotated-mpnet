@@ -485,7 +485,7 @@ def main(args) -> None:
                 if args.clip_grad_norm > 0.0:
                     gnorm = torch.nn.utils.clip_grad_norm_(
                         model.parameters(), args.clip_grad_norm
-                    )
+                    ).item()
                 else:
                     gnorm = math.sqrt(
                         sum(
@@ -493,7 +493,7 @@ def main(args) -> None:
                             for p in model.parameters()
                             if p.grad is not None
                         )
-                    )
+                    ) # record gradient norm for logging
 
                 # Now we step the scheduler (and return the LR so that we can store it)
                 lr = scheduler.step(steps)
