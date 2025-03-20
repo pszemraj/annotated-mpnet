@@ -428,12 +428,10 @@ def main(args) -> None:
                 # Save the args if this is the first checkpoint
                 if not initial_outputs_saved:
                     args_dict = vars(args) if not isinstance(args, dict) else args
-
                     with open(
                         os.path.join(args.checkpoint_dir, "training_args.json"), "w"
                     ) as f:
                         json.dump(args_dict, f, indent=4)
-
                     initial_outputs_saved = True
 
             # Load the tensors onto the appropriate device
@@ -446,12 +444,13 @@ def main(args) -> None:
             # Extract the targets since we'll use them a bunch below
             targets = device_batch["targets"]
 
-            # Get the "sample_size" of the current batch, i.e., how many total targets there are to
-            # be predicted. This will help us normalize the accumulated loss below
-            accumulation_sample_sizes += targets.numel()
+            # Track batch statistics for metrics
+            batch_size = targets.numel()
+            token_count = device_batch["ntokens"]
 
-            # Update the count of total tokens processed during accumulation steps
-            accumulation_tokens += device_batch["ntokens"]
+            # Add to accumulation counters for later metric calculations
+            accumulation_sample_sizes += batch_size
+            accumulation_tokens += token_count
 
             # Now let's process these through the model with autocast for mixed precision using bf16
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
@@ -471,21 +470,18 @@ def main(args) -> None:
             # Calculate accuracy
             acc = accuracy(outs, targets)
 
-            # Keep track of the accumulated accuracy to be divided by the total number of
-            # accumulation steps before being written to tensorboard
+            # Track raw metrics for later normalization and logging
             accumulation_acc += acc
+            accumulation_loss += loss.item()  # Save the original loss value for metrics
 
-            # Keep track of accumulated loss, to be divided by the total number of accumulation
-            # steps later before being written to tensorboard
-            accumulation_loss += loss.item()
-
-            # Do the backward processing (but we won't step until we reach the gradient accumulation
-            # number)
-            loss.backward()
+            # Scale the loss by update_freq before backward
+            # This ensures gradients are properly scaled from the start
+            scaled_loss = loss / args.update_freq
+            scaled_loss.backward()
 
             # Check if we've reached a gradient accumulation step
             if (i + 1) % args.update_freq == 0:
-                # Apply clipping to raw accumulated gradients first (before any normalization)
+                # Apply gradient clipping on the accumulated gradients
                 if args.clip_grad_norm > 0.0:
                     gnorm = torch.nn.utils.clip_grad_norm_(
                         model.parameters(), args.clip_grad_norm
@@ -498,13 +494,6 @@ def main(args) -> None:
                             if p.grad is not None
                         )
                     )
-
-                # Before stepping the optimizer, we need to normalize the gradients by the
-                # accumulated sample sizes as described above
-                if accumulation_sample_sizes > 0:
-                    for p in model.parameters():
-                        if p.grad is not None:
-                            p.grad.data.mul_(1 / accumulation_sample_sizes)
 
                 # Now we step the scheduler (and return the LR so that we can store it)
                 lr = scheduler.step(steps)
