@@ -56,9 +56,7 @@ class SentenceEncoderLayer(nn.Module):
                 forward pass
             attention_dropout: similar to above, but is the dropout prob within the self-attention
                 mechanism
-            activation_fn: the activation function you will be using in this network. Although ReLU
-                is the default, more and more evidence points towards GELU being better for large
-                NLP-based transformers
+            activation_fn: the activation function you will be using in this network.
             add_bias_kv: boolean that dictates whether or not to add a bias parameter to the K, V
                 matrices in the self-attention mechanism
             add_zero_attn: boolean that dictate whether or not to add zero attention to the
