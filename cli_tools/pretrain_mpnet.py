@@ -470,10 +470,14 @@ def main(args) -> None:
             # Calculate accuracy
             acc = accuracy(outs, targets)
 
-            # Track raw metrics for later normalization and logging
+            # Calculate per-token loss for tracking metrics
+            per_token_loss = loss / batch_size
             accumulation_acc += acc
-            accumulation_loss += loss.item()  # Save the original loss value for metrics
+            accumulation_loss += (
+                per_token_loss.item()
+            )  # Track per-token loss for more accurate reporting
 
+            # Scale the loss appropriately for backward
             # Divide by batch_size to normalize per-token
             # Divide by update_freq to account for gradient accumulation
             scaled_loss = loss / batch_size / args.update_freq
@@ -493,7 +497,7 @@ def main(args) -> None:
                             for p in model.parameters()
                             if p.grad is not None
                         )
-                    ) # record gradient norm for logging
+                    )  # record gradient norm for logging
 
                 # Now we step the scheduler (and return the LR so that we can store it)
                 lr = scheduler.step(steps)
@@ -501,12 +505,11 @@ def main(args) -> None:
                 # Reset gradients now
                 scheduler.optimizer.zero_grad()
 
-                # Calculate the accumulation normalized metrics by normalizing over the total number
-                # of samples that have passed through each batch
+                # Calculate metrics - since we're now tracking per-token loss, our normalization is simpler
+                # We just need to average across the accumulated steps
                 normal_acc = accumulation_acc / accumulation_sample_sizes
-                normal_loss = (
-                    accumulation_loss / accumulation_sample_sizes / math.log(2)
-                )
+                # We're already tracking per-token loss, so just convert to bits if needed
+                normal_loss = accumulation_loss / args.update_freq / math.log(2)
 
                 # Log some debugging values here
                 LOGGER.debug("Accumulated batch information is below:")
