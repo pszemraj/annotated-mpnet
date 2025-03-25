@@ -145,9 +145,9 @@ def main(args) -> None:
         args.tokenizer_name, model_max_length=args.max_tokens
     )
     is_valid, details = validate_tokenizer(tokenizer)
-    assert is_valid and details["whole_word_mask"], (
-        f"Invalid tokenizer: {args.tokenizer_name}. Debug w/ verbose output from validate_tokenizer()"
-    )
+    assert (
+        is_valid and details["whole_word_mask"]
+    ), f"Invalid tokenizer: {args.tokenizer_name}. Debug w/ verbose output from validate_tokenizer()"
 
     # Check and adjust model vocab_size for better GPU performance
     original_vocab_size = tokenizer.vocab_size
@@ -1040,7 +1040,7 @@ def cli_main():
     parser.add_argument(
         "--num-workers",
         help="Number of worker processes for data loading.",
-        default=int(os.cpu_count() // 2),
+        default=min(4, os.cpu_count()),
         type=int,
     )
     parser.add_argument(
