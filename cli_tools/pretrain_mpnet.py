@@ -37,7 +37,7 @@ from annotated_mpnet.data import (
 from annotated_mpnet.modeling import MPNetForPretraining
 from annotated_mpnet.scheduler import PolynomialDecayLRScheduler
 from annotated_mpnet.tracking import AverageMeter
-from annotated_mpnet.utils.utils import SUPPORTED_ACTIVATIONS
+from annotated_mpnet.utils.utils import SUPPORTED_ACTIVATIONS, validate_tokenizer
 
 
 def accuracy(output: torch.Tensor, target: torch.Tensor) -> int:
@@ -134,14 +134,22 @@ def main(args) -> None:
             )
 
     # If max_positions is unset (as expected) we set max_positions to the same number as max_tokens
-    # here
     if args.max_positions is None:
         args.max_positions = args.max_tokens
 
-    # Now let's instantiate the tokenizer
-    tokenizer = AutoTokenizer.from_pretrained("microsoft/mpnet-base")
+    # TOKENIZER
+    # -----------------------------------
 
-    # Check and adjust vocab_size parameter for better GPU performance
+    LOGGER.info(f"Loading tokenizer from {args.tokenizer_name}")
+    tokenizer = AutoTokenizer.from_pretrained(
+        args.tokenizer_name, model_max_length=args.max_tokens
+    )
+    is_valid, details = validate_tokenizer(tokenizer)
+    assert (
+        is_valid and details["whole_word_mask"]
+    ), f"Invalid tokenizer: {args.tokenizer_name}. Debug w/ verbose output from validate_tokenizer()"
+
+    # Check and adjust model vocab_size for better GPU performance
     original_vocab_size = tokenizer.vocab_size
     target_vocab_size = (
         (original_vocab_size + 127) // 128
@@ -159,7 +167,9 @@ def main(args) -> None:
         args.original_vocab_size = original_vocab_size
         args.padded_vocab_size = original_vocab_size
 
-    # Instantiate the tensorboard writers here
+    # -----------------------------------
+
+    # Instantiate the tensorboard writers
     if args.tensorboard_log_dir is not None:
         writers = {
             "train": SummaryWriter(os.path.join(args.tensorboard_log_dir, "train")),
@@ -804,6 +814,13 @@ def cli_main():
         "feed-forward network after the attention calculation. Defaults to 0.1",
         default=0.1,
         type=float,
+    )
+    parser.add_argument(
+        "--tokenizer-name",
+        help="The name of the tokenizer to use. This should be a HuggingFace tokenizer name, "
+        "e.g. 'microsoft/mpnet-base' or a path to a local tokenizer/model directory.",
+        default="microsoft/mpnet-base",
+        type=str,
     )
     parser.add_argument(
         "--max-positions",
