@@ -177,7 +177,9 @@ class SentenceEncoder(nn.Module):
 
         if relative_attention_max_distance is None:
             # linear scaling of max distance based on seq len (round up to nearest 8)
-            scaled_max_distance = int(base_max_distance * max_seq_len / base_context)
+            scaled_max_distance = max(
+                128, int(base_max_distance * max_seq_len / base_context)
+            )
             self.relative_attention_max_distance = (scaled_max_distance + 7) // 8 * 8
         else:
             self.relative_attention_max_distance = relative_attention_max_distance
