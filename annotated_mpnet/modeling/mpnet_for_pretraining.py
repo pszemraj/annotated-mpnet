@@ -534,6 +534,10 @@ def make_query_and_content_mask(
                              [ 0 0 0 0 1 1 1 0 0 0 ]
                              [ 0 0 0 0 1 1 1 0 0 0 ]
                              [ 0 0 0 0 1 1 1 0 0 0 ]
+
+    Note: This function is designed to scale automatically with sequence length as it's
+    matrix-based and constructs masks based on the provided seq_len and pred_size.
+    There's no need to modify this function when changing context length.
     """
 
     # Define helper function to keep things organized
