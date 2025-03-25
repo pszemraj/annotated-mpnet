@@ -22,7 +22,7 @@ LOGGER = logging.getLogger(__name__)
 
 import torch
 from torch.serialization import safe_globals
-from transformers import MPNetConfig, MPNetForMaskedLM
+from transformers import AutoTokenizer, MPNetConfig, MPNetForMaskedLM
 from transformers.models.mpnet import MPNetLayer
 from transformers.utils import logging as hf_logging
 
@@ -32,7 +32,9 @@ hf_logging.set_verbosity_info()
 
 
 def convert_mpnet_checkpoint_to_pytorch(
-    mpnet_checkpoint_path: str, pytorch_dump_folder_path: str
+    mpnet_checkpoint_path: str,
+    pytorch_dump_folder_path: str,
+    save_tokenizer: bool = True,
 ) -> None:
     """
     This is the main function of the script. It takes in a checkpoint path pointing to a specific
@@ -212,6 +214,15 @@ def convert_mpnet_checkpoint_to_pytorch(
     # save_pretrained function to dump the appropriate contents to the provided dir path
     model.save_pretrained(pytorch_dump_folder_path)
 
+    if save_tokenizer and hasattr(mpnet_args, "tokenizer_name"):
+        LOGGER.info(f"Saving tokenizer to {pytorch_dump_folder_path}")
+        tokenizer = AutoTokenizer.from_pretrained(
+            mpnet_args.tokenizer_name, model_max_length=mpnet_args.max_positions
+        )
+        tokenizer.save_pretrained(pytorch_dump_folder_path)
+
+    LOGGER.info("Done!")
+
 
 def cli_main():
     """
@@ -234,10 +245,16 @@ def cli_main():
         required=True,
         help="Path to dump the newly built Huggingface model",
     )
+    parser.add_argument(
+        "--no-save-tokenizer",
+        action="store_true",
+        help="Don't save the tokenizer to the output directory",
+    )
     args = parser.parse_args()
     convert_mpnet_checkpoint_to_pytorch(
         args.mpnet_checkpoint_path,
         args.hf_model_folder_path,
+        save_tokenizer=not args.no_save_tokenizer,
     )
 
 

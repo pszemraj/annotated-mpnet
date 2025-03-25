@@ -145,9 +145,9 @@ def main(args) -> None:
         args.tokenizer_name, model_max_length=args.max_tokens
     )
     is_valid, details = validate_tokenizer(tokenizer)
-    assert (
-        is_valid and details["whole_word_mask"]
-    ), f"Invalid tokenizer: {args.tokenizer_name}. Debug w/ verbose output from validate_tokenizer()"
+    assert is_valid and details["whole_word_mask"], (
+        f"Invalid tokenizer: {args.tokenizer_name}. Debug w/ verbose output from validate_tokenizer()"
+    )
 
     # Check and adjust model vocab_size for better GPU performance
     original_vocab_size = tokenizer.vocab_size
@@ -443,13 +443,16 @@ def main(args) -> None:
                     os.path.join(args.checkpoint_dir, f"checkpoint{steps + 1}.pt"),
                 )
 
-                # Save the args if this is the first checkpoint
+                # Save the args & tokenizer if this is the first checkpoint
                 if not initial_outputs_saved:
                     args_dict = vars(args) if not isinstance(args, dict) else args
                     with open(
                         os.path.join(args.checkpoint_dir, "training_args.json"), "w"
                     ) as f:
                         json.dump(args_dict, f, indent=4)
+                    tokenizer.save_pretrained(
+                        os.path.join(args.checkpoint_dir, "tokenizer")
+                    )
                     initial_outputs_saved = True
 
             # Load the tensors onto the appropriate device
@@ -559,6 +562,7 @@ def main(args) -> None:
                 #   tokens the model has seen
                 # tpb:
                 #   tokens per batch, averaging out the tokens processed per batch
+
                 logging_dict = {
                     "acc": meters["train_acc"].avg,
                     "loss": normal_loss,
