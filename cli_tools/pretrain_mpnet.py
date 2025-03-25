@@ -172,8 +172,12 @@ def main(args) -> None:
     mplm = DataCollatorForMaskedPermutedLanguageModeling(tokenizer=tokenizer)
 
     # sync args for relative attention with model
-    args.relative_attention_num_buckets = model.relative_attention_num_buckets
-    args.relative_attention_max_distance = model.relative_attention_max_distance
+    args.relative_attention_num_buckets = (
+        model.sentence_encoder.relative_attention_num_buckets
+    )
+    args.relative_attention_max_distance = (
+        model.sentence_encoder.relative_attention_max_distance
+    )
 
     # Load the model up to the device
     model.to(device)
