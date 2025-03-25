@@ -3,8 +3,9 @@ Module containing the logic for handling the dataset for MPNet including the Dat
 as the data collator
 """
 
-import os
 import logging
+import os
+import random
 from typing import Dict, Iterator, Sized
 
 from rich.logging import RichHandler
@@ -15,12 +16,12 @@ logging.basicConfig(
 )
 LOGGER = logging.getLogger(__name__)
 
+
 import numpy as np
 import torch
+from datasets import load_dataset
 from torch.utils.data import Sampler
 from transformers import PreTrainedTokenizer
-from datasets import load_dataset
-import random
 
 from annotated_mpnet.utils import utils
 from annotated_mpnet.utils.perm_utils_fast import make_span_perm
