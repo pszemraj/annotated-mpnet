@@ -76,6 +76,7 @@ def convert_mpnet_checkpoint_to_pytorch(
         # same size as max_tokens, since position embeddings start at padding_idx + 1, we need to
         # add 2 to the final count, since the lowest possible position is 2
         max_position_embeddings=mpnet_args.max_positions + 2,
+        relative_attention_num_buckets=mpnet_args.relative_attention_num_buckets,
         hidden_act=mpnet_args.activation_fn,
         layer_norm_eps=1e-5,
     )

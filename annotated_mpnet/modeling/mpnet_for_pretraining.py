@@ -72,6 +72,8 @@ class MPNetForPretraining(nn.Module):
             encoder_normalize_before=True,
             activation_fn=args.activation_fn,
             normalize_before=args.normalize_before,
+            relative_attention_num_buckets=args.relative_attention_num_buckets,
+            relative_attention_max_distance=args.relative_attention_max_distance,
         )
 
         # Add the language modeling head

@@ -171,6 +171,10 @@ def main(args) -> None:
     model = MPNetForPretraining(args, tokenizer)
     mplm = DataCollatorForMaskedPermutedLanguageModeling(tokenizer=tokenizer)
 
+    # sync args for relative attention with model
+    args.relative_attention_num_buckets = model.relative_attention_num_buckets
+    args.relative_attention_max_distance = model.relative_attention_max_distance
+
     # Load the model up to the device
     model.to(device)
 
@@ -811,6 +815,21 @@ def cli_main():
         "different. However, this is not advised, so you should only set one of these. Max tokens "
         "will default to 512",
         default=512,
+        type=int,
+    )
+    parser.add_argument(
+        "-num-buckets",
+        "--relative-attention-num-buckets",
+        help="Number of buckets for relative position. If not set, will automatically compute "
+        "the number of buckets based on the max sequence length.",
+        default=None,
+        type=int,
+    )
+    parser.add_argument(
+        "--relative-attention-max-distance",
+        help="Maximum distance for relative position. If not set, will automatically compute "
+        "the maximum distance based on the max sequence length.",
+        default=None,
         type=int,
     )
     parser.add_argument(
