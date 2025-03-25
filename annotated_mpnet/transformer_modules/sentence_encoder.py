@@ -317,7 +317,23 @@ class SentenceEncoder(nn.Module):
         return values
 
     @staticmethod
-    def relative_position_bucket(relative_position, num_buckets=32, max_distance=128):
+    def relative_position_bucket(
+        relative_position, num_buckets: int = 32, max_distance: int = 128
+    ):
+        """
+        Computes the relative position bias for a given tensor of relative positions.
+
+        Args:
+            relative_position: Tensor of shape (bsz, qlen, klen) containing the relative
+                positions between the queries and keys.
+            num_buckets: The number of buckets to use for the relative position bias.
+                Defaults to 32.
+            max_distance: The maximum distance to consider when computing the relative
+                position bias. Defaults to 128.
+
+        Returns:
+            A tensor of shape (bsz, qlen, klen) containing the relative position biases.
+        """
         ret = 0
         n = -relative_position
 
