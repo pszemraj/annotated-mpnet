@@ -57,7 +57,7 @@ extensions = [
 
 setup(
     name="annotated_mpnet",
-    version="0.1.2",
+    version="0.1.3",
     description="Raw Torch, heavily annotated, pretrainable MPNet",
     url="https://github.com/pszemraj/annotated-mpnet",
     long_description=readme,
@@ -73,7 +73,7 @@ setup(
         "numpy",
         "rich",
         "tensorboard",
-        "torch",
+        "torch>=2.6.0",
         "transformers",
     ],
     packages=find_packages(exclude=["cli_tools", "tests"]),
