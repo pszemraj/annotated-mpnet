@@ -293,10 +293,18 @@ class SentenceEncoder(nn.Module):
 
         return inner_states, sentence_rep
 
-    # Helper function below
-    def compute_position_bias(self, x, num_buckets):
+    def compute_position_bias(self, x, num_buckets, max_distance):
         """
-        Helper function that computes the position bias based on the number of buckets provided
+        Computes the relative position bias for self-attention.
+
+        Args:
+            x: Input tensor with shape (seq_len, batch_size, embed_dim).
+            num_buckets: Number of buckets to use for relative position encoding.
+            max_distance: The maximum distance to consider for relative positions.
+
+        Returns:
+            A tensor representing the relative position bias, with shape
+            (batch_size * num_heads, qlen, klen).
         """
 
         # Get the batch size, q and k len
@@ -307,7 +315,9 @@ class SentenceEncoder(nn.Module):
         relative_position = memory_position - context_position
 
         rp_bucket = self.relative_position_bucket(
-            relative_position, num_buckets=num_buckets
+            relative_position,
+            num_buckets=num_buckets,
+            max_distance=max_distance,
         )
         rp_bucket = rp_bucket.to(x.device)
         values = self.relative_attention_bias(rp_bucket)
@@ -322,6 +332,7 @@ class SentenceEncoder(nn.Module):
     ):
         """
         Computes the relative position bias for a given tensor of relative positions.
+            Defaults are for original MPNet @ context length 512.
 
         Args:
             relative_position: Tensor of shape (bsz, qlen, klen) containing the relative
