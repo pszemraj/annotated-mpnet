@@ -822,7 +822,7 @@ def cli_main():
         type=int,
     )
     parser.add_argument(
-        "-num-buckets",
+        "-num_buckets",
         "--relative-attention-num-buckets",
         help="Number of buckets for relative position. If not set, will automatically compute "
         "the number of buckets based on the max sequence length.",
