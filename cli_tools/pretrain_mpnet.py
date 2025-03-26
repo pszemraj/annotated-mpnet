@@ -4,6 +4,7 @@ Pretraining script for MPNet
 
 import argparse
 import gc
+import json
 import logging
 import math
 import os
@@ -36,6 +37,7 @@ from annotated_mpnet.data import (
 from annotated_mpnet.modeling import MPNetForPretraining
 from annotated_mpnet.scheduler import PolynomialDecayLRScheduler
 from annotated_mpnet.tracking import AverageMeter
+from annotated_mpnet.utils.utils import SUPPORTED_ACTIVATIONS, validate_tokenizer
 
 
 def accuracy(output: torch.Tensor, target: torch.Tensor) -> int:
@@ -132,14 +134,22 @@ def main(args) -> None:
             )
 
     # If max_positions is unset (as expected) we set max_positions to the same number as max_tokens
-    # here
     if args.max_positions is None:
         args.max_positions = args.max_tokens
 
-    # Now let's instantiate the tokenizer
-    tokenizer = AutoTokenizer.from_pretrained("microsoft/mpnet-base")
+    # TOKENIZER
+    # -----------------------------------
 
-    # Check and adjust vocab_size parameter for better GPU performance
+    LOGGER.info(f"Loading tokenizer from {args.tokenizer_name}")
+    tokenizer = AutoTokenizer.from_pretrained(
+        args.tokenizer_name, model_max_length=args.max_tokens
+    )
+    is_valid, details = validate_tokenizer(tokenizer)
+    assert (
+        is_valid and details["whole_word_mask"]
+    ), f"Invalid tokenizer: {args.tokenizer_name}. Debug w/ verbose output from validate_tokenizer()"
+
+    # Check and adjust model vocab_size for better GPU performance
     original_vocab_size = tokenizer.vocab_size
     target_vocab_size = (
         (original_vocab_size + 127) // 128
@@ -157,7 +167,9 @@ def main(args) -> None:
         args.original_vocab_size = original_vocab_size
         args.padded_vocab_size = original_vocab_size
 
-    # Instantiate the tensorboard writers here
+    # -----------------------------------
+
+    # Instantiate the tensorboard writers
     if args.tensorboard_log_dir is not None:
         writers = {
             "train": SummaryWriter(os.path.join(args.tensorboard_log_dir, "train")),
@@ -168,6 +180,14 @@ def main(args) -> None:
     # Next, we instantiate the model and the data collator
     model = MPNetForPretraining(args, tokenizer)
     mplm = DataCollatorForMaskedPermutedLanguageModeling(tokenizer=tokenizer)
+
+    # sync args for relative attention with model
+    args.relative_attention_num_buckets = (
+        model.sentence_encoder.relative_attention_num_buckets
+    )
+    args.relative_attention_max_distance = (
+        model.sentence_encoder.relative_attention_max_distance
+    )
 
     # Load the model up to the device
     model.to(device)
@@ -305,7 +325,7 @@ def main(args) -> None:
     optimizer = torch.optim.AdamW(
         filter(lambda p: p.requires_grad, model.parameters()),
         betas=(args.beta1, args.beta2),
-        lr=6e-9,
+        lr=6e-9,  # starting learning rate during warmup
         eps=args.adam_eps,
         weight_decay=args.weight_decay,
         fused=True,
@@ -329,6 +349,8 @@ def main(args) -> None:
 
     # Additionally, we create a best loss counter that will be set arbitrarily high
     best_loss = 10e6
+    # Flag to track if non-trainable model repo files were saved at first checkpoint.
+    initial_outputs_saved = False
 
     while steps <= args.total_updates:
         # Handle either streaming or file-based training
@@ -421,6 +443,18 @@ def main(args) -> None:
                     os.path.join(args.checkpoint_dir, f"checkpoint{steps + 1}.pt"),
                 )
 
+                # Save the args & tokenizer if this is the first checkpoint
+                if not initial_outputs_saved:
+                    args_dict = vars(args) if not isinstance(args, dict) else args
+                    with open(
+                        os.path.join(args.checkpoint_dir, "training_args.json"), "w"
+                    ) as f:
+                        json.dump(args_dict, f, indent=4)
+                    tokenizer.save_pretrained(
+                        os.path.join(args.checkpoint_dir, "tokenizer")
+                    )
+                    initial_outputs_saved = True
+
             # Load the tensors onto the appropriate device
             device_batch = {
                 data_type: (t.to(device) if isinstance(t, torch.Tensor) else t)
@@ -431,12 +465,13 @@ def main(args) -> None:
             # Extract the targets since we'll use them a bunch below
             targets = device_batch["targets"]
 
-            # Get the "sample_size" of the current batch, i.e., how many total targets there are to
-            # be predicted. This will help us normalize the accumulated loss below
-            accumulation_sample_sizes += targets.numel()
+            # Track batch statistics for metrics
+            batch_size = targets.numel()
+            token_count = device_batch["ntokens"]
 
-            # Update the count of total tokens processed during accumulation steps
-            accumulation_tokens += device_batch["ntokens"]
+            # Add to accumulation counters for later metric calculations
+            accumulation_sample_sizes += batch_size
+            accumulation_tokens += token_count
 
             # Now let's process these through the model with autocast for mixed precision using bf16
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
@@ -456,34 +491,26 @@ def main(args) -> None:
             # Calculate accuracy
             acc = accuracy(outs, targets)
 
-            # Keep track of the accumulated accuracy to be divided by the total number of
-            # accumulation steps before being written to tensorboard
+            # Calculate per-token loss for tracking metrics
+            per_token_loss = loss / batch_size
             accumulation_acc += acc
+            accumulation_loss += (
+                per_token_loss.item()
+            )  # Track per-token loss for more accurate reporting
 
-            # Keep track of accumulated loss, to be divided by the total number of accumulation
-            # steps later before being written to tensorboard
-            accumulation_loss += loss.item()
-
-            # Do the backward processing (but we won't step until we reach the gradient accumulation
-            # number)
-            loss.backward()
+            # Scale the loss appropriately for backward
+            # Divide by batch_size to normalize per-token
+            # Divide by update_freq to account for gradient accumulation
+            scaled_loss = loss / batch_size / args.update_freq
+            scaled_loss.backward()
 
             # Check if we've reached a gradient accumulation step
             if (i + 1) % args.update_freq == 0:
-                # Before stepping the optimizer, we need to normalize the gradients by the
-                # accumulated sample sizes as described above
-                if accumulation_sample_sizes > 0:
-                    for p in model.parameters():
-                        if p.grad is not None:
-                            p.grad.data.mul_(1 / accumulation_sample_sizes)
-
-                # We should also do a grad clip norm as well if it's been specified
-                # If it hasn't been specified, we will calculate the gradient norm the old fashioned
-                # way so that it can be logged
+                # Apply gradient clipping on the accumulated gradients
                 if args.clip_grad_norm > 0.0:
                     gnorm = torch.nn.utils.clip_grad_norm_(
                         model.parameters(), args.clip_grad_norm
-                    )
+                    ).item()
                 else:
                     gnorm = math.sqrt(
                         sum(
@@ -491,7 +518,7 @@ def main(args) -> None:
                             for p in model.parameters()
                             if p.grad is not None
                         )
-                    )
+                    )  # record gradient norm for logging
 
                 # Now we step the scheduler (and return the LR so that we can store it)
                 lr = scheduler.step(steps)
@@ -499,12 +526,11 @@ def main(args) -> None:
                 # Reset gradients now
                 scheduler.optimizer.zero_grad()
 
-                # Calculate the accumulation normalized metrics by normalizing over the total number
-                # of samples that have passed through each batch
+                # Calculate metrics - since we're now tracking per-token loss, our normalization is simpler
+                # We just need to average across the accumulated steps
                 normal_acc = accumulation_acc / accumulation_sample_sizes
-                normal_loss = (
-                    accumulation_loss / accumulation_sample_sizes / math.log(2)
-                )
+                # We're already tracking per-token loss, so just convert to bits if needed
+                normal_loss = accumulation_loss / args.update_freq / math.log(2)
 
                 # Log some debugging values here
                 LOGGER.debug("Accumulated batch information is below:")
@@ -536,6 +562,7 @@ def main(args) -> None:
                 #   tokens the model has seen
                 # tpb:
                 #   tokens per batch, averaging out the tokens processed per batch
+
                 logging_dict = {
                     "acc": meters["train_acc"].avg,
                     "loss": normal_loss,
@@ -740,34 +767,35 @@ def cli_main():
     Wrapper function so we can create a CLI entrypoint for this script
     """
     parser = argparse.ArgumentParser(
-        description="Pretrain MPNet by specifying encoder args and training filepath",
+        description="Pretrain an MPNet model with a huggingface dataset "
+        "or path(s) to local training/eval data",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        epilog="Default args follow the MPNet-base params described in the paper: "
+        "https://arxiv.org/abs/2004.09297",
     )
     parser.add_argument(
         "--encoder-layers",
-        help="The number of encoder layers within the encoder block of MPNet. Defaults to 12, but "
-        "can be increased for larger input sequences",
+        help="The number of encoder layers within the encoder block of MPNet. Subsequent "
+        "papers typically use 12-24 encoder layers.",
         default=12,
         type=int,
     )
     parser.add_argument(
         "--encoder-embed-dim",
-        help="The dimension of the embedding layer inside each encoder block. Should generally "
-        "always be 768, but some folks like OpenAI have seen good performance with large embeds",
+        help="The dimension of the embedding layer inside each encoder block. Generally 768-1024.",
         default=768,
         type=int,
     )
     parser.add_argument(
         "--encoder-ffn-dim",
         help="The dimension of the feed-forward hidden layer after each self-attention "
-        "calculation. Defaults to 3072, but this can be any large number",
+        "calculation. Typically 3-4x the embedding dimension",
         default=3072,
         type=int,
     )
     parser.add_argument(
         "--encoder-attention-heads",
-        help="The number of attention heads in each layer. Defaults to 12 which is what's used in"
-        "bert-base and mpnet-base, but this can lend itself to some experimentation",
+        help="The number of attention heads in each layer. Typically 8-16",
         default=12,
         type=int,
     )
@@ -792,6 +820,13 @@ def cli_main():
         type=float,
     )
     parser.add_argument(
+        "--tokenizer-name",
+        help="The name of the tokenizer to use. This should be a HuggingFace tokenizer name, "
+        "e.g. 'microsoft/mpnet-base' or a path to a local tokenizer/model directory.",
+        default="microsoft/mpnet-base",
+        type=str,
+    )
+    parser.add_argument(
         "--max-positions",
         help="Max number of positional embeddings for the model. This should USUALLY always be the "
         "same number as the max sequence length (--max-tokens), but theoretically they could be "
@@ -808,16 +843,32 @@ def cli_main():
         type=int,
     )
     parser.add_argument(
+        "-num_buckets",
+        "--relative-attention-num-buckets",
+        help="Number of buckets for relative position. If not set, will automatically compute "
+        "the number of buckets based on the max sequence length.",
+        default=None,
+        type=int,
+    )
+    parser.add_argument(
+        "--relative-attention-max-distance",
+        help="Maximum distance for relative position. If not set, will automatically compute "
+        "the maximum distance based on the max sequence length.",
+        default=None,
+        type=int,
+    )
+    parser.add_argument(
+        "-activation",
         "--activation-fn",
-        help="The activation function used throughout the model. This will default to GELU, since "
-        "most research on language models has shown optimal performance with GELU",
+        help="The activation function used throughout the model. Supported activations:\t"
+        f"{', '.join(SUPPORTED_ACTIVATIONS)}",
         default="gelu",
         type=str,
     )
     parser.add_argument(
+        "-prenorm",
         "--normalize-before",
-        help="This boolean determines when layer norm should be applied within each encoder layer. "
-        "Generally, we normalize after, but you can specify normalizing before here",
+        help="Determines when layer norm should be applied within each encoder layer.",
         action="store_true",
         default=False,
     )
@@ -881,6 +932,7 @@ def cli_main():
         type=int,
     )
     parser.add_argument(
+        "-warmup_steps",
         "--warmup-updates",
         help="The number of warmup updates to increase the learning rate to --peak-lr before "
         "decreasing it again. Will default to 0.1 of --total-updates if left unset",
@@ -896,8 +948,9 @@ def cli_main():
     parser.add_argument(
         "-gc_steps",
         "--update-freq",
-        help="The amount of batches to process before updating the weights in the model. This is "
-        "what gradient accumulation is",
+        help="Amount of batches to process before updating the weights in the model, "
+        "also known as gradient accumulation. Used to increase effective batch size without "
+        "having to fit it all into memory.",
         default=8,
         type=int,
     )
@@ -914,30 +967,29 @@ def cli_main():
         type=float,
     )
     parser.add_argument(
+        "-wd",
         "--weight-decay",
-        help="The weight decay fed into the Adam optimizer. Usually always set to 0.01",
+        help="The weight decay for the AdamW optimizer.",
         default=0.01,
         type=float,
     )
     parser.add_argument(
         "-grad_clip",
         "--clip-grad-norm",
-        help="The value above which to clip gradients down to. Usually should be 0 for pretraining "
-        "and will be set that way by default",
-        default=0.0,
+        help="The value above which to clip gradients down to.",
+        default=1.0,
         type=float,
     )
     parser.add_argument(
         "--lr",
-        help="The learning rate that will be hit when the warmup updates have finished",
-        default=0.0002,
+        help="Peak learning rate that will be hit when the warmup updates have finished",
+        default=6e-4,
         type=float,
     )
     parser.add_argument(
         "-end_lr",
         "--end-learning-rate",
-        help="The learning rate that the polynomial scheduler will approach when decreasing after "
-        "the warmup updates have wrapped up",
+        help="Target learning rate that the polynomial scheduler will slowly decrease to after warm-up.",
         default=0.0,
         type=float,
     )
@@ -975,7 +1027,7 @@ def cli_main():
     )
     parser.add_argument(
         "--debug",
-        help="Boolean that dictates whether or not to output debug logs",
+        help="Whether or not to output debug logs",
         action="store_true",
         default=False,
     )
@@ -988,12 +1040,12 @@ def cli_main():
     parser.add_argument(
         "--num-workers",
         help="Number of worker processes for data loading.",
-        default=int(os.cpu_count() // 2),
+        default=min(4, os.cpu_count()),
         type=int,
     )
     parser.add_argument(
         "--compile",
-        help="Boolean that dictates whether or not to compile the model",
+        help="Whether or not to compile the model",
         action="store_true",
         default=False,
     )

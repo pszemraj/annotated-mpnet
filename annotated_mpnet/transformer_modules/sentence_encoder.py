@@ -71,7 +71,8 @@ class SentenceEncoder(nn.Module):
         embed_scale: float = None,
         freeze_embeddings: bool = False,
         n_trans_layers_to_freeze: int = 0,
-        relative_attention_num_buckets: int = 32,
+        relative_attention_num_buckets: int = None,
+        relative_attention_max_distance: int = None,
         normalize_before: bool = False,
         export: bool = False,
     ) -> None:
@@ -115,6 +116,8 @@ class SentenceEncoder(nn.Module):
                 This is probably only useful for finetuning
             relative_attention_num_buckets: the number of buckets to add to the relative atttention
                 portion of the attention mechanism
+            relative_attention_max_distance: the maximum distance (in tokens) to consider in the relative
+                attention mechanism
             normalize_before: boolean dictating if a layer norm should be applied before the encoder
                 layers
             export: boolean dictating ONNX exporting, which I think we won't be using
@@ -160,7 +163,27 @@ class SentenceEncoder(nn.Module):
         )
 
         # Set up relative attention bias for the attention mechanism
-        self.relative_attention_num_buckets = relative_attention_num_buckets
+        # and compute params for relative attention if they are not specified
+        base_context = 512
+        base_buckets = 32  # Default buckets for 512 context length is 32
+        base_max_distance = 128  # Default max distance for 512 context length is 128
+
+        if relative_attention_num_buckets is None:
+            # linear scaling of num buckets based on seq len (round up to nearest 8)
+            scaled_buckets = max(32, int(base_buckets * max_seq_len / base_context))
+            self.relative_attention_num_buckets = (scaled_buckets + 7) // 8 * 8
+        else:
+            self.relative_attention_num_buckets = relative_attention_num_buckets
+
+        if relative_attention_max_distance is None:
+            # linear scaling of max distance based on seq len (round up to nearest 8)
+            scaled_max_distance = max(
+                128, int(base_max_distance * max_seq_len / base_context)
+            )
+            self.relative_attention_max_distance = (scaled_max_distance + 7) // 8 * 8
+        else:
+            self.relative_attention_max_distance = relative_attention_max_distance
+
         self.relative_attention_bias = nn.Embedding(
             self.relative_attention_num_buckets, num_attention_heads, padding_idx=None
         )
@@ -259,7 +282,7 @@ class SentenceEncoder(nn.Module):
 
         # Compute the relative attention bias
         positions_bias = self.compute_position_bias(
-            x, self.relative_attention_num_buckets
+            x, self.relative_attention_num_buckets, self.relative_attention_max_distance
         )
 
         # If the user wants ALL hidden states, we keep track of it here
@@ -293,10 +316,18 @@ class SentenceEncoder(nn.Module):
 
         return inner_states, sentence_rep
 
-    # Helper function below
-    def compute_position_bias(self, x, num_buckets):
+    def compute_position_bias(self, x, num_buckets, max_distance):
         """
-        Helper function that computes the position bias based on the number of buckets provided
+        Computes the relative position bias for self-attention.
+
+        Args:
+            x: Input tensor with shape (seq_len, batch_size, embed_dim).
+            num_buckets: Number of buckets to use for relative position encoding.
+            max_distance: The maximum distance to consider for relative positions.
+
+        Returns:
+            A tensor representing the relative position bias, with shape
+            (batch_size * num_heads, qlen, klen).
         """
 
         # Get the batch size, q and k len
@@ -307,7 +338,9 @@ class SentenceEncoder(nn.Module):
         relative_position = memory_position - context_position
 
         rp_bucket = self.relative_position_bucket(
-            relative_position, num_buckets=num_buckets
+            relative_position,
+            num_buckets=num_buckets,
+            max_distance=max_distance,
         )
         rp_bucket = rp_bucket.to(x.device)
         values = self.relative_attention_bias(rp_bucket)
@@ -317,7 +350,24 @@ class SentenceEncoder(nn.Module):
         return values
 
     @staticmethod
-    def relative_position_bucket(relative_position, num_buckets=32, max_distance=128):
+    def relative_position_bucket(
+        relative_position, num_buckets: int = 32, max_distance: int = 128
+    ):
+        """
+        Computes the relative position bias for a given tensor of relative positions.
+            Defaults are for original MPNet @ context length 512.
+
+        Args:
+            relative_position: Tensor of shape (bsz, qlen, klen) containing the relative
+                positions between the queries and keys.
+            num_buckets: The number of buckets to use for the relative position bias.
+                Defaults to 32.
+            max_distance: The maximum distance to consider when computing the relative
+                position bias. Defaults to 128.
+
+        Returns:
+            A tensor of shape (bsz, qlen, klen) containing the relative position biases.
+        """
         ret = 0
         n = -relative_position
 

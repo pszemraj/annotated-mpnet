@@ -72,6 +72,8 @@ class MPNetForPretraining(nn.Module):
             encoder_normalize_before=True,
             activation_fn=args.activation_fn,
             normalize_before=args.normalize_before,
+            relative_attention_num_buckets=args.relative_attention_num_buckets,
+            relative_attention_max_distance=args.relative_attention_max_distance,
         )
 
         # Add the language modeling head
@@ -534,6 +536,10 @@ def make_query_and_content_mask(
                              [ 0 0 0 0 1 1 1 0 0 0 ]
                              [ 0 0 0 0 1 1 1 0 0 0 ]
                              [ 0 0 0 0 1 1 1 0 0 0 ]
+
+    Note: This function is designed to scale automatically with sequence length as it's
+    matrix-based and constructs masks based on the provided seq_len and pred_size.
+    There's no need to modify this function when changing context length.
     """
 
     # Define helper function to keep things organized
