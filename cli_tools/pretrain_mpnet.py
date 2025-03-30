@@ -28,16 +28,15 @@ from torch.serialization import safe_globals
 from torch.utils.tensorboard import SummaryWriter
 from transformers import AutoTokenizer
 
+import wandb
 from annotated_mpnet.data import (
-    DataCollatorForMaskedPermutedLanguageModeling,
-    HFStreamingDataset,
-    MPNetDataset,
-    RandomSamplerWithSeed,
-)
+    DataCollatorForMaskedPermutedLanguageModeling, HFStreamingDataset,
+    MPNetDataset, RandomSamplerWithSeed)
 from annotated_mpnet.modeling import MPNetForPretraining
 from annotated_mpnet.scheduler import PolynomialDecayLRScheduler
 from annotated_mpnet.tracking import AverageMeter
-from annotated_mpnet.utils.utils import SUPPORTED_ACTIVATIONS, validate_tokenizer
+from annotated_mpnet.utils.utils import (SUPPORTED_ACTIVATIONS,
+                                         validate_tokenizer)
 
 
 def accuracy(output: torch.Tensor, target: torch.Tensor) -> int:
@@ -69,6 +68,22 @@ def write_to_tensorboard(writer: SummaryWriter, logging_dict: dict, step: int) -
 
     for stat_name, stat in logging_dict.items():
         writer.add_scalar(stat_name, stat, step)
+
+
+def log_to_wandb(logging_dict: dict, step: int, split: str) -> None:
+    """
+    Log metrics to Weights & Biases
+
+    Args:
+        logging_dict: the dictionary containing the stats
+        step: the current step
+        split: the data split (train, valid, test)
+    """
+    if wandb.run is not None:
+        # Prefix metrics with split name for better organization in the dashboard
+        wandb_dict = {f"{split}/{k}": v for k, v in logging_dict.items()}
+        wandb_dict["step"] = step
+        wandb.log(wandb_dict)
 
 
 def check_and_activate_tf32():
@@ -145,9 +160,9 @@ def main(args) -> None:
         args.tokenizer_name, model_max_length=args.max_tokens
     )
     is_valid, details = validate_tokenizer(tokenizer)
-    assert (
-        is_valid and details["whole_word_mask"]
-    ), f"Invalid tokenizer: {args.tokenizer_name}. Debug w/ verbose output from validate_tokenizer()"
+    assert is_valid and details["whole_word_mask"], (
+        f"Invalid tokenizer: {args.tokenizer_name}. Debug w/ verbose output from validate_tokenizer()"
+    )
 
     # Check and adjust model vocab_size for better GPU performance
     original_vocab_size = tokenizer.vocab_size
@@ -180,6 +195,19 @@ def main(args) -> None:
     # Next, we instantiate the model and the data collator
     model = MPNetForPretraining(args, tokenizer)
     mplm = DataCollatorForMaskedPermutedLanguageModeling(tokenizer=tokenizer)
+
+    # Initialize wandb if enabled (after model creation)
+    if args.wandb:
+        wandb.init(
+            project=args.wandb_project,
+            name=args.wandb_name,
+            config=vars(args),
+            resume="allow",
+            id=args.wandb_id,
+        )
+        # Log model architecture as a graph
+        if args.wandb_watch:
+            wandb.watch(model, log_freq=100)
 
     # sync args for relative attention with model
     args.relative_attention_num_buckets = (
@@ -579,6 +607,10 @@ def main(args) -> None:
                 else:
                     LOGGER.info(logging_dict)
 
+                # Log to wandb if enabled
+                if args.wandb:
+                    log_to_wandb(logging_dict, steps, "train")
+
                 # Reset accumulation counters here for the next set of accumulation steps
                 accumulation_acc = 0
                 accumulation_loss = 0
@@ -659,6 +691,10 @@ def main(args) -> None:
         else:
             LOGGER.info("Validation stats:")
             LOGGER.info(logging_dict)
+
+        # Log to wandb if enabled
+        if args.wandb:
+            log_to_wandb(logging_dict, steps, "valid")
 
         # Now, before looping back, we increment the epoch counter and we delete the train data
         # loader and garbage collect it
@@ -756,10 +792,18 @@ def main(args) -> None:
         LOGGER.info("Test stats:")
         LOGGER.info(logging_dict)
 
+    # Log to wandb if enabled
+    if args.wandb:
+        log_to_wandb(logging_dict, steps, "test")
+
     LOGGER.info(
         f"Training is finished! See output in {args.checkpoint_dir} and "
         f"tensorboard logs in {args.tensorboard_log_dir}"
     )
+
+    # Finish wandb run if active
+    if args.wandb and wandb.run is not None:
+        wandb.finish()
 
 
 def cli_main():
@@ -1046,6 +1090,38 @@ def cli_main():
     parser.add_argument(
         "--compile",
         help="Whether or not to compile the model",
+        action="store_true",
+        default=False,
+    )
+
+    # Weights & Biases arguments
+    parser.add_argument(
+        "--wandb",
+        help="Whether to use Weights & Biases for logging",
+        action="store_true",
+        default=False,
+    )
+    parser.add_argument(
+        "--wandb-project",
+        help="Weights & Biases project name",
+        default="annotated-mpnet",
+        type=str,
+    )
+    parser.add_argument(
+        "--wandb-name",
+        help="Weights & Biases run name",
+        default=None,
+        type=str,
+    )
+    parser.add_argument(
+        "--wandb-id",
+        help="Weights & Biases run ID for resuming a run",
+        default=None,
+        type=str,
+    )
+    parser.add_argument(
+        "--wandb-watch",
+        help="Whether to log model gradients in Weights & Biases",
         action="store_true",
         default=False,
     )
