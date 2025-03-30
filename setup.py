@@ -75,6 +75,7 @@ setup(
         "tensorboard",
         "torch>=2.6.0",
         "transformers",
+        "wandb",
     ],
     packages=find_packages(exclude=["cli_tools", "tests"]),
     ext_modules=extensions,
