@@ -80,6 +80,9 @@ def convert_mpnet_checkpoint_to_pytorch(
         max_position_embeddings=mpnet_args.max_positions + 2,
         relative_attention_num_buckets=mpnet_args.relative_attention_num_buckets,
         hidden_act=mpnet_args.activation_fn,
+        # Note: there are three dropouts in MPNetForPretraining, but only two in MPNetForMaskedLM
+        hidden_dropout_prob=mpnet_args.activation_dropout,
+        attention_probs_dropout_prob=mpnet_args.attention_dropout,
         layer_norm_eps=1e-5,
     )
 
