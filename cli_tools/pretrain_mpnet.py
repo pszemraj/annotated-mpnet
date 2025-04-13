@@ -30,13 +30,15 @@ from transformers import AutoTokenizer
 
 import wandb
 from annotated_mpnet.data import (
-    DataCollatorForMaskedPermutedLanguageModeling, HFStreamingDataset,
-    MPNetDataset, RandomSamplerWithSeed)
+    DataCollatorForMaskedPermutedLanguageModeling,
+    HFStreamingDataset,
+    MPNetDataset,
+    RandomSamplerWithSeed,
+)
 from annotated_mpnet.modeling import MPNetForPretraining
 from annotated_mpnet.scheduler import PolynomialDecayLRScheduler
 from annotated_mpnet.tracking import AverageMeter
-from annotated_mpnet.utils.utils import (SUPPORTED_ACTIVATIONS,
-                                         validate_tokenizer)
+from annotated_mpnet.utils.utils import SUPPORTED_ACTIVATIONS, validate_tokenizer
 
 
 def accuracy(output: torch.Tensor, target: torch.Tensor) -> int:
@@ -160,9 +162,9 @@ def main(args) -> None:
         args.tokenizer_name, model_max_length=args.max_tokens
     )
     is_valid, details = validate_tokenizer(tokenizer)
-    assert is_valid and details["whole_word_mask"], (
-        f"Invalid tokenizer: {args.tokenizer_name}. Debug w/ verbose output from validate_tokenizer()"
-    )
+    assert (
+        is_valid and details["whole_word_mask"]
+    ), f"Invalid tokenizer: {args.tokenizer_name}. Debug w/ verbose output from validate_tokenizer()"
 
     # Check and adjust model vocab_size for better GPU performance
     original_vocab_size = tokenizer.vocab_size
@@ -181,6 +183,11 @@ def main(args) -> None:
     else:
         args.original_vocab_size = original_vocab_size
         args.padded_vocab_size = original_vocab_size
+
+    # Explicitly store token IDs in args for consistent usage
+    args.pad_token_id = tokenizer.pad_token_id
+    args.bos_token_id = tokenizer.bos_token_id
+    args.eos_token_id = tokenizer.eos_token_id
 
     # -----------------------------------
 
