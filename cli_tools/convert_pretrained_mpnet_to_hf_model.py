@@ -50,7 +50,7 @@ def convert_mpnet_checkpoint_to_pytorch(
     # Load up the state dicts (one for the weights and one for the args) from the provided
     # serialization path
     with safe_globals([Namespace]):
-        state_dicts = torch.load(mpnet_checkpoint_path)
+        state_dicts = torch.load(mpnet_checkpoint_path, map_location="cpu")
 
     # Extract the model args so that we can properly set the config later on
     # Extract the weights so we can set them within the constructs of the model
@@ -80,8 +80,19 @@ def convert_mpnet_checkpoint_to_pytorch(
         max_position_embeddings=mpnet_args.max_positions + 2,
         relative_attention_num_buckets=mpnet_args.relative_attention_num_buckets,
         hidden_act=mpnet_args.activation_fn,
+        # Note: there are three dropouts in MPNetForPretraining, but only two in MPNetForMaskedLM
+        hidden_dropout_prob=mpnet_args.activation_dropout,
+        attention_probs_dropout_prob=mpnet_args.attention_dropout,
         layer_norm_eps=1e-5,
     )
+
+    # if the mpnet_args contain token_ids, ensure model config matches
+    if hasattr(mpnet_args, "pad_token_id"):
+        config.pad_token_id = mpnet_args.pad_token_id
+    if hasattr(mpnet_args, "bos_token_id"):
+        config.bos_token_id = mpnet_args.bos_token_id
+    if hasattr(mpnet_args, "eos_token_id"):
+        config.eos_token_id = mpnet_args.eos_token_id
 
     # Now load the model with randomized weights
     model = MPNetForMaskedLM(config)
@@ -210,16 +221,26 @@ def convert_mpnet_checkpoint_to_pytorch(
     pathlib.Path(pytorch_dump_folder_path).mkdir(parents=True, exist_ok=True)
     LOGGER.info(f"Saving model to {pytorch_dump_folder_path}")
 
-    # Now that the config and weights are loaded into the model class, we can use HF's builtin
-    # save_pretrained function to dump the appropriate contents to the provided dir path
-    model.save_pretrained(pytorch_dump_folder_path)
-
     if save_tokenizer and hasattr(mpnet_args, "tokenizer_name"):
         LOGGER.info(f"Saving tokenizer to {pytorch_dump_folder_path}")
         tokenizer = AutoTokenizer.from_pretrained(
             mpnet_args.tokenizer_name, model_max_length=mpnet_args.max_positions
         )
+
+        # Synchronize token IDs between tokenizer and model config
+        model.config.bos_token_id = tokenizer.bos_token_id
+        model.config.eos_token_id = tokenizer.eos_token_id
+        model.config.pad_token_id = tokenizer.pad_token_id
+        LOGGER.info(
+            f"Updated config with tokenizer IDs: BOS={tokenizer.bos_token_id}, "
+            f"EOS={tokenizer.eos_token_id}, PAD={tokenizer.pad_token_id}"
+        )
+
         tokenizer.save_pretrained(pytorch_dump_folder_path)
+
+    # Now that the config and weights are loaded into the model class, we can use HF's builtin
+    # save_pretrained function to dump the appropriate contents to the provided dir path
+    model.save_pretrained(pytorch_dump_folder_path)
 
     LOGGER.info("Done!")
 
