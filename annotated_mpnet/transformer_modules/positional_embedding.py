@@ -32,9 +32,7 @@ def PositionalEmbedding(
 
     # If we specified "learned" to be True, we want to create a learned positional embedding module
     if learned:
-        # If we specify a padding index, we need to update the total number of embeddings
-        if padding_idx is not None:
-            num_embeddings = num_embeddings + padding_idx + 1
+        num_embeddings = num_embeddings + 2 # Add 2 for CLS and SEP
 
         # Instantiate the learned positional embeddings
         m = LearnedPositionalEmbedding(num_embeddings, embedding_dim, padding_idx)
@@ -48,7 +46,7 @@ def PositionalEmbedding(
     # Branch to create sinusoidal embeddings if "learned" is False
     else:
         m = SinusoidalPositionalEmbedding(
-            embedding_dim, padding_idx, init_size=num_embeddings + padding_idx + 1
+            embedding_dim, padding_idx, init_size=num_embeddings + 2 # Add 2 for CLS and SEP
         )
 
     return m
