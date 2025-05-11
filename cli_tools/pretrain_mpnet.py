@@ -38,7 +38,11 @@ from annotated_mpnet.data import (
 from annotated_mpnet.modeling import MPNetForPretraining
 from annotated_mpnet.scheduler import PolynomialDecayLRScheduler
 from annotated_mpnet.tracking import AverageMeter
-from annotated_mpnet.utils.utils import SUPPORTED_ACTIVATIONS, validate_tokenizer
+from annotated_mpnet.utils.utils import (
+    SUPPORTED_ACTIVATIONS,
+    model_summary,
+    validate_tokenizer,
+)
 
 
 def accuracy(output: torch.Tensor, target: torch.Tensor) -> int:
@@ -215,6 +219,8 @@ def main(args) -> None:
         # Log model architecture as a graph
         if args.wandb_watch:
             wandb.watch(model, log_freq=100)
+
+    model_summary(model, max_depth=3)
 
     # sync args for relative attention with model
     args.relative_attention_num_buckets = (
