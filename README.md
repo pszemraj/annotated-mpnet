@@ -204,7 +204,7 @@ annotated-mpnet/
 
 ## Changelog
 
-All notable changes to this project are documented in [CHANGELOG.md](CHANGELOG.md). The latest version is v0.1.3.
+All notable changes to this project are documented in [CHANGELOG.md](CHANGELOG.md). The latest version is v0.1.4.
 
 ## Contributing
 
