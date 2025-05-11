@@ -220,7 +220,7 @@ def main(args) -> None:
         if args.wandb_watch:
             wandb.watch(model, log_freq=100)
 
-    model_summary(model)
+    model_summary(model, max_depth=3)
 
     # sync args for relative attention with model
     args.relative_attention_num_buckets = (
