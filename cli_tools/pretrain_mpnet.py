@@ -388,24 +388,33 @@ def main(args) -> None:
     # Determine whether to load from HuggingFace model or resume from a checkpoint
     # HuggingFace model loading takes precedence if both are specified
     if args.hf_model_path is not None:
-        LOGGER.info(f"Initializing model from HuggingFace checkpoint: {args.hf_model_path}")
+        LOGGER.info(f"Initializing model from HuggingFace model: {args.hf_model_path}")
         
         try:
-            # Support loading from HuggingFace models
-            LOGGER.info(f"Loading model from HuggingFace: {args.hf_model_path}")
+            # Use our dedicated converter to load from HuggingFace models
+            from cli_tools.convert_hf_model_to_mpnet import convert_hf_model_to_mpnet
             
-            # Note: Full HuggingFace model loading is not implemented in this version.
-            # This is a stub for future implementation which requires detailed model architecture mapping
-            # between different model formats.
+            # Create a temporary checkpoint path for the converted model
+            temp_checkpoint_path = checkpoint_dir / "hf_converted_checkpoint.pt"
             
-            LOGGER.warning("Loading from HuggingFace models is not fully implemented in this version")
-            LOGGER.warning("Proceeding with default initialization")
+            # Convert the HuggingFace model to our format
+            convert_hf_model_to_mpnet(
+                args.hf_model_path,
+                str(temp_checkpoint_path),
+            )
             
-            # Future implementation would:
-            # 1. Load the appropriate HuggingFace model
-            # 2. Map weights correctly between architectures
-            # 3. Handle different model types (MPNet, BERT, etc.)
-            # 4. Support TensorFlow and PyTorch weights
+            # Now load the converted checkpoint
+            LOGGER.info(f"Loading converted checkpoint from {temp_checkpoint_path}")
+            with safe_globals([Namespace, np.ndarray, np.dtype, np._core.multiarray._reconstruct]):
+                checkpoint = torch.load(temp_checkpoint_path, map_location=device, weights_only=False)
+            
+            # Extract model states
+            model_states = checkpoint["model_states"]
+            model_states = {k.replace("_orig_mod.", ""): v for k, v in model_states.items()}
+            
+            # Load model weights
+            model.load_state_dict(model_states)
+            LOGGER.info("Model weights loaded successfully from HuggingFace model")
             
         except Exception as e:
             LOGGER.error(f"Error loading HuggingFace model: {e}")
