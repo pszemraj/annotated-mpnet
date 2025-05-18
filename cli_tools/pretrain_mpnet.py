@@ -418,6 +418,7 @@ def main(args) -> None:
             
         except Exception as e:
             LOGGER.error(f"Error loading HuggingFace model: {e}")
+            LOGGER.warning(f"Full error: {str(e)}")
             LOGGER.warning("Proceeding with default initialization")
     
     # Handle resuming from checkpoint if enabled
@@ -600,8 +601,8 @@ def main(args) -> None:
                     "steps": steps,
                     "epoch": epoch,
                     "rng_state": {
-                        "torch": torch.get_rng_state().clone().detach(),
-                        "cuda": [s.clone().detach() for s in torch.cuda.get_rng_state_all()] if torch.cuda.is_available() else None,
+                        "torch": torch.get_rng_state(),
+                        "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
                         "numpy": np.random.get_state() if 'numpy.random' in sys.modules else None,
                     }
                 }
@@ -829,8 +830,8 @@ def main(args) -> None:
                 "epoch": epoch,
                 "best_loss": best_loss,
                 "rng_state": {
-                    "torch": torch.get_rng_state().clone().detach(),
-                    "cuda": [s.clone().detach() for s in torch.cuda.get_rng_state_all()] if torch.cuda.is_available() else None,
+                    "torch": torch.get_rng_state(),
+                    "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
                     "numpy": np.random.get_state() if 'numpy.random' in sys.modules else None,
                 }
             }
