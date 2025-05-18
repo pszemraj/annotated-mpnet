@@ -391,20 +391,31 @@ def main(args) -> None:
         LOGGER.info(f"Initializing model from HuggingFace model: {args.hf_model_path}")
         
         try:
-            # Use our dedicated converter to load from HuggingFace models
+            LOGGER.info(f"Checking if HuggingFace model path exists: {args.hf_model_path}")
+            
+            # Import the converter
             from cli_tools.convert_hf_model_to_mpnet import convert_hf_model_to_mpnet
             
             # Create a temporary checkpoint path for the converted model
             temp_checkpoint_path = checkpoint_dir / "hf_converted_checkpoint.pt"
+            LOGGER.info(f"Will save converted model to: {temp_checkpoint_path}")
             
             # Convert the HuggingFace model to our format
-            convert_hf_model_to_mpnet(
-                args.hf_model_path,
-                str(temp_checkpoint_path),
-            )
+            try:
+                convert_hf_model_to_mpnet(
+                    args.hf_model_path,
+                    str(temp_checkpoint_path),
+                )
+            except Exception as conv_error:
+                LOGGER.error(f"Error during model conversion: {conv_error}")
+                LOGGER.error(f"Conversion stacktrace: {conv_error.__traceback__}")
+                raise RuntimeError(f"Failed to convert HuggingFace model: {conv_error}")
             
             # Now load the converted checkpoint
             LOGGER.info(f"Loading converted checkpoint from {temp_checkpoint_path}")
+            if not temp_checkpoint_path.exists():
+                raise FileNotFoundError(f"Converted checkpoint not found at {temp_checkpoint_path}")
+                
             with safe_globals([Namespace, np.ndarray, np.dtype, np._core.multiarray._reconstruct]):
                 checkpoint = torch.load(temp_checkpoint_path, map_location=device, weights_only=False)
             
