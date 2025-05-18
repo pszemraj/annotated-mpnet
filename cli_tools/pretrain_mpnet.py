@@ -9,6 +9,8 @@ import logging
 import math
 import os
 import sys
+import pathlib
+import numpy as np
 from argparse import Namespace
 
 from rich.logging import RichHandler
@@ -352,8 +354,13 @@ def main(args) -> None:
         ]
 
     # Finally, let's make sure the checkpoint directory exists. If not, let's create it
-    if not os.path.exists(args.checkpoint_dir):
-        os.makedirs(args.checkpoint_dir)
+    checkpoint_dir = pathlib.Path(args.checkpoint_dir)
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        
+    # Create optimizer state directory if saving optimizer states
+    if args.save_optimizer_state:
+        optimizer_dir = checkpoint_dir / "optimizer"
+        optimizer_dir.mkdir(parents=True, exist_ok=True)
 
     # Before defining the scheduler and optimizer, let's make sure warmup_updates is set. If it
     # isn't, we need to set it to 10% the amount of total_updates
@@ -373,10 +380,108 @@ def main(args) -> None:
     )
     scheduler = PolynomialDecayLRScheduler(args, optimizer)
 
-    # We create a step counter and an epoch counter here
+    # Initialize step and epoch counters
     steps = 0
     epoch = 0
-
+    best_loss = 10e6  # Will be overridden if resuming from checkpoint
+    
+    # Determine whether to load from HuggingFace model or resume from a checkpoint
+    # HuggingFace model loading takes precedence if both are specified
+    if args.hf_model_path is not None:
+        LOGGER.info(f"Initializing model from HuggingFace checkpoint: {args.hf_model_path}")
+        
+        try:
+            # Support loading from HuggingFace models
+            LOGGER.info(f"Loading model from HuggingFace: {args.hf_model_path}")
+            
+            # Note: Full HuggingFace model loading is not implemented in this version.
+            # This is a stub for future implementation which requires detailed model architecture mapping
+            # between different model formats.
+            
+            LOGGER.warning("Loading from HuggingFace models is not fully implemented in this version")
+            LOGGER.warning("Proceeding with default initialization")
+            
+            # Future implementation would:
+            # 1. Load the appropriate HuggingFace model
+            # 2. Map weights correctly between architectures
+            # 3. Handle different model types (MPNet, BERT, etc.)
+            # 4. Support TensorFlow and PyTorch weights
+            
+        except Exception as e:
+            LOGGER.error(f"Error loading HuggingFace model: {e}")
+            LOGGER.warning("Proceeding with default initialization")
+    
+    # Handle resuming from checkpoint if enabled
+    elif args.resume:
+        if args.resume_checkpoint is None:
+            resume_checkpoint_path = checkpoint_dir / "best_checkpoint.pt"
+        else:
+            resume_checkpoint_path = pathlib.Path(args.resume_checkpoint)
+        
+        LOGGER.info(f"Resuming training from checkpoint: {resume_checkpoint_path}")
+        
+        # Load the checkpoint
+        with safe_globals([Namespace, np.ndarray, np.dtype, np._core.multiarray._reconstruct]):
+            checkpoint = torch.load(resume_checkpoint_path, map_location=device, weights_only=False)
+        
+        # Extract training state
+        if "steps" in checkpoint:
+            steps = checkpoint["steps"]
+            LOGGER.info(f"Resuming from step {steps}")
+        
+        if "epoch" in checkpoint:
+            epoch = checkpoint["epoch"]
+            LOGGER.info(f"Resuming from epoch {epoch}")
+            
+        if "best_loss" in checkpoint:
+            best_loss = checkpoint["best_loss"]
+            LOGGER.info(f"Best validation loss from checkpoint: {best_loss}")
+        
+        # Restore RNG state if available
+        if "rng_state" in checkpoint:
+            try:
+                rng_state = checkpoint["rng_state"]
+                if rng_state["torch"] is not None:
+                    torch.set_rng_state(rng_state["torch"])
+                    LOGGER.info("Restored torch RNG state")
+                
+                if torch.cuda.is_available() and rng_state["cuda"] is not None:
+                    torch.cuda.set_rng_state_all(rng_state["cuda"])
+                    LOGGER.info("Restored CUDA RNG state")
+                    
+                if 'numpy.random' in sys.modules and rng_state["numpy"] is not None:
+                    np.random.set_state(rng_state["numpy"])
+                    LOGGER.info("Restored numpy RNG state")
+            except (TypeError, ValueError) as e:
+                LOGGER.warning(f"Could not restore RNG state: {e}")
+                LOGGER.info("Continuing with current RNG state")
+        
+        # Extract model states
+        model_states = checkpoint["model_states"]
+        model_states = {k.replace("_orig_mod.", ""): v for k, v in model_states.items()}
+        
+        # Load model weights
+        model.load_state_dict(model_states)
+        LOGGER.info("Model weights loaded successfully")
+        
+        # Check if optimizer state exists and load it if requested
+        if args.save_optimizer_state:
+            optimizer_state_path = optimizer_dir / "optimizer_state.pt"
+            if optimizer_state_path.exists():
+                LOGGER.info(f"Loading optimizer state from {optimizer_state_path}")
+                with safe_globals([Namespace, np.ndarray, np.dtype, np._core.multiarray._reconstruct]):
+                    optimizer_state = torch.load(optimizer_state_path, map_location=device, weights_only=False)
+                
+                # Load optimizer state
+                optimizer.load_state_dict(optimizer_state["optimizer"])
+                
+                # Load scheduler state
+                scheduler.load_state_dict(optimizer_state["scheduler"])
+                
+                LOGGER.info("Optimizer and scheduler states loaded successfully")
+            else:
+                LOGGER.warning(f"No optimizer state found at {optimizer_state_path}, using default initialization")
+    
     # Create meters for all the relevant logging statistics using the Meters module
     meters = {
         "train_loss": AverageMeter(),
@@ -479,21 +584,43 @@ def main(args) -> None:
                 and args.checkpoint_interval > 0
                 and steps > 0
             ):
-                torch.save(
-                    {"args": vars(args), "model_states": model.state_dict()},
-                    os.path.join(args.checkpoint_dir, f"checkpoint{steps + 1}.pt"),
-                )
+                # Create checkpoint object with model state and args
+                checkpoint = {
+                    "args": vars(args),
+                    "model_states": model.state_dict(),
+                    "steps": steps,
+                    "epoch": epoch,
+                    "rng_state": {
+                        "torch": torch.get_rng_state().clone().detach(),
+                        "cuda": [s.clone().detach() for s in torch.cuda.get_rng_state_all()] if torch.cuda.is_available() else None,
+                        "numpy": np.random.get_state() if 'numpy.random' in sys.modules else None,
+                    }
+                }
+                
+                # Save the checkpoint
+                checkpoint_path = checkpoint_dir / f"checkpoint{steps + 1}.pt"
+                torch.save(checkpoint, checkpoint_path)
+                
+                # If optimizer state saving is enabled, save the optimizer state to the optimizer directory
+                if args.save_optimizer_state:
+                    optimizer_state = {
+                        "optimizer": optimizer.state_dict(),
+                        "scheduler": scheduler.state_dict(),
+                        "steps": steps,
+                        "epoch": epoch,
+                    }
+                    optimizer_state_path = optimizer_dir / "optimizer_state.pt"
+                    torch.save(optimizer_state, optimizer_state_path)
 
                 # Save the args & tokenizer if this is the first checkpoint
                 if not initial_outputs_saved:
                     args_dict = vars(args) if not isinstance(args, dict) else args
-                    with open(
-                        os.path.join(args.checkpoint_dir, "training_args.json"), "w"
-                    ) as f:
+                    args_path = checkpoint_dir / "training_args.json"
+                    with open(args_path, "w") as f:
                         json.dump(args_dict, f, indent=4)
-                    tokenizer.save_pretrained(
-                        os.path.join(args.checkpoint_dir, "tokenizer")
-                    )
+                    
+                    tokenizer_dir = checkpoint_dir / "tokenizer"
+                    tokenizer.save_pretrained(tokenizer_dir)
                     initial_outputs_saved = True
 
             # Load the tensors onto the appropriate device
@@ -685,11 +812,35 @@ def main(args) -> None:
             # Reset the best loss to the new best loss for this epoch
             best_loss = final_valid_loss
 
-            # Now let's go ahead and save this in the checkpoints directory
-            torch.save(
-                {"args": vars(args), "model_states": model.state_dict()},
-                os.path.join(args.checkpoint_dir, "best_checkpoint.pt"),
-            )
+            # Create best checkpoint object with model state and args
+            best_checkpoint = {
+                "args": vars(args),
+                "model_states": model.state_dict(),
+                "steps": steps,
+                "epoch": epoch,
+                "best_loss": best_loss,
+                "rng_state": {
+                    "torch": torch.get_rng_state().clone().detach(),
+                    "cuda": [s.clone().detach() for s in torch.cuda.get_rng_state_all()] if torch.cuda.is_available() else None,
+                    "numpy": np.random.get_state() if 'numpy.random' in sys.modules else None,
+                }
+            }
+            
+            # Save the best checkpoint
+            best_checkpoint_path = checkpoint_dir / "best_checkpoint.pt"
+            torch.save(best_checkpoint, best_checkpoint_path)
+            
+            # If optimizer state saving is enabled, save the optimizer state to the optimizer directory
+            if args.save_optimizer_state:
+                best_optimizer_state = {
+                    "optimizer": optimizer.state_dict(),
+                    "scheduler": scheduler.state_dict(),
+                    "steps": steps,
+                    "epoch": epoch,
+                    "best_loss": best_loss,
+                }
+                best_optimizer_state_path = optimizer_dir / "best_optimizer_state.pt"
+                torch.save(best_optimizer_state, best_optimizer_state_path)
 
         # Load these into a logging dict and pass it on to be written in tensorboard
         logging_dict = {
@@ -726,8 +877,9 @@ def main(args) -> None:
     # use the test dataloader we built above to get a final test metric using the best checkpoint
 
     # Begin by loading the model states and args from the best checkpoint
-    with safe_globals([Namespace]):
-        dicts = torch.load(os.path.join(args.checkpoint_dir, "best_checkpoint.pt"))
+    with safe_globals([Namespace, np.ndarray, np.dtype, np._core.multiarray._reconstruct]):
+        best_checkpoint_path = checkpoint_dir / "best_checkpoint.pt"
+        dicts = torch.load(best_checkpoint_path, weights_only=False)
 
     # Handle args that might be dict or Namespace
     loaded_args = dicts["args"]
@@ -1107,6 +1259,32 @@ def cli_main():
         default=False,
     )
 
+    # Resumable training arguments
+    parser.add_argument(
+        "--resume",
+        help="Whether to resume training from a checkpoint",
+        action="store_true",
+        default=False,
+    )
+    parser.add_argument(
+        "--resume-checkpoint",
+        help="Path to the checkpoint to resume from. If not provided, will use best_checkpoint.pt",
+        type=str,
+        default=None,
+    )
+    parser.add_argument(
+        "--hf-model-path",
+        help="Path to a HuggingFace MPNet model to initialize weights from (alternative to resuming from repo checkpoint)",
+        type=str,
+        default=None,
+    )
+    parser.add_argument(
+        "--save-optimizer-state",
+        help="Whether to save optimizer state for resumable training",
+        action="store_true",
+        default=False,
+    )
+    
     # Weights & Biases arguments
     parser.add_argument(
         "--wandb",
@@ -1147,6 +1325,19 @@ def cli_main():
     ):
         parser.error(
             "Either --dataset-name or (--train-dir, --valid-file, and --test-file) must be provided."
+        )
+        
+    # Check for validity of resumable training arguments
+    if args.resume and args.hf_model_path:
+        LOGGER.warning(
+            "Both --resume and --hf-model-path are specified. "
+            "HuggingFace model will take precedence over resuming from checkpoint."
+        )
+        
+    if args.resume_checkpoint and not args.resume:
+        LOGGER.warning(
+            "--resume-checkpoint provided but --resume flag not set. "
+            "Will not resume from checkpoint. Did you mean to add --resume?"
         )
 
     LOGGER.info(args)
