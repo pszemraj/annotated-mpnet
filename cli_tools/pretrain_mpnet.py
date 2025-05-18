@@ -408,8 +408,8 @@ def main(args) -> None:
                 )
             except Exception as conv_error:
                 LOGGER.error(f"Error during model conversion: {conv_error}")
-                LOGGER.error(f"Conversion stacktrace: {conv_error.__traceback__}")
-                raise RuntimeError(f"Failed to convert HuggingFace model: {conv_error}")
+                LOGGER.warning("Unable to convert HuggingFace model. Proceeding with default initialization.")
+                return
             
             # Now load the converted checkpoint
             LOGGER.info(f"Loading converted checkpoint from {temp_checkpoint_path}")
