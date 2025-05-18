@@ -408,8 +408,9 @@ def main(args) -> None:
                 )
             except Exception as conv_error:
                 LOGGER.error(f"Error during model conversion: {conv_error}")
-                LOGGER.warning("Unable to convert HuggingFace model. Proceeding with default initialization.")
-                return
+                LOGGER.error("When --hf-model-path is specified, model loading MUST succeed.")
+                LOGGER.error("To use default random initialization, remove the --hf-model-path argument.")
+                raise RuntimeError(f"Failed to load HuggingFace model: {conv_error}")
             
             # Now load the converted checkpoint
             LOGGER.info(f"Loading converted checkpoint from {temp_checkpoint_path}")

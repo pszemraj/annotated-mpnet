@@ -37,18 +37,14 @@ def convert_hf_model_to_mpnet(
                       it will use the source model's configuration
     """
     LOGGER.info(f"Loading HuggingFace model from {hf_model_path}")
-    try:
-        # First try loading with PyTorch weights
-        hf_model = MPNetForMaskedLM.from_pretrained(hf_model_path)
-    except ValueError as e:
-        if "pytorch_model.bin" in str(e) and "TensorFlow weights" in str(e):
-            LOGGER.info("Detected TensorFlow weights, loading with from_tf=True")
-            hf_model = MPNetForMaskedLM.from_pretrained(hf_model_path, from_tf=True)
-        else:
-            # Re-raise other errors
-            raise
-    
+    # Note: Some "weights not initialized" warnings are expected and can be ignored
+    hf_model = MPNetForMaskedLM.from_pretrained(hf_model_path, ignore_mismatched_sizes=True)
     hf_config = hf_model.config
+    
+    # Log model configuration for debugging
+    LOGGER.info(f"Loaded model config: hidden_size={hf_config.hidden_size}, "
+                f"num_layers={hf_config.num_hidden_layers}, "
+                f"attention_heads={hf_config.num_attention_heads}")
     
     # Create the base args for our model format
     if model_config is None:
