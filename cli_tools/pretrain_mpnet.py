@@ -135,9 +135,9 @@ def main(args) -> None:
     if args.debug:
         LOGGER.setLevel(logging.DEBUG)
 
-    # Specify the torch device
+    # Check the torch device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    if device.type != "cuda":
+    if device.type != "cuda" and os.getenv("MPNET_CPU_OVERRIDE", "0") != "1":
         sys.exit(
             "CUDA is required for training MPNet. Please ensure that you have a CUDA enabled GPU."
         )
@@ -168,9 +168,9 @@ def main(args) -> None:
         args.tokenizer_name, model_max_length=args.max_tokens
     )
     is_valid, details = validate_tokenizer(tokenizer)
-    assert is_valid and details["whole_word_mask"], (
-        f"Invalid tokenizer: {args.tokenizer_name}. Debug w/ verbose output from validate_tokenizer()"
-    )
+    assert (
+        is_valid and details["whole_word_mask"]
+    ), f"Invalid tokenizer: {args.tokenizer_name}. Debug w/ verbose output from validate_tokenizer()"
 
     # Check and adjust model vocab_size for better GPU performance
     original_vocab_size = tokenizer.vocab_size
@@ -638,12 +638,16 @@ def main(args) -> None:
                     "epoch": epoch,
                     "rng_state": {
                         "torch": torch.get_rng_state(),
-                        "cuda": torch.cuda.get_rng_state_all()
-                        if torch.cuda.is_available()
-                        else None,
-                        "numpy": np.random.get_state()
-                        if "numpy.random" in sys.modules
-                        else None,
+                        "cuda": (
+                            torch.cuda.get_rng_state_all()
+                            if torch.cuda.is_available()
+                            else None
+                        ),
+                        "numpy": (
+                            np.random.get_state()
+                            if "numpy.random" in sys.modules
+                            else None
+                        ),
                     },
                 }
 
@@ -871,12 +875,14 @@ def main(args) -> None:
                 "best_loss": best_loss,
                 "rng_state": {
                     "torch": torch.get_rng_state(),
-                    "cuda": torch.cuda.get_rng_state_all()
-                    if torch.cuda.is_available()
-                    else None,
-                    "numpy": np.random.get_state()
-                    if "numpy.random" in sys.modules
-                    else None,
+                    "cuda": (
+                        torch.cuda.get_rng_state_all()
+                        if torch.cuda.is_available()
+                        else None
+                    ),
+                    "numpy": (
+                        np.random.get_state() if "numpy.random" in sys.modules else None
+                    ),
                 },
             }
 
