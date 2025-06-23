@@ -205,6 +205,31 @@ def main(args) -> None:
             "test": SummaryWriter(os.path.join(args.tensorboard_log_dir, "test")),
         }
 
+    # If loading from HuggingFace model, we need to get the config first
+    if args.hf_model_path is not None:
+        LOGGER.info(f"Loading config from HuggingFace model: {args.hf_model_path}")
+        from transformers import AutoConfig
+        hf_config = AutoConfig.from_pretrained(args.hf_model_path)
+        
+        # Override args with HF model's architecture
+        args.encoder_layers = hf_config.num_hidden_layers
+        args.encoder_embed_dim = hf_config.hidden_size
+        args.encoder_ffn_dim = hf_config.intermediate_size
+        args.encoder_attention_heads = hf_config.num_attention_heads
+        args.dropout = hf_config.hidden_dropout_prob
+        args.attention_dropout = hf_config.attention_probs_dropout_prob
+        args.activation_dropout = hf_config.hidden_dropout_prob
+        args.activation_fn = hf_config.hidden_act
+        # Don't override max_positions if user specified it
+        if args.max_positions is None:
+            args.max_positions = hf_config.max_position_embeddings - 2
+        args.relative_attention_num_buckets = getattr(hf_config, 'relative_attention_num_buckets', 32)
+        args.original_vocab_size = hf_config.vocab_size
+        args.padded_vocab_size = hf_config.vocab_size
+        
+        LOGGER.info(f"Using HF model architecture: {args.encoder_layers} layers, "
+                    f"{args.encoder_embed_dim} hidden, {args.encoder_ffn_dim} FFN")
+    
     # Next, we instantiate the model and the data collator
     model = MPNetForPretraining(args, tokenizer)
     mplm = DataCollatorForMaskedPermutedLanguageModeling(tokenizer=tokenizer)
