@@ -49,8 +49,9 @@ def convert_mpnet_checkpoint_to_pytorch(
 
     # Load up the state dicts (one for the weights and one for the args) from the provided
     # serialization path
+    # PyTorch 2.6+ requires weights_only=False for loading checkpoints with custom objects
     with safe_globals([Namespace]):
-        state_dicts = torch.load(mpnet_checkpoint_path, map_location="cpu")
+        state_dicts = torch.load(mpnet_checkpoint_path, map_location="cpu", weights_only=False)
 
     # Extract the model args so that we can properly set the config later on
     # Extract the weights so we can set them within the constructs of the model

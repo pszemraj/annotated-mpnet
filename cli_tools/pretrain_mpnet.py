@@ -481,18 +481,40 @@ def main(args) -> None:
         if "rng_state" in checkpoint:
             try:
                 rng_state = checkpoint["rng_state"]
-                if rng_state["torch"] is not None:
-                    torch.set_rng_state(rng_state["torch"])
+                if rng_state.get("torch") is not None:
+                    # Ensure the RNG state is a ByteTensor
+                    torch_rng = rng_state["torch"]
+                    if not isinstance(torch_rng, torch.ByteTensor):
+                        if hasattr(torch_rng, 'cpu'):
+                            torch_rng = torch_rng.cpu()
+                        torch_rng = torch.ByteTensor(torch_rng)
+                    torch.set_rng_state(torch_rng)
                     LOGGER.info("Restored torch RNG state")
-
-                if torch.cuda.is_available() and rng_state["cuda"] is not None:
-                    torch.cuda.set_rng_state_all(rng_state["cuda"])
+                
+                if torch.cuda.is_available() and rng_state.get("cuda") is not None:
+                    cuda_states = rng_state["cuda"]
+                    # Handle list of CUDA states for multi-GPU
+                    if isinstance(cuda_states, list):
+                        processed_states = []
+                        for state in cuda_states:
+                            if not isinstance(state, torch.ByteTensor):
+                                if hasattr(state, 'cpu'):
+                                    state = state.cpu()
+                                state = torch.ByteTensor(state)
+                            processed_states.append(state)
+                        torch.cuda.set_rng_state_all(processed_states)
+                    else:
+                        if not isinstance(cuda_states, torch.ByteTensor):
+                            if hasattr(cuda_states, 'cpu'):
+                                cuda_states = cuda_states.cpu()
+                            cuda_states = torch.ByteTensor(cuda_states)
+                        torch.cuda.set_rng_state(cuda_states)
                     LOGGER.info("Restored CUDA RNG state")
-
-                if "numpy.random" in sys.modules and rng_state["numpy"] is not None:
+                    
+                if 'numpy.random' in sys.modules and rng_state.get("numpy") is not None:
                     np.random.set_state(rng_state["numpy"])
                     LOGGER.info("Restored numpy RNG state")
-            except (TypeError, ValueError) as e:
+            except (TypeError, ValueError, AttributeError) as e:
                 LOGGER.warning(f"Could not restore RNG state: {e}")
                 LOGGER.info("Continuing with current RNG state")
 
@@ -750,7 +772,8 @@ def main(args) -> None:
 
                 # Calculate metrics - since we're now tracking per-token loss, our normalization is simpler
                 # We just need to average across the accumulated steps
-                normal_acc = accumulation_acc / accumulation_sample_sizes
+                # For accuracy, we need to normalize by the total number of tokens predicted
+                normal_acc = accumulation_acc / accumulation_tokens
                 # We're already tracking per-token loss, so just convert to bits if needed
                 normal_loss = accumulation_loss / args.update_freq / math.log(2)
 
