@@ -80,6 +80,9 @@ def convert_hf_model_to_mpnet(
             pad_token_id=hf_config.pad_token_id,
             bos_token_id=hf_config.bos_token_id,
             eos_token_id=hf_config.eos_token_id,
+            # Store the HF model's vocab size as padded_vocab_size to prevent re-padding
+            original_vocab_size=hf_config.vocab_size,
+            padded_vocab_size=hf_config.vocab_size,
         )
     else:
         args = Namespace(**model_config)
