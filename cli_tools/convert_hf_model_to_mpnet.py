@@ -73,8 +73,7 @@ def convert_hf_model_to_mpnet(
             activation_dropout=hf_config.hidden_dropout_prob,
             activation_fn=hf_config.hidden_act,
             normalize_before=False,
-            max_positions=hf_config.max_position_embeddings
-            - 2,  # Adjust for padding token
+            max_positions=hf_config.max_position_embeddings,  # HF already includes special tokens
             relative_attention_num_buckets=hf_config.relative_attention_num_buckets,
             relative_attention_max_distance=None,
             pad_token_id=hf_config.pad_token_id,
@@ -194,7 +193,29 @@ def convert_hf_model_to_mpnet(
     # Now apply all the direct mappings
     for hf_key, our_key in mappings.items():
         if hf_key in hf_model.state_dict() and our_key in model.state_dict():
-            model.state_dict()[our_key].copy_(hf_model.state_dict()[hf_key])
+            hf_tensor = hf_model.state_dict()[hf_key]
+            our_tensor = model.state_dict()[our_key]
+            
+            # Special handling for position embeddings size mismatch
+            if our_key == "sentence_encoder.embed_positions.weight":
+                if hf_tensor.shape[0] != our_tensor.shape[0]:
+                    LOGGER.info(
+                        f"Position embeddings size mismatch: HF has {hf_tensor.shape[0]}, "
+                        f"our model expects {our_tensor.shape[0]}"
+                    )
+                    # If our model has more positions (e.g., 514 vs 512), pad the HF tensor
+                    if our_tensor.shape[0] > hf_tensor.shape[0]:
+                        padding_size = our_tensor.shape[0] - hf_tensor.shape[0]
+                        # Initialize extra positions with small random values
+                        padding = torch.randn(padding_size, hf_tensor.shape[1]) * 0.02
+                        hf_tensor = torch.cat([hf_tensor, padding], dim=0)
+                        LOGGER.info(f"Padded HF position embeddings by {padding_size} positions")
+                    # If HF has more positions, truncate
+                    elif our_tensor.shape[0] < hf_tensor.shape[0]:
+                        hf_tensor = hf_tensor[:our_tensor.shape[0]]
+                        LOGGER.info(f"Truncated HF position embeddings to {our_tensor.shape[0]} positions")
+            
+            model.state_dict()[our_key].copy_(hf_tensor)
 
     # Create checkpoint directory if it doesn't exist
     checkpoint_dir = os.path.dirname(mpnet_checkpoint_path)

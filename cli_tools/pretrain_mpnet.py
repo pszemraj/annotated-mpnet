@@ -205,8 +205,47 @@ def main(args) -> None:
             "test": SummaryWriter(os.path.join(args.tensorboard_log_dir, "test")),
         }
 
+    # Check if we're resuming and need to load architecture from checkpoint
+    checkpoint_dir = pathlib.Path(args.checkpoint_dir)
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    
+    if args.resume:
+        # Load checkpoint to get architecture before creating model
+        if args.resume_checkpoint is None:
+            resume_checkpoint_path = checkpoint_dir / "best_checkpoint.pt"
+        else:
+            resume_checkpoint_path = pathlib.Path(args.resume_checkpoint)
+            
+        LOGGER.info(f"Loading architecture from checkpoint: {resume_checkpoint_path}")
+        with safe_globals(
+            [Namespace, np.ndarray, np.dtype, np._core.multiarray._reconstruct]
+        ):
+            resume_checkpoint = torch.load(
+                resume_checkpoint_path, map_location="cpu", weights_only=False
+            )
+        
+        # Restore architecture args from checkpoint
+        if "args" in resume_checkpoint:
+            checkpoint_args = resume_checkpoint["args"]
+            # Restore model architecture parameters
+            args.encoder_layers = checkpoint_args["encoder_layers"]
+            args.encoder_embed_dim = checkpoint_args["encoder_embed_dim"]
+            args.encoder_ffn_dim = checkpoint_args["encoder_ffn_dim"]
+            args.encoder_attention_heads = checkpoint_args["encoder_attention_heads"]
+            args.dropout = checkpoint_args.get("dropout", args.dropout)
+            args.attention_dropout = checkpoint_args.get("attention_dropout", args.attention_dropout)
+            args.activation_dropout = checkpoint_args.get("activation_dropout", args.activation_dropout)
+            args.activation_fn = checkpoint_args.get("activation_fn", args.activation_fn)
+            args.relative_attention_num_buckets = checkpoint_args.get("relative_attention_num_buckets", args.relative_attention_num_buckets)
+            args.original_vocab_size = checkpoint_args.get("original_vocab_size", args.original_vocab_size)
+            args.padded_vocab_size = checkpoint_args.get("padded_vocab_size", args.padded_vocab_size)
+            args.max_positions = checkpoint_args.get("max_positions", args.max_positions)
+            
+            LOGGER.info(f"Restored model architecture from checkpoint: {args.encoder_layers} layers, "
+                        f"{args.encoder_embed_dim} hidden, {args.encoder_ffn_dim} FFN")
+    
     # If loading from HuggingFace model, we need to get the config first
-    if args.hf_model_path is not None:
+    elif args.hf_model_path is not None:
         LOGGER.info(f"Loading config from HuggingFace model: {args.hf_model_path}")
         from transformers import AutoConfig
         hf_config = AutoConfig.from_pretrained(args.hf_model_path)
@@ -220,9 +259,8 @@ def main(args) -> None:
         args.attention_dropout = hf_config.attention_probs_dropout_prob
         args.activation_dropout = hf_config.hidden_dropout_prob
         args.activation_fn = hf_config.hidden_act
-        # Don't override max_positions if user specified it
-        if args.max_positions is None:
-            args.max_positions = hf_config.max_position_embeddings - 2
+        # Set max_positions from HF config (already includes special tokens)
+        args.max_positions = hf_config.max_position_embeddings
         args.relative_attention_num_buckets = getattr(hf_config, 'relative_attention_num_buckets', 32)
         args.original_vocab_size = hf_config.vocab_size
         args.padded_vocab_size = hf_config.vocab_size
@@ -378,9 +416,7 @@ def main(args) -> None:
             if os.path.isfile(os.path.join(args.train_dir, f))
         ]
 
-    # Finally, let's make sure the checkpoint directory exists. If not, let's create it
-    checkpoint_dir = pathlib.Path(args.checkpoint_dir)
-    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    # Note: checkpoint_dir is already created above when handling resume logic
 
     # Create optimizer state directory if saving optimizer states
     if args.save_optimizer_state:
@@ -474,20 +510,9 @@ def main(args) -> None:
 
     # Handle resuming from checkpoint if enabled
     elif args.resume:
-        if args.resume_checkpoint is None:
-            resume_checkpoint_path = checkpoint_dir / "best_checkpoint.pt"
-        else:
-            resume_checkpoint_path = pathlib.Path(args.resume_checkpoint)
-
-        LOGGER.info(f"Resuming training from checkpoint: {resume_checkpoint_path}")
-
-        # Load the checkpoint
-        with safe_globals(
-            [Namespace, np.ndarray, np.dtype, np._core.multiarray._reconstruct]
-        ):
-            checkpoint = torch.load(
-                resume_checkpoint_path, map_location=device, weights_only=False
-            )
+        # Note: We already loaded the checkpoint above to get architecture
+        # Now we just need to extract the other state
+        checkpoint = resume_checkpoint
 
         # Extract training state
         if "steps" in checkpoint:
