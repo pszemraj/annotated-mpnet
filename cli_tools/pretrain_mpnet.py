@@ -172,13 +172,31 @@ def main(args) -> None:
         is_valid and details["whole_word_mask"]
     ), f"Invalid tokenizer: {args.tokenizer_name}. Debug w/ verbose output from validate_tokenizer()"
 
-    # Use the actual tokenizer vocab size - DO NOT PAD
+    # Get the tokenizer vocab size
     original_vocab_size = len(tokenizer)  # Use len() to get actual vocab size including added tokens
-    LOGGER.info(f"Using tokenizer vocab_size: {original_vocab_size}")
     
-    # Store vocab size in args
-    args.original_vocab_size = original_vocab_size
-    args.padded_vocab_size = original_vocab_size  # No padding - use actual size
+    # Determine whether to pad vocab size based on whether we're loading from existing model
+    if args.resume or args.hf_model_path is not None:
+        # When loading from existing model, use its vocab size (will be set later from checkpoint/HF config)
+        LOGGER.info(f"Loading from existing model - will use model's vocab size")
+        # These will be overridden when we load the checkpoint or HF config
+        args.original_vocab_size = original_vocab_size
+        args.padded_vocab_size = original_vocab_size
+    else:
+        # When training from scratch, pad vocab size for GPU performance
+        target_vocab_size = ((original_vocab_size + 127) // 128) * 128  # Round up to nearest 128
+        
+        if target_vocab_size > original_vocab_size:
+            LOGGER.info(
+                f"Training from scratch - padding vocab_size from {original_vocab_size} to {target_vocab_size} "
+                "(div. by 128) for GPU performance"
+            )
+            args.original_vocab_size = original_vocab_size
+            args.padded_vocab_size = target_vocab_size
+        else:
+            LOGGER.info(f"Using tokenizer vocab_size: {original_vocab_size}")
+            args.original_vocab_size = original_vocab_size
+            args.padded_vocab_size = original_vocab_size
 
     # Explicitly store token IDs in args for consistent usage
     args.pad_token_id = tokenizer.pad_token_id
