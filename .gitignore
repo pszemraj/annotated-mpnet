@@ -1,6 +1,7 @@
 # Repo specific
 hf_model/
 checkpoints/
+checkpoints*/
 /data/
 annotated_mpnet/utils/*.cpp
 
