@@ -172,23 +172,13 @@ def main(args) -> None:
         is_valid and details["whole_word_mask"]
     ), f"Invalid tokenizer: {args.tokenizer_name}. Debug w/ verbose output from validate_tokenizer()"
 
-    # Check and adjust model vocab_size for better GPU performance
-    original_vocab_size = tokenizer.vocab_size
-    target_vocab_size = (
-        (original_vocab_size + 127) // 128
-    ) * 128  # Round up to nearest multiple of 128
-
-    if target_vocab_size > original_vocab_size:
-        LOGGER.info(
-            f"Padding model's vocab_size from {original_vocab_size} to {target_vocab_size} "
-            "(div. by 128) for GPU performance"
-        )
-        # Store both sizes in args for reference during conversion
-        args.original_vocab_size = original_vocab_size
-        args.padded_vocab_size = target_vocab_size
-    else:
-        args.original_vocab_size = original_vocab_size
-        args.padded_vocab_size = original_vocab_size
+    # Use the actual tokenizer vocab size - DO NOT PAD
+    original_vocab_size = len(tokenizer)  # Use len() to get actual vocab size including added tokens
+    LOGGER.info(f"Using tokenizer vocab_size: {original_vocab_size}")
+    
+    # Store vocab size in args
+    args.original_vocab_size = original_vocab_size
+    args.padded_vocab_size = original_vocab_size  # No padding - use actual size
 
     # Explicitly store token IDs in args for consistent usage
     args.pad_token_id = tokenizer.pad_token_id
