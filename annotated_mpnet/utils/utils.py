@@ -10,8 +10,8 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
-import torch.nn.functional as F
 import torch.nn as nn
+import torch.nn.functional as F
 
 INCREMENTAL_STATE_INSTANCE_ID = defaultdict(lambda: 0)
 
@@ -371,7 +371,6 @@ def model_summary(
 
         if depth <= max_depth:
             layer_name = f"{prefix}{type(module).__name__}"
-            layer_index = ".".join(map(str, idx))
             param_shape = next(
                 (p.shape for p in module.parameters(recurse=False) if p.requires_grad),
                 None,

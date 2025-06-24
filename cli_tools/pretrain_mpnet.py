@@ -178,7 +178,7 @@ def main(args) -> None:
     # Determine whether to pad vocab size based on whether we're loading from existing model
     if args.resume or args.hf_model_path is not None:
         # When loading from existing model, use its vocab size (will be set later from checkpoint/HF config)
-        LOGGER.info(f"Loading from existing model - will use model's vocab size")
+        LOGGER.info("Loading from existing model - will use model's vocab size")
         # These will be overridden when we load the checkpoint or HF config
         args.original_vocab_size = original_vocab_size
         args.padded_vocab_size = original_vocab_size
