@@ -6,21 +6,19 @@ as the data collator
 import logging
 import os
 import random
-from typing import Dict, Iterator, Sized
+from typing import Any, Callable, Dict, Iterator, Optional, Sequence, Sized
 
 from rich.logging import RichHandler
 
 LOG_FORMAT = "%(message)s"
-logging.basicConfig(
-    level="INFO", format=LOG_FORMAT, datefmt="[%X] ", handlers=[RichHandler()]
-)
+logging.basicConfig(level="INFO", format=LOG_FORMAT, datefmt="[%X] ", handlers=[RichHandler()])
 LOGGER = logging.getLogger(__name__)
 
 
 import numpy as np
 import torch
 from datasets import load_dataset
-from torch.utils.data import Sampler
+from torch.utils.data import DataLoader, Sampler
 from transformers import PreTrainedTokenizer
 
 from annotated_mpnet.utils import utils
@@ -35,20 +33,20 @@ class MPNetDataset(torch.utils.data.Dataset):
     def __init__(
         self,
         tokenizer: PreTrainedTokenizer,
-        file_path: str = None,
-        dataset=None,
+        file_path: Optional[str] = None,
+        dataset: Optional[Any] = None,
         block_size: int = 512,
         field_name: str = "text",
     ) -> None:
-        """
-        Init the dataset
+        """Initialize the dataset.
 
-        Args:
-            tokenizer: the tokenizer for the model
-            file_path: the file path containing the data in text lines to be tokenized
-            dataset: a pre-loaded HuggingFace dataset (alternative to file_path)
-            block_size: the maximum amount of tokens in the block
-            field_name: the field name containing text in the dataset (only used if dataset is provided)
+        :param PreTrainedTokenizer tokenizer: The tokenizer for the model.
+        :param str file_path: Path to the dataset text file, defaults to None.
+        :param object dataset: Pre-loaded HuggingFace dataset or list of examples, defaults to None.
+        :param int block_size: Maximum number of tokens per block, defaults to 512.
+        :param str field_name: Field containing text in the dataset, defaults to "text".
+        :raises ValueError: If neither ``file_path`` nor ``dataset`` is provided.
+        :raises ValueError: If ``file_path`` does not exist.
         """
         super().__init__()
 
@@ -76,9 +74,7 @@ class MPNetDataset(torch.utils.data.Dataset):
             # We open the file and gather line by line
             with open(file_path, encoding="utf-8") as f:
                 lines = [
-                    line
-                    for line in f.read().splitlines()
-                    if (len(line) > 0 and not line.isspace())
+                    line for line in f.read().splitlines() if (len(line) > 0 and not line.isspace())
                 ]
         else:
             raise ValueError("Either file_path or dataset must be provided")
@@ -90,14 +86,12 @@ class MPNetDataset(torch.utils.data.Dataset):
 
         # Extract the input IDs and store them
         self.examples = batch_encoding["input_ids"]
-        self.examples = [
-            {"input_ids": torch.tensor(e, dtype=torch.long)} for e in self.examples
-        ]
+        self.examples = [{"input_ids": torch.tensor(e, dtype=torch.long)} for e in self.examples]
 
     def __len__(self) -> int:
         return len(self.examples)
 
-    def __getitem__(self, i: int) -> Dict[str, torch.tensor]:
+    def __getitem__(self, i: int) -> Dict[str, torch.Tensor]:
         return self.examples[i]
 
 
@@ -114,8 +108,8 @@ class HFStreamingDataset(torch.utils.data.IterableDataset):
     def __init__(
         self,
         tokenizer: PreTrainedTokenizer,
-        dataset_name: str = None,
-        dataset_stream=None,
+        dataset_name: Optional[str] = None,
+        dataset_stream: Optional[Any] = None,
         split: str = "train",
         block_size: int = 512,
         buffer_size: int = 10000,
@@ -123,19 +117,18 @@ class HFStreamingDataset(torch.utils.data.IterableDataset):
         min_text_length: int = 200,
         text_field: str = "text",
     ) -> None:
-        """
-        Initialize the streaming dataset
+        """Initialize the streaming dataset.
 
-        Args:
-            tokenizer: the tokenizer for the model
-            dataset_name: the name of the HuggingFace dataset (not used if dataset_stream is provided)
-            dataset_stream: an already loaded HF streaming dataset (overrides dataset_name if provided)
-            split: the split to use (train, validation, test)
-            block_size: the maximum amount of tokens in the block
-            buffer_size: size of the buffer for streaming
-            seed: random seed for reproducibility
-            min_text_length: minimum text length to consider
-            text_field: the field name containing the text in the dataset
+        :param PreTrainedTokenizer tokenizer: The tokenizer for the model.
+        :param str dataset_name: HuggingFace dataset name, defaults to None.
+        :param object dataset_stream: Pre-loaded streaming dataset, defaults to None.
+        :param str split: Dataset split to use, defaults to "train".
+        :param int block_size: Maximum number of tokens per block, defaults to 512.
+        :param int buffer_size: Buffer size for streaming, defaults to 10000.
+        :param int seed: Random seed for reproducibility, defaults to 42.
+        :param int min_text_length: Minimum text length to keep, defaults to 200.
+        :param str text_field: Field containing text, defaults to "text".
+        :raises ValueError: If neither ``dataset_name`` nor ``dataset_stream`` is provided.
         """
         super().__init__()
 
@@ -155,9 +148,7 @@ class HFStreamingDataset(torch.utils.data.IterableDataset):
             self.dataset = dataset_stream
         elif dataset_name is not None:
             # Load the dataset in streaming mode
-            LOGGER.info(
-                f"Loading dataset {dataset_name}, split: {split} in streaming mode"
-            )
+            LOGGER.info(f"Loading dataset {dataset_name}, split: {split} in streaming mode")
             self.dataset = load_dataset(dataset_name, split=split, streaming=True)
 
             # Apply filter for minimum text length if specified
@@ -170,11 +161,10 @@ class HFStreamingDataset(torch.utils.data.IterableDataset):
         else:
             raise ValueError("Either dataset_name or dataset_stream must be provided")
 
-    def __iter__(self):
-        """
-        Iterator for the dataset.
+    def __iter__(self) -> Iterator[Dict[str, torch.Tensor]]:
+        """Iterate over processed text samples.
 
-        Returns an iterator over text samples.
+        :return Iterator[Dict[str, torch.Tensor]]: Iterator yielding processed samples.
         """
         # Set worker seed for proper sharding
         worker_info = torch.utils.data.get_worker_info()
@@ -186,9 +176,7 @@ class HFStreamingDataset(torch.utils.data.IterableDataset):
 
             # Shard the dataset based on worker id
             dataset_iter = iter(
-                self.dataset.shard(
-                    num_shards=worker_info.num_workers, index=worker_info.id
-                )
+                self.dataset.shard(num_shards=worker_info.num_workers, index=worker_info.id)
             )
         else:
             dataset_iter = iter(self.dataset)
@@ -222,15 +210,11 @@ class HFStreamingDataset(torch.utils.data.IterableDataset):
 
             yield processed
 
-    def _process_example(self, example: Dict) -> Dict[str, torch.tensor]:
-        """
-        Process a single example from the dataset.
+    def _process_example(self, example: Dict[str, Any]) -> Dict[str, torch.Tensor]:
+        """Process a single example from the dataset.
 
-        Args:
-            example: Dataset example containing text
-
-        Returns:
-            Dictionary with processed input_ids
+        :param dict example: Dataset example containing text.
+        :return Dict[str, torch.Tensor]: Processed input IDs.
         """
         text = example[self.text_field]
 
@@ -248,40 +232,36 @@ class HFStreamingDataset(torch.utils.data.IterableDataset):
 
 
 def create_hf_dataloader(
-    tokenizer,
-    dataset_name,
-    split="train",
-    batch_size=32,
-    block_size=512,
-    buffer_size=10000,
-    seed=42,
-    min_text_length=200,
-    text_field="text",
-    skip_samples=0,
-    max_samples=None,
-    collator=None,
-    num_workers=4,
-):
-    """
-    Create a dataloader for a HuggingFace dataset in streaming mode.
+    tokenizer: PreTrainedTokenizer,
+    dataset_name: str,
+    split: str = "train",
+    batch_size: int = 32,
+    block_size: int = 512,
+    buffer_size: int = 10000,
+    seed: int = 42,
+    min_text_length: int = 200,
+    text_field: str = "text",
+    skip_samples: int = 0,
+    max_samples: Optional[int] = None,
+    collator: Optional[Callable] = None,
+    num_workers: int = 4,
+) -> DataLoader:
+    """Create a dataloader for a HuggingFace dataset in streaming mode.
 
-    Args:
-        tokenizer: the tokenizer for the model
-        dataset_name: the name of the HuggingFace dataset
-        split: the split to use (train, validation, test)
-        batch_size: batch size for the dataloader
-        block_size: the maximum amount of tokens in the block
-        buffer_size: size of the buffer for streaming
-        seed: random seed for reproducibility
-        min_text_length: minimum text length to consider
-        text_field: the field name containing the text in the dataset
-        skip_samples: number of samples to skip from the beginning
-        max_samples: maximum number of samples to use (None for all)
-        collator: data collator function to use
-        num_workers: number of worker processes for loading data
-
-    Returns:
-        PyTorch DataLoader for the dataset
+    :param PreTrainedTokenizer tokenizer: Tokenizer for the model.
+    :param str dataset_name: Name of the HuggingFace dataset.
+    :param str split: Dataset split to use, defaults to "train".
+    :param int batch_size: Batch size for the dataloader, defaults to 32.
+    :param int block_size: Maximum number of tokens per block, defaults to 512.
+    :param int buffer_size: Buffer size for streaming, defaults to 10000.
+    :param int seed: Random seed for reproducibility, defaults to 42.
+    :param int min_text_length: Minimum text length to consider, defaults to 200.
+    :param str text_field: Field containing text in the dataset, defaults to "text".
+    :param int skip_samples: Number of samples to skip, defaults to 0.
+    :param int max_samples: Maximum number of samples to use, defaults to None.
+    :param Callable collator: Data collator callable, defaults to None.
+    :param int num_workers: Number of worker processes, defaults to 4.
+    :return DataLoader: PyTorch DataLoader for the dataset.
     """
     dataset = HFStreamingDataset(
         tokenizer=tokenizer,
@@ -308,6 +288,8 @@ def create_hf_dataloader(
 
 
 class DataCollatorForMaskedPermutedLanguageModeling:
+    """Data collator for MPNet masked permuted language modeling."""
+
     def __init__(
         self,
         tokenizer: PreTrainedTokenizer,
@@ -316,21 +298,17 @@ class DataCollatorForMaskedPermutedLanguageModeling:
         rand_prob: float = 0.10,
         whole_word_mask: bool = True,
         use_fast: bool = True,
-        random_seed=None,
+        random_seed: Optional[int] = None,
     ) -> None:
-        """
-        Init the dataset
+        """Initialize the data collator.
 
-        Args:
-            tokenizer: the tokenizer for the model
-            pred_prob: the probability that a token will be in the prediction section
-            keep_prob: the probability that a token in the pred will be kept as is
-            rand_prob: the probability that a token in the pred will be randomly corrupted
-            whole_word_mask: boolean dictating whether or not we should be doing whole word masking
-                when generating permutations
-            use_fast: boolean dictation whether to use the Cython implementation of a costly
-                function to speed up training
-            random_seed: used for generating reproducible permutations during testing
+        :param PreTrainedTokenizer tokenizer: Tokenizer for the model.
+        :param float pred_prob: Probability that a token is predicted, defaults to 0.15.
+        :param float keep_prob: Probability that predicted tokens are kept, defaults to 0.10.
+        :param float rand_prob: Probability that predicted tokens are randomized, defaults to 0.10.
+        :param bool whole_word_mask: Whether to use whole word masking, defaults to True.
+        :param bool use_fast: Whether to use the fast span permutation, defaults to True.
+        :param int random_seed: Random seed for reproducible permutations, defaults to None.
         """
         super().__init__()
 
@@ -364,12 +342,14 @@ class DataCollatorForMaskedPermutedLanguageModeling:
 
         self.weights = weights / weights.sum()
 
-    def __call__(self, examples):
+    def __call__(self, examples: Sequence[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
         return self.collate_fn(examples)
 
-    def collate_fn(self, examples):
-        """
-        The core collating function for MPNet lives here
+    def collate_fn(self, examples: Sequence[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
+        """Collate a batch of examples for MPNet pretraining.
+
+        :param Sequence[Dict[str, torch.Tensor]] examples: Tokenized examples.
+        :return Dict[str, torch.Tensor]: Batch dictionary with masked inputs and targets.
         """
 
         # Start by creating a batch
@@ -433,17 +413,12 @@ class DataCollatorForMaskedPermutedLanguageModeling:
         return batch
 
     # Let's define helper functions here
-    def span_perm(self, x: torch.Tensor, pred_size=None) -> torch.Tensor:
-        """
-        This clever function is able to permute the input sequence while ALSO keeping words intact
+    def span_perm(self, x: torch.Tensor, pred_size: Optional[int] = None) -> torch.Tensor:
+        """Generate a span permutation while preserving whole words.
 
-        Args:
-            x: input IDs
-            pred_size: the total amount of tokens that will be predicted
-
-        Returns:
-            A tensor containing the permuted positions for that input ID sequence while also keeping
-            words intact
+        :param torch.Tensor x: Input IDs.
+        :param int pred_size: Total number of tokens to predict, defaults to None.
+        :return torch.Tensor: Permuted positions for the input sequence.
         """
 
         # Get a "mask" of which input IDs are the STARTS of words by using the map we created
@@ -573,28 +548,24 @@ class DataCollatorForMaskedPermutedLanguageModeling:
         # above to make sure that we aren't corrupting any tokens that were already slated for
         # maskin
         corrupt_indices = (
-            torch.bernoulli(torch.full(tokens.shape, corrupt_prob)).bool()
-            & ~mask_indices
+            torch.bernoulli(torch.full(tokens.shape, corrupt_prob)).bool() & ~mask_indices
         )
 
         # Now we mask and corrupt the tokens dictated by the indices above
         # We use the generate_random_tensor helper function to select random indices from the vocab
         tokens[mask_indices] = mask_idx
-        tokens[corrupt_indices] = self.generate_random_tensor(
-            corrupt_indices.sum().tolist()
-        ).to(tokens.device)
+        tokens[corrupt_indices] = self.generate_random_tensor(corrupt_indices.sum().tolist()).to(
+            tokens.device
+        )
 
         return tokens
 
-    def permute_inputs(
-        self, inputs: torch.Tensor, positions: torch.Tensor
-    ) -> torch.Tensor:
-        """
-        This function uses the positions we permuted earlier to permute the actual input_ids
+    def permute_inputs(self, inputs: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
+        """Permute input IDs using the provided positions.
 
-        Args:
-            inputs: the input_ids
-            positions: the permuted positions
+        :param torch.Tensor inputs: Input IDs.
+        :param torch.Tensor positions: Permuted positions.
+        :return torch.Tensor: Permuted input IDs.
         """
 
         # Get the shape of the inputs, i.e., (batch_size, seq_len)
@@ -615,12 +586,10 @@ class DataCollatorForMaskedPermutedLanguageModeling:
         return inputs.reshape(-1)[index]
 
     def generate_random_tensor(self, sz: int) -> torch.Tensor:
-        """
-        Helper function that will randomly select IDs from the tokenizer vocab to corrupt tokens
-        that aren't masked
+        """Generate random token IDs for corruption.
 
-        Args:
-            sz: the number of random tokens to extract
+        :param int sz: Number of random tokens to generate.
+        :return torch.Tensor: Random token IDs tensor.
         """
         # Set the numpy random seed if it's been provided
         if self.random_seed is not None:
@@ -639,7 +608,13 @@ class RandomSamplerWithSeed(Sampler[int]):
     epochs are reproducible. If a seed isn't provided, training will be truly random.
     """
 
-    def __init__(self, data_source: Sized, epoch: int, random_seed=None) -> None:
+    def __init__(self, data_source: Sized, epoch: int, random_seed: Optional[int] = None) -> None:
+        """Initialize the sampler with an optional seed.
+
+        :param Sized data_source: Data source to sample from.
+        :param int epoch: Current epoch number.
+        :param int random_seed: Optional random seed for reproducibility, defaults to None.
+        """
         self.data_source = data_source
         self.epoch = epoch
 

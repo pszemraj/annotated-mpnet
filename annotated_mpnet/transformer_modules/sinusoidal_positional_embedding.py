@@ -4,13 +4,12 @@ between a token and its position
 """
 
 import logging
+from typing import Any, Dict, Optional
 
 from rich.logging import RichHandler
 
 LOG_FORMAT = "%(message)s"
-logging.basicConfig(
-    level="INFO", format=LOG_FORMAT, datefmt="[%X] ", handlers=[RichHandler()]
-)
+logging.basicConfig(level="INFO", format=LOG_FORMAT, datefmt="[%X] ", handlers=[RichHandler()])
 LOGGER = logging.getLogger(__name__)
 
 
@@ -28,7 +27,13 @@ class SinusoidalPositionalEmbedding(nn.Module):
     A module for creating positional embeddings that follow a sinusoidal relationship
     """
 
-    def __init__(self, embedding_dim, padding_idx, init_size=1024) -> None:
+    def __init__(self, embedding_dim: int, padding_idx: int, init_size: int = 1024) -> None:
+        """Initialize sinusoidal positional embeddings.
+
+        :param int embedding_dim: Embedding dimensionality.
+        :param int padding_idx: Padding index.
+        :param int init_size: Initial size of the embedding table, defaults to 1024.
+        """
         super().__init__()
 
         # Store args
@@ -48,16 +53,20 @@ class SinusoidalPositionalEmbedding(nn.Module):
         # This is a builtin nn.Module function for registering buffer values within a module
         self.register_buffer("_float_tensor", torch.FloatTensor(1))
 
-    def prepare_for_onnx_export(self):
-        """
-        This function is probably useless for us, but we keep it in
-        """
+    def prepare_for_onnx_export(self) -> None:
+        """Prepare the module for ONNX export."""
         self.onnx_trace = True
 
     @staticmethod
-    def get_embedding(num_embeddings, embedding_dim, padding_idx=None):
-        """
-        This static method instantiates the sinusoidal pattern for the positional embeddings
+    def get_embedding(
+        num_embeddings: int, embedding_dim: int, padding_idx: Optional[int] = None
+    ) -> torch.Tensor:
+        """Instantiate sinusoidal positional embedding weights.
+
+        :param int num_embeddings: Number of embeddings.
+        :param int embedding_dim: Embedding dimensionality.
+        :param int padding_idx: Padding index, defaults to None.
+        :return torch.Tensor: Embedding weight matrix.
         """
 
         # First get half the embedding dimension size
@@ -68,12 +77,8 @@ class SinusoidalPositionalEmbedding(nn.Module):
         # see in the last step with sin() and cos() making an appearance)
         emb = math.log(10000) / (half_dim - 1)
         emb = torch.exp(torch.arange(half_dim, dtype=torch.float) * -emb)
-        emb = torch.arange(num_embeddings, dtype=torch.float).unsqueeze(
-            1
-        ) * emb.unsqueeze(0)
-        emb = torch.cat([torch.sin(emb), torch.cos(emb)], dim=1).view(
-            num_embeddings, -1
-        )
+        emb = torch.arange(num_embeddings, dtype=torch.float).unsqueeze(1) * emb.unsqueeze(0)
+        emb = torch.cat([torch.sin(emb), torch.cos(emb)], dim=1).view(num_embeddings, -1)
 
         # Next calculate padding. If embedding size is not divisible by 2, we need to pad out
         if embedding_dim % 2 == 1:
@@ -85,10 +90,20 @@ class SinusoidalPositionalEmbedding(nn.Module):
             emb[padding_idx, :] = 0
         return emb
 
-    def forward(self, input, incremental_state=None, timestep=None, **kwargs):
-        """
-        The forward function for processing these positional embeddings. Input should be of size
-        (bsz x seq_len) as usual
+    def forward(
+        self,
+        input: torch.Tensor,
+        incremental_state: Optional[Dict[str, Any]] = None,
+        timestep: Optional[torch.Tensor] = None,
+        **kwargs: Any,
+    ) -> torch.Tensor:
+        """Compute sinusoidal positional embeddings.
+
+        :param torch.Tensor input: Input tensor of shape (bsz, seq_len).
+        :param dict incremental_state: Incremental decoding state, defaults to None.
+        :param torch.Tensor timestep: Timestep tensor for incremental decoding, defaults to None.
+        :param dict kwargs: Additional unused keyword arguments.
+        :return torch.Tensor: Positional embeddings.
         """
 
         # Break out dimensions
@@ -124,31 +139,24 @@ class SinusoidalPositionalEmbedding(nn.Module):
 
         # Use the typical `make_positions` util to get incremental positions. This will eventually
         # feed directly into the sinusoidal weights we defined before
-        positions = utils.make_positions(
-            input, self.padding_idx, onnx_trace=self.onnx_trace
-        )
+        positions = utils.make_positions(input, self.padding_idx, onnx_trace=self.onnx_trace)
 
         # If onnx_trace is set (which it shouldn't be), process additional below
         if self.onnx_trace:
             flat_embeddings = self.weights.detach().index_select(0, positions.view(-1))
-            embedding_shape = torch.cat(
-                (bsz.view(1), seq_len.view(1), torch.LongTensor([-1]))
-            )
+            embedding_shape = torch.cat((bsz.view(1), seq_len.view(1), torch.LongTensor([-1])))
             embeddings = torch.onnx.operators.reshape_from_tensor_shape(
                 flat_embeddings, embedding_shape
             )
             return embeddings
 
         # Return the weights selected by the positions generated above
-        return (
-            self.weights.index_select(0, positions.view(-1))
-            .view(bsz, seq_len, -1)
-            .detach()
-        )
+        return self.weights.index_select(0, positions.view(-1)).view(bsz, seq_len, -1).detach()
 
     # Helper function below
-    def max_positions(self):
-        """
-        Maximum number of supported positions.
+    def max_positions(self) -> int:
+        """Return the maximum number of supported positions.
+
+        :return int: Maximum supported positions.
         """
         return int(1e5)  # an arbitrary large number

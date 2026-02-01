@@ -3,14 +3,12 @@ Module for defining the Encoder blocks in the transformer
 """
 
 import logging
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 from rich.logging import RichHandler
 
 LOG_FORMAT = "%(message)s"
-logging.basicConfig(
-    level="INFO", format=LOG_FORMAT, datefmt="[%X] ", handlers=[RichHandler()]
-)
+logging.basicConfig(level="INFO", format=LOG_FORMAT, datefmt="[%X] ", handlers=[RichHandler()])
 LOGGER = logging.getLogger(__name__)
 
 
@@ -136,9 +134,7 @@ class SentenceEncoder(nn.Module):
         self.learned_pos_embedding = learned_pos_embedding
 
         # Create the embedding layer that will convert token IDs into embeds
-        self.embed_tokens = nn.Embedding(
-            self.vocab_size, self.embedding_dim, self.padding_idx
-        )
+        self.embed_tokens = nn.Embedding(self.vocab_size, self.embedding_dim, self.padding_idx)
 
         # Store more args
         self.embed_scale = embed_scale
@@ -177,9 +173,7 @@ class SentenceEncoder(nn.Module):
 
         if relative_attention_max_distance is None:
             # linear scaling of max distance based on seq len (round up to nearest 8)
-            scaled_max_distance = max(
-                128, int(base_max_distance * max_seq_len / base_context)
-            )
+            scaled_max_distance = max(128, int(base_max_distance * max_seq_len / base_context))
             self.relative_attention_max_distance = (scaled_max_distance + 7) // 8 * 8
         else:
             self.relative_attention_max_distance = relative_attention_max_distance
@@ -217,7 +211,11 @@ class SentenceEncoder(nn.Module):
         self.normalize_before = normalize_before
 
         # Define a helper function to freeze embedding layers if specified in the args
-        def freeze_module_params(m: nn.Module):
+        def freeze_module_params(m: nn.Module) -> None:
+            """Freeze parameters for a given module.
+
+            :param nn.Module m: Module whose parameters should be frozen.
+            """
             if m is not None:
                 for p in m.parameters():
                     p.requires_grad = False
@@ -239,9 +237,14 @@ class SentenceEncoder(nn.Module):
         segment_labels: torch.Tensor = None,
         last_state_only: bool = False,
         positions: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        The forward pass of the Encoder
+    ) -> Tuple[List[torch.Tensor], torch.Tensor]:
+        """Run the encoder forward pass.
+
+        :param torch.Tensor tokens: Token IDs of shape (bsz, seq_len).
+        :param torch.Tensor segment_labels: Segment labels, defaults to None.
+        :param bool last_state_only: Whether to return only the final state, defaults to False.
+        :param torch.Tensor positions: Precomputed positions, defaults to None.
+        :return Tuple[List[torch.Tensor], torch.Tensor]: Hidden states list and sentence embedding.
         """
 
         # Compute padding mask. This is needed for multi-head attention
@@ -293,9 +296,7 @@ class SentenceEncoder(nn.Module):
         # Now process through all the encoder layers (and add each intermediate state if
         # last_state_only is False)
         for layer in self.layers:
-            x, _ = layer(
-                x, self_attn_padding_mask=padding_mask, positions_bias=positions_bias
-            )
+            x, _ = layer(x, self_attn_padding_mask=padding_mask, positions_bias=positions_bias)
             if not last_state_only:
                 inner_states.append(x)
 
@@ -316,18 +317,15 @@ class SentenceEncoder(nn.Module):
 
         return inner_states, sentence_rep
 
-    def compute_position_bias(self, x, num_buckets, max_distance):
-        """
-        Computes the relative position bias for self-attention.
+    def compute_position_bias(
+        self, x: torch.Tensor, num_buckets: int, max_distance: int
+    ) -> torch.Tensor:
+        """Compute relative position bias for self-attention.
 
-        Args:
-            x: Input tensor with shape (seq_len, batch_size, embed_dim).
-            num_buckets: Number of buckets to use for relative position encoding.
-            max_distance: The maximum distance to consider for relative positions.
-
-        Returns:
-            A tensor representing the relative position bias, with shape
-            (batch_size * num_heads, qlen, klen).
+        :param torch.Tensor x: Input tensor with shape (seq_len, batch_size, embed_dim).
+        :param int num_buckets: Number of buckets for relative positions.
+        :param int max_distance: Maximum relative distance to consider.
+        :return torch.Tensor: Relative position bias tensor.
         """
 
         # Get the batch size, q and k len
@@ -351,22 +349,16 @@ class SentenceEncoder(nn.Module):
 
     @staticmethod
     def relative_position_bucket(
-        relative_position, num_buckets: int = 32, max_distance: int = 128
-    ):
-        """
-        Computes the relative position bias for a given tensor of relative positions.
-            Defaults are for original MPNet @ context length 512.
+        relative_position: torch.Tensor,
+        num_buckets: int = 32,
+        max_distance: int = 128,
+    ) -> torch.Tensor:
+        """Compute relative position buckets for biasing attention.
 
-        Args:
-            relative_position: Tensor of shape (bsz, qlen, klen) containing the relative
-                positions between the queries and keys.
-            num_buckets: The number of buckets to use for the relative position bias.
-                Defaults to 32.
-            max_distance: The maximum distance to consider when computing the relative
-                position bias. Defaults to 128.
-
-        Returns:
-            A tensor of shape (bsz, qlen, klen) containing the relative position biases.
+        :param torch.Tensor relative_position: Relative positions tensor.
+        :param int num_buckets: Number of buckets, defaults to 32.
+        :param int max_distance: Maximum distance, defaults to 128.
+        :return torch.Tensor: Bucketed relative positions.
         """
         ret = 0
         n = -relative_position
@@ -384,8 +376,6 @@ class SentenceEncoder(nn.Module):
             * (num_buckets - max_exact)
         ).to(torch.long)
 
-        val_if_large = torch.min(
-            val_if_large, torch.full_like(val_if_large, num_buckets - 1)
-        )
+        val_if_large = torch.min(val_if_large, torch.full_like(val_if_large, num_buckets - 1))
         ret += torch.where(is_small, n, val_if_large)
         return ret

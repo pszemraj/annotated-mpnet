@@ -11,9 +11,7 @@ from argparse import Namespace
 from rich.logging import RichHandler
 
 LOG_FORMAT = "%(message)s"
-logging.basicConfig(
-    level="INFO", format=LOG_FORMAT, datefmt="[%X] ", handlers=[RichHandler()]
-)
+logging.basicConfig(level="INFO", format=LOG_FORMAT, datefmt="[%X] ", handlers=[RichHandler()])
 LOGGER = logging.getLogger(__name__)
 
 
@@ -40,9 +38,7 @@ def convert_hf_model_to_mpnet(
     # Try PyTorch weights first, fallback to TensorFlow if needed
     try:
         # Note: Some "weights not initialized" warnings are expected and can be ignored
-        hf_model = MPNetForMaskedLM.from_pretrained(
-            hf_model_path, ignore_mismatched_sizes=True
-        )
+        hf_model = MPNetForMaskedLM.from_pretrained(hf_model_path, ignore_mismatched_sizes=True)
     except ValueError as e:
         if "pytorch_model.bin" in str(e) and "TensorFlow weights" in str(e):
             LOGGER.info("PyTorch weights not found, loading from TensorFlow weights")
@@ -112,15 +108,11 @@ def convert_hf_model_to_mpnet(
     mappings = {}
 
     # Embedding mappings
-    mappings["mpnet.embeddings.word_embeddings.weight"] = (
-        "sentence_encoder.embed_tokens.weight"
-    )
+    mappings["mpnet.embeddings.word_embeddings.weight"] = "sentence_encoder.embed_tokens.weight"
     mappings["mpnet.embeddings.position_embeddings.weight"] = (
         "sentence_encoder.embed_positions.weight"
     )
-    mappings["mpnet.embeddings.LayerNorm.weight"] = (
-        "sentence_encoder.emb_layer_norm.weight"
-    )
+    mappings["mpnet.embeddings.LayerNorm.weight"] = "sentence_encoder.emb_layer_norm.weight"
     mappings["mpnet.embeddings.LayerNorm.bias"] = "sentence_encoder.emb_layer_norm.bias"
 
     # Relative attention bias
@@ -147,15 +139,9 @@ def convert_hf_model_to_mpnet(
         mappings[f"{hf_prefix}attention.LayerNorm.weight"] = (
             f"{our_prefix}self_attn_layer_norm.weight"
         )
-        mappings[f"{hf_prefix}attention.LayerNorm.bias"] = (
-            f"{our_prefix}self_attn_layer_norm.bias"
-        )
-        mappings[f"{hf_prefix}output.LayerNorm.weight"] = (
-            f"{our_prefix}final_layer_norm.weight"
-        )
-        mappings[f"{hf_prefix}output.LayerNorm.bias"] = (
-            f"{our_prefix}final_layer_norm.bias"
-        )
+        mappings[f"{hf_prefix}attention.LayerNorm.bias"] = f"{our_prefix}self_attn_layer_norm.bias"
+        mappings[f"{hf_prefix}output.LayerNorm.weight"] = f"{our_prefix}final_layer_norm.weight"
+        mappings[f"{hf_prefix}output.LayerNorm.bias"] = f"{our_prefix}final_layer_norm.bias"
 
         # Feed-forward network
         mappings[f"{hf_prefix}intermediate.dense.weight"] = f"{our_prefix}fc1.weight"
@@ -164,12 +150,8 @@ def convert_hf_model_to_mpnet(
         mappings[f"{hf_prefix}output.dense.bias"] = f"{our_prefix}fc2.bias"
 
         # Output projection
-        mappings[f"{hf_prefix}attention.attn.o.weight"] = (
-            f"{our_prefix}self_attn.out_proj.weight"
-        )
-        mappings[f"{hf_prefix}attention.attn.o.bias"] = (
-            f"{our_prefix}self_attn.out_proj.bias"
-        )
+        mappings[f"{hf_prefix}attention.attn.o.weight"] = f"{our_prefix}self_attn.out_proj.weight"
+        mappings[f"{hf_prefix}attention.attn.o.bias"] = f"{our_prefix}self_attn.out_proj.bias"
 
         # Special handling for attention QKV weights
         # HF stores them separately, we combine them into single in_proj weight/bias tensors
@@ -185,9 +167,7 @@ def convert_hf_model_to_mpnet(
         combined_bias = torch.cat([q_bias, k_bias, v_bias])
 
         # Add to our model state
-        model.state_dict()[f"{our_prefix}self_attn.in_proj_weight"].copy_(
-            combined_weight
-        )
+        model.state_dict()[f"{our_prefix}self_attn.in_proj_weight"].copy_(combined_weight)
         model.state_dict()[f"{our_prefix}self_attn.in_proj_bias"].copy_(combined_bias)
 
     # Now apply all the direct mappings
@@ -195,7 +175,7 @@ def convert_hf_model_to_mpnet(
         if hf_key in hf_model.state_dict() and our_key in model.state_dict():
             hf_tensor = hf_model.state_dict()[hf_key]
             our_tensor = model.state_dict()[our_key]
-            
+
             # Special handling for position embeddings size mismatch
             if our_key == "sentence_encoder.embed_positions.weight":
                 if hf_tensor.shape[0] != our_tensor.shape[0]:
@@ -212,9 +192,11 @@ def convert_hf_model_to_mpnet(
                         LOGGER.info(f"Padded HF position embeddings by {padding_size} positions")
                     # If HF has more positions, truncate
                     elif our_tensor.shape[0] < hf_tensor.shape[0]:
-                        hf_tensor = hf_tensor[:our_tensor.shape[0]]
-                        LOGGER.info(f"Truncated HF position embeddings to {our_tensor.shape[0]} positions")
-            
+                        hf_tensor = hf_tensor[: our_tensor.shape[0]]
+                        LOGGER.info(
+                            f"Truncated HF position embeddings to {our_tensor.shape[0]} positions"
+                        )
+
             model.state_dict()[our_key].copy_(hf_tensor)
 
     # Create checkpoint directory if it doesn't exist
@@ -231,9 +213,10 @@ def convert_hf_model_to_mpnet(
     LOGGER.info("Conversion completed successfully")
 
 
-def cli_main():
-    """
-    Command-line interface for the converter
+def cli_main() -> None:
+    """Command-line interface for the converter.
+
+    :return None: This function returns nothing.
     """
     parser = argparse.ArgumentParser(
         description="Convert HuggingFace MPNet model to annotated-mpnet format"

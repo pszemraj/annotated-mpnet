@@ -104,12 +104,8 @@ class TestData(unittest.TestCase):
         )
 
     def test_training_seeded_sampling(self):
-        sampler_epoch_0 = RandomSamplerWithSeed(
-            [self.examples] * 10, epoch=0, random_seed=12345
-        )
-        sampler_epoch_1 = RandomSamplerWithSeed(
-            [self.examples] * 10, epoch=1, random_seed=12345
-        )
+        sampler_epoch_0 = RandomSamplerWithSeed([self.examples] * 10, epoch=0, random_seed=12345)
+        sampler_epoch_1 = RandomSamplerWithSeed([self.examples] * 10, epoch=1, random_seed=12345)
 
         self.assertEqual(
             list(sampler_epoch_0.__iter__()),

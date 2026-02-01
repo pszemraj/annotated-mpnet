@@ -4,13 +4,12 @@ class
 """
 
 import logging
+from typing import Optional, Tuple
 
 from rich.logging import RichHandler
 
 LOG_FORMAT = "%(message)s"
-logging.basicConfig(
-    level="INFO", format=LOG_FORMAT, datefmt="[%X] ", handlers=[RichHandler()]
-)
+logging.basicConfig(level="INFO", format=LOG_FORMAT, datefmt="[%X] ", handlers=[RichHandler()])
 LOGGER = logging.getLogger(__name__)
 
 
@@ -41,31 +40,19 @@ class SentenceEncoderLayer(nn.Module):
         normalize_before: bool = True,
         export: bool = False,
     ) -> None:
-        """
-        Init function for the layer. I will try to summarize all the args here.
+        """Initialize a sentence encoder layer.
 
-        Args:
-            embedding_dim: the embedding dimension for the layer. Should always be 768 really
-            ffn_embedding_dim: this is the size of the hidden layer in the fully-connected
-                subsection of the layer right AFTER self-attention. Also known as the feed-forward
-                network component of the encoder layer
-            num_attention_heads: the number of attention heads for each layer. Default here is 8,
-                but you will usually want to bump this higher if your model is accepting longer
-                sequence lengths
-            dropout: pretty straightforward, but this is the dropout prob for the FC layers in the
-                forward pass
-            attention_dropout: similar to above, but is the dropout prob within the self-attention
-                mechanism
-            activation_fn: the activation function you will be using in this network.
-            add_bias_kv: boolean that dictates whether or not to add a bias parameter to the K, V
-                matrices in the self-attention mechanism
-            add_zero_attn: boolean that dictate whether or not to add zero attention to the
-                self-attention mechanism
-            normalize_before: boolean that determines if the LayerNorm will be applied BEFORE or
-                AFTER the self-attention calculation. Functionally they are very similar, but the
-                standard is to normalize before
-            export: boolean that would enable ONNX tracing for exporting, but I think we won't be
-                using this
+        :param float embedding_dim: Embedding dimension, defaults to 768.
+        :param float ffn_embedding_dim: FFN hidden size, defaults to 3072.
+        :param float num_attention_heads: Number of attention heads, defaults to 8.
+        :param float dropout: Dropout probability, defaults to 0.1.
+        :param float attention_dropout: Attention dropout probability, defaults to 0.1.
+        :param float activation_dropout: Activation dropout probability, defaults to 0.1.
+        :param str activation_fn: Activation function name, defaults to "relu".
+        :param bool add_bias_kv: Whether to add bias to K/V, defaults to False.
+        :param bool add_zero_attn: Whether to add zero attention, defaults to False.
+        :param bool normalize_before: Normalize before attention, defaults to True.
+        :param bool export: Whether to enable ONNX tracing, defaults to False.
         """
         super().__init__()
 
@@ -106,11 +93,14 @@ class SentenceEncoderLayer(nn.Module):
         self_attn_mask: torch.Tensor = None,
         self_attn_padding_mask: torch.Tensor = None,
         positions_bias: torch.Tensor = None,
-    ):
-        """
-        Forward pass of the encoder layer. Calculates self-attention, does normalization (before or
-        after depending on args), processes the skip connection, and uses the linear layers at the
-        end
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        """Run the encoder layer forward pass.
+
+        :param torch.Tensor x: Input tensor.
+        :param torch.Tensor self_attn_mask: Self-attention mask, defaults to None.
+        :param torch.Tensor self_attn_padding_mask: Padding mask, defaults to None.
+        :param torch.Tensor positions_bias: Relative position bias, defaults to None.
+        :return Tuple[torch.Tensor, Optional[torch.Tensor]]: Output tensor and attention weights.
         """
 
         # Keep the residual for the skip connection after self-attention calculation
@@ -176,11 +166,19 @@ class SentenceEncoderLayer(nn.Module):
         return x, attn
 
     def maybe_layer_norm(
-        self, layer_norm: nn.Module, x: torch.Tensor, before=False, after=False
+        self,
+        layer_norm: nn.Module,
+        x: torch.Tensor,
+        before: bool = False,
+        after: bool = False,
     ) -> torch.Tensor:
-        """
-        The key helper function that will only trigger if the before/after bool passed in matches
-        what is dictated by the self.normalize_before
+        """Conditionally apply layer normalization.
+
+        :param nn.Module layer_norm: Layer norm module.
+        :param torch.Tensor x: Input tensor.
+        :param bool before: Whether called before attention, defaults to False.
+        :param bool after: Whether called after attention, defaults to False.
+        :return torch.Tensor: Normalized tensor (or original if skipped).
         """
         # First make sure before and after both aren't true with a quick XOR
         assert before ^ after, "You must set only one of 'before' or 'after'"

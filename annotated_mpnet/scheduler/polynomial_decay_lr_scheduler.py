@@ -2,6 +2,8 @@
 Module containing the polynomial decay LR scheduler with warmup step parameter
 """
 
+from typing import Any, Dict, Optional
+
 
 class PolynomialDecayLRScheduler(object):
     """
@@ -10,14 +12,11 @@ class PolynomialDecayLRScheduler(object):
     up" the learning rate for a number of steps and then decay it polynomially
     """
 
-    def __init__(self, args, optimizer) -> None:
-        """
-        Initialize the scheduler
+    def __init__(self, args: Any, optimizer: Any) -> None:
+        """Initialize the scheduler.
 
-        Args:
-            args: the pass in from argparse containing all the args (including the ones we need for
-                defining this LR scheduler)
-            optimizer: the optimizer we're using, will probably always be Adam
+        :param object args: Namespace containing scheduler hyperparameters.
+        :param object optimizer: Optimizer instance (e.g., Adam).
         """
         super().__init__()
 
@@ -45,23 +44,26 @@ class PolynomialDecayLRScheduler(object):
         # Set the inital learning rate
         self.set_lr(self.warmup_factor * self.lr)
 
-    def set_lr(self, lr):
-        """
-        Set the learning rate of the param groups
+    def set_lr(self, lr: float) -> None:
+        """Set the learning rate for all parameter groups.
+
+        :param float lr: Learning rate to set.
         """
         for param_group in self.optimizer.param_groups:
             param_group["lr"] = lr
 
-    def get_lr(self):
-        """
-        Get the current learning rate of the param groups
+    def get_lr(self) -> float:
+        """Get the current learning rate.
+
+        :return float: Current learning rate.
         """
         return self.optimizer.param_groups[0]["lr"]
 
-    def step(self, num_updates):
-        """
-        The step function of the scheduler. Will update with either a linea increase if num_updates
-        is less than warmup_updates or will decrease polynomially otherwise
+    def step(self, num_updates: int) -> float:
+        """Update the learning rate and step the optimizer.
+
+        :param int num_updates: Number of updates performed so far.
+        :return float: Updated learning rate.
         """
 
         # Branch first to the linear increase using the warmup factor
@@ -94,16 +96,27 @@ class PolynomialDecayLRScheduler(object):
         return self.get_lr()
 
     # A couple helper functions that seem to be required for all LR schedulers below
-    def state_dict(self):
-        """Return the optimizer's state dict."""
+    def state_dict(self) -> Dict[str, Any]:
+        """Return the optimizer's state dict.
+
+        :return Dict[str, Any]: Optimizer state dictionary.
+        """
         return self.optimizer.state_dict()
 
-    def load_state_dict(self, state_dict, optimizer_overrides=None):
+    def load_state_dict(
+        self,
+        state_dict: Dict[str, Any],
+        optimizer_overrides: Optional[Dict[str, Any]] = None,
+    ) -> None:
         """Load an optimizer state dict.
+
         In general we should prefer the configuration of the existing optimizer
         instance (e.g., learning rate) over that found in the state_dict. This
         allows us to resume training from a checkpoint using a new set of
         optimizer args.
+
+        :param Dict[str, Any] state_dict: Optimizer state to load.
+        :param Dict[str, Any] optimizer_overrides: Overrides for optimizer settings, defaults to None.
         """
         self.optimizer.load_state_dict(state_dict)
 

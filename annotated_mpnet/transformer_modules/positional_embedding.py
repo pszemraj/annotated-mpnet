@@ -8,9 +8,7 @@ import logging
 from rich.logging import RichHandler
 
 LOG_FORMAT = "%(message)s"
-logging.basicConfig(
-    level="INFO", format=LOG_FORMAT, datefmt="[%X] ", handlers=[RichHandler()]
-)
+logging.basicConfig(level="INFO", format=LOG_FORMAT, datefmt="[%X] ", handlers=[RichHandler()])
 LOGGER = logging.getLogger(__name__)
 
 
@@ -24,15 +22,19 @@ from annotated_mpnet.transformer_modules import (
 
 def PositionalEmbedding(
     num_embeddings: int, embedding_dim: int, padding_idx: int, learned: bool = False
-):
-    """
-    Wrapping function that will select the appropriate positional embedding type specified by the
-    learned parameter
+) -> nn.Module:
+    """Create positional embedding module.
+
+    :param int num_embeddings: Number of embeddings.
+    :param int embedding_dim: Embedding dimensionality.
+    :param int padding_idx: Padding index.
+    :param bool learned: Whether to use learned embeddings, defaults to False.
+    :return nn.Module: Positional embedding module.
     """
 
     # If we specified "learned" to be True, we want to create a learned positional embedding module
     if learned:
-        num_embeddings = num_embeddings + 2 # Add 2 for CLS and SEP
+        num_embeddings = num_embeddings + 2  # Add 2 for CLS and SEP
 
         # Instantiate the learned positional embeddings
         m = LearnedPositionalEmbedding(num_embeddings, embedding_dim, padding_idx)
@@ -46,7 +48,9 @@ def PositionalEmbedding(
     # Branch to create sinusoidal embeddings if "learned" is False
     else:
         m = SinusoidalPositionalEmbedding(
-            embedding_dim, padding_idx, init_size=num_embeddings + 2 # Add 2 for CLS and SEP
+            embedding_dim,
+            padding_idx,
+            init_size=num_embeddings + 2,  # Add 2 for CLS and SEP
         )
 
     return m

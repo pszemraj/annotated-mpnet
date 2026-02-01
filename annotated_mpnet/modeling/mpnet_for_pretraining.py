@@ -4,20 +4,19 @@ code
 """
 
 import logging
-from typing import Tuple
+from typing import Any, Optional, Sequence, Tuple, Union
 
 from rich.logging import RichHandler
 
 LOG_FORMAT = "%(message)s"
-logging.basicConfig(
-    level="INFO", format=LOG_FORMAT, datefmt="[%X] ", handlers=[RichHandler()]
-)
+logging.basicConfig(level="INFO", format=LOG_FORMAT, datefmt="[%X] ", handlers=[RichHandler()])
 LOGGER = logging.getLogger(__name__)
 
 
 import torch
 import torch.nn.functional as F
 from torch import nn
+from transformers import PreTrainedTokenizer
 
 from annotated_mpnet.transformer_modules import LayerNorm, SentenceEncoder
 from annotated_mpnet.utils import utils
@@ -49,7 +48,12 @@ class MPNetForPretraining(nn.Module):
     Class containing all the methods required for pretraining MPNet
     """
 
-    def __init__(self, args, tokenizer) -> None:
+    def __init__(self, args: Any, tokenizer: PreTrainedTokenizer) -> None:
+        """Initialize the MPNet pretraining model.
+
+        :param object args: Configuration namespace containing model hyperparameters.
+        :param PreTrainedTokenizer tokenizer: Tokenizer used to determine vocab and padding IDs.
+        """
         super().__init__()
 
         # Use padded_vocab_size if available, otherwise use the tokenizer's vocab_size
@@ -88,18 +92,32 @@ class MPNetForPretraining(nn.Module):
         self.apply(init_final_params)
 
     def output_layer(
-        self, features: torch.Tensor, masked_tokens: torch.Tensor = None
+        self, features: torch.Tensor, masked_tokens: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
-        """
-        Wrapper function for language modeling output layer
+        """Project encoder features to vocabulary logits.
+
+        :param torch.Tensor features: Encoder features.
+        :param torch.Tensor masked_tokens: Mask positions to select, defaults to None.
+        :return torch.Tensor: Vocabulary logits.
         """
         return self.lm_head(features, masked_tokens)
 
     def forward(
-        self, input_ids, positions, pred_size, return_mlm=False, **kwargs
-    ) -> torch.Tensor:
-        """
-        Forward function for computing MPNet
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        pred_size: int,
+        return_mlm: bool = False,
+        **kwargs: Any,
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        """Compute the MPNet forward pass.
+
+        :param torch.Tensor input_ids: Input token IDs.
+        :param torch.Tensor positions: Position indices for the batch.
+        :param int pred_size: Number of tokens to predict.
+        :param bool return_mlm: Whether to return an additional MLM head output, defaults to False.
+        :param dict kwargs: Additional unused keyword arguments.
+        :return torch.Tensor: Vocabulary logits (or logits tuple when ``return_mlm`` is True).
         """
 
         # Calculate initial embeddings
@@ -157,14 +175,14 @@ class MPNetForPretraining(nn.Module):
     # We define some class static methods here that will be used quite a bit across the board
     @staticmethod
     def encode_emb(
-        self, input_ids: torch.Tensor, positions: torch.Tensor = None
+        self, input_ids: torch.Tensor, positions: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
-        """
-        Method for embedding the input tokens (i.e. input_ids)
+        """Embed input tokens using the sentence encoder.
 
-        Args:
-            input_ids: the input IDs for the given batch
-            positions: the position values
+        :param SentenceEncoder self: Sentence encoder instance providing embedding layers.
+        :param torch.Tensor input_ids: Input token IDs for the batch.
+        :param torch.Tensor positions: Precomputed position indices, defaults to None.
+        :return torch.Tensor: Embedded token representations.
         """
 
         # Use the embedding layer of the sentence encoder to embed these (passed in via the self
@@ -177,9 +195,7 @@ class MPNetForPretraining(nn.Module):
 
         # Add in positions
         if positions is not None:
-            x += F.embedding(
-                positions + 2, self.embed_positions.weight, self.padding_idx
-            )
+            x += F.embedding(positions + 2, self.embed_positions.weight, self.padding_idx)
 
         # Do layer norm
         if self.emb_layer_norm is not None and not self.normalize_before:
@@ -192,8 +208,11 @@ class MPNetForPretraining(nn.Module):
 
     @staticmethod
     def maybe_final_norm(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Another helper function to process the final layer norm if necessary
+        """Apply final layer normalization if configured.
+
+        :param SentenceEncoder self: Sentence encoder instance.
+        :param torch.Tensor x: Tensor to normalize.
+        :return torch.Tensor: Normalized tensor.
         """
         if self.emb_layer_norm is not None and self.normalize_before:
             return self.emb_layer_norm(x)
@@ -201,8 +220,11 @@ class MPNetForPretraining(nn.Module):
 
     @staticmethod
     def encode_relative_emb(self, positions: torch.Tensor) -> torch.Tensor:
-        """
-        Helper function to properly handle relative position bias
+        """Compute relative position bias embeddings.
+
+        :param SentenceEncoder self: Sentence encoder instance.
+        :param torch.Tensor positions: Position indices for the batch.
+        :return torch.Tensor: Relative position bias values.
         """
         qlen, klen = positions.size(1), positions.size(1)
         context_position = positions[:, :, None]
@@ -227,15 +249,18 @@ class MPNetLMHead(nn.Module):
     """
 
     def __init__(
-        self, embed_dim: int, output_dim: int, activation_fn: str, weight=None
+        self,
+        embed_dim: int,
+        output_dim: int,
+        activation_fn: str,
+        weight: Optional[torch.Tensor] = None,
     ) -> None:
-        """
-        Let's talk about these args so we can better understand what's happening in the LM head
+        """Initialize the LM head.
 
-        Args:
-            embed_dim: the embedding dimension of the encoder model (usually 768)
-            output_dim: the dimension that we want to project out to (usually the vocab size)
-            activation_fn: the activation to be using within the LM head
+        :param int embed_dim: Encoder embedding dimension (typically 768).
+        :param int output_dim: Output vocabulary dimension.
+        :param str activation_fn: Activation function name for the head.
+        :param torch.Tensor weight: Optional shared embedding weights, defaults to None.
         """
         super().__init__()
 
@@ -258,13 +283,14 @@ class MPNetLMHead(nn.Module):
         # Finally create the bias layer
         self.bias = nn.Parameter(torch.zeros(output_dim))
 
-    def forward(self, features, masked_tokens=None):
-        """
-        Forward pass for the LM head
+    def forward(
+        self, features: torch.Tensor, masked_tokens: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        """Forward pass for the LM head.
 
-        Args:
-            features: outputs of the encoder portion
-            masked_tokens: which tokens are masked
+        :param torch.Tensor features: Encoder outputs.
+        :param torch.Tensor masked_tokens: Mask positions to select, defaults to None.
+        :return torch.Tensor: Vocabulary logits.
         """
 
         # Only project the unmasked tokens while training, saves both memory and computation
@@ -284,20 +310,20 @@ class MPNetLMHead(nn.Module):
 
 # Helper functions below!
 def reverse_tensor(x: torch.Tensor) -> torch.Tensor:
-    """
-    This function simply reverses a tensor. This will be used to make extracting content and query
-    streams easier later on
+    """Reverse the time and batch dimensions of a tensor.
+
+    :param torch.Tensor x: Input tensor.
+    :return torch.Tensor: Transposed tensor.
     """
     return x.transpose(0, 1)
 
 
 def split_tensor(x: torch.Tensor, split_size: int) -> Tuple[torch.Tensor, torch.Tensor]:
-    """
-    This helper function separates the query stream from the content stream in the input IDs
+    """Split a tensor into content and query streams.
 
-    Args:
-        x: the tensor to split
-        split_size: the pred_size of the input ID sequence
+    :param torch.Tensor x: Tensor to split.
+    :param int split_size: Prediction size (query length).
+    :return Tuple[torch.Tensor, torch.Tensor]: Content and query tensors.
     """
     # Get the content stream size by subtracting out the pred_size aka split_size
     sz = x.size(0) - split_size
@@ -306,41 +332,32 @@ def split_tensor(x: torch.Tensor, split_size: int) -> Tuple[torch.Tensor, torch.
 
 
 def encode_two_stream_attention(
-    self,
+    self: Any,
     c: torch.Tensor,
     q: torch.Tensor,
-    content_mask: torch.Tensor = None,
-    query_mask: torch.Tensor = None,
-    content_position_bias: torch.Tensor = None,
-    query_position_bias: torch.Tensor = None,
+    content_mask: Optional[torch.Tensor] = None,
+    query_mask: Optional[torch.Tensor] = None,
+    content_position_bias: Optional[torch.Tensor] = None,
+    query_position_bias: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    """
-    This helper function wraps the two-stream attention calculation and calculates the skip
-    connection as well as layer norm. This function is actually used by passing in a class instance
-    under the self arg for each LAYER in the encoder
+    """Compute two-stream attention for a single encoder layer.
 
-    Args:
-        c: the content portion of the input sequence (can be thought of as containing the
-            appropriate information to encode the bidirectional nature of the encoder attention, but
-            is kept separately otherwise the query attention mechanism would always be able to
-            predict its own content trivially)
-        q: the query portion of the input sequence (can be thought of as the <mask> tokens we
-            are looking to predict using language modeling)
-        content_mask: the attention mask for the content stream
-        query_mask: the attention mask for the query stream
-        content_position_bias: position bias for the content portion
-        query_position_bias: position bias for the query portion
-
-    Returns:
-        A tuple containing the content and query tensors after the attention calculation is done for
-        the given layer in self
+    :param object self: Encoder layer instance.
+    :param torch.Tensor c: Content stream tensor.
+    :param torch.Tensor q: Query stream tensor.
+    :param torch.Tensor content_mask: Content attention mask, defaults to None.
+    :param torch.Tensor query_mask: Query attention mask, defaults to None.
+    :param torch.Tensor content_position_bias: Content position bias, defaults to None.
+    :param torch.Tensor query_position_bias: Query position bias, defaults to None.
+    :return Tuple[torch.Tensor, torch.Tensor]: Updated content and query tensors.
     """
 
     def skip_norm_ff_fn(x: torch.Tensor, residual: torch.Tensor) -> torch.Tensor:
-        """
-        Inner function that process all the normalization, skip connection, and the feed-forward net
-        after the attention calculation. Since we do this for c and q, it's easier to keep this as
-        a reusable function
+        """Apply skip connection, normalization, and feed-forward block.
+
+        :param torch.Tensor x: Input tensor.
+        :param torch.Tensor residual: Residual tensor for skip connection.
+        :return torch.Tensor: Processed tensor.
         """
 
         # Calculate dropout
@@ -403,29 +420,26 @@ def encode_two_stream_attention(
 
 
 def two_stream_self_attention(
-    self,
-    query: torch.Tensor,
-    key: torch.Tensor = None,
-    value: torch.Tensor = None,
-    query_mask: torch.Tensor = None,
-    content_mask: torch.Tensor = None,
-    query_position_bias: torch.Tensor = None,
-    content_position_bias: torch.Tensor = None,
+    self: Any,
+    query: Sequence[torch.Tensor],
+    key: Optional[torch.Tensor] = None,
+    value: Optional[torch.Tensor] = None,
+    query_mask: Optional[torch.Tensor] = None,
+    content_mask: Optional[torch.Tensor] = None,
+    query_position_bias: Optional[torch.Tensor] = None,
+    content_position_bias: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    """
-    This function is a wrapper on top of the encoder self attention (which is passed in using the
-    `self` class instance keyword) that properly calculates the two stream self attention that is
-    required for MPNet.
+    """Compute two-stream self-attention using encoder attention weights.
 
-    Args:
-        query: the tensors represening the Q matrix in self attention. We acttually pass in two here
-            because of two stream attention
-        key: the K matrix of the attention calculation
-        value: the V matrix of the attention calculation
-        query_mask: the attention mask for the query stream
-        content_mask: the attention mask for the content stream
-        query_position_bias: position bias for the query portion
-        content_position_bias: position bias for the content portion
+    :param object self: Encoder attention instance.
+    :param Sequence[torch.Tensor] query: Content and query tensors.
+    :param torch.Tensor key: Key tensor, defaults to None.
+    :param torch.Tensor value: Value tensor, defaults to None.
+    :param torch.Tensor query_mask: Query attention mask, defaults to None.
+    :param torch.Tensor content_mask: Content attention mask, defaults to None.
+    :param torch.Tensor query_position_bias: Query position bias, defaults to None.
+    :param torch.Tensor content_position_bias: Content position bias, defaults to None.
+    :return Tuple[torch.Tensor, torch.Tensor]: Updated content and query tensors.
     """
 
     # Unpack the content and query tensors from the (poorly) named query arg
@@ -436,19 +450,19 @@ def two_stream_self_attention(
 
     # Define a few in-scope helper functions that we will be reusing a bunch
     def transpose_fn(x: torch.Tensor) -> torch.Tensor:
+        """Transpose to (batch*heads, seq_len, head_dim) for attention.
+
+        :param torch.Tensor x: Input tensor.
+        :return torch.Tensor: Transposed tensor.
         """
-        A reusable transpose function that matches the appropriate shape for this attention
-        calculation (matching the head dimension and the number of attention heads)
-        """
-        return (
-            x.contiguous().view(-1, bsz * self.num_heads, self.head_dim).transpose(0, 1)
-        )
+        return x.contiguous().view(-1, bsz * self.num_heads, self.head_dim).transpose(0, 1)
 
     def fill_mask(attn_weights: torch.Tensor, attn_mask: torch.Tensor) -> torch.Tensor:
-        """
-        Helper function that will apply the attention mask to the tensor containing the weights.
-        This is done using the builtin `masked_fill` function, but we need to apply some additional
-        processing on top
+        """Apply attention mask to attention weights.
+
+        :param torch.Tensor attn_weights: Attention weights tensor.
+        :param torch.Tensor attn_mask: Mask tensor.
+        :return torch.Tensor: Masked attention weights.
         """
         return attn_weights.masked_fill(attn_mask.unsqueeze(0), float("-inf"))
 
@@ -456,12 +470,17 @@ def two_stream_self_attention(
         _q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
-        mask: torch.Tensor = None,
-        bias: torch.Tensor = None,
+        mask: Optional[torch.Tensor] = None,
+        bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """
-        This is the adjusted attention function that still uses the core weights of the encoder, but
-        processes everything differently to fit the two stream attention scheme
+        """Compute attention for either content or query stream.
+
+        :param torch.Tensor _q: Query tensor.
+        :param torch.Tensor k: Key tensor.
+        :param torch.Tensor v: Value tensor.
+        :param torch.Tensor mask: Attention mask, defaults to None.
+        :param torch.Tensor bias: Position bias, defaults to None.
+        :return torch.Tensor: Attention output.
         """
         # Process the query matrix through both the scaling and the input layer of self_attention
         _q = transpose_fn(self.scaling * self.in_proj_q(_q))
@@ -506,15 +525,12 @@ def two_stream_self_attention(
 def make_query_and_content_mask(
     input_ids: torch.Tensor, seq_len: int, pred_size: int
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    """
-    This function makes the rather unique content and query mask that is required for MPNet.
+    """Create content and query masks for MPNet two-stream attention.
 
-    Args:
-        input_ids: the batch of input IDs that the forward pass takes in. It is only used to send
-            the mask to the right device, so it's a little useless. A refactor would just pass the
-            device name in
-        seq_len: the sequence length of the input
-        pred_size: the size of the subsequence that is being converted to mask/corrupt tokens
+    :param torch.Tensor input_ids: Input IDs for device placement.
+    :param int seq_len: Sequence length of the input.
+    :param int pred_size: Size of the predicted subsequence.
+    :return Tuple[torch.Tensor, torch.Tensor]: Query and content attention masks.
 
     It looks like the below with comparisons to how it's different than XLNet-style PLM:
         Query Mask:
@@ -543,7 +559,11 @@ def make_query_and_content_mask(
     """
 
     # Define helper function to keep things organized
-    def make_query_mask():
+    def make_query_mask() -> torch.Tensor:
+        """Build the query attention mask.
+
+        :return torch.Tensor: Query mask tensor.
+        """
         # Create the mask portion (i.e. ones)
         mask = torch.triu(torch.ones(pred_size, pred_size), 0)
 
@@ -551,7 +571,11 @@ def make_query_and_content_mask(
 
         return torch.cat(mask, dim=-1).eq(0)
 
-    def make_content_mask():
+    def make_content_mask() -> torch.Tensor:
+        """Build the content attention mask.
+
+        :return torch.Tensor: Content mask tensor.
+        """
         mask = [
             torch.zeros(seq_len - pred_size, pred_size),
             torch.tril(torch.ones(pred_size, pred_size), 0),
@@ -563,6 +587,4 @@ def make_query_and_content_mask(
 
         return torch.cat(mask, dim=-1).eq(0)
 
-    return make_query_mask().to(input_ids.device), make_content_mask().to(
-        input_ids.device
-    )
+    return make_query_mask().to(input_ids.device), make_content_mask().to(input_ids.device)

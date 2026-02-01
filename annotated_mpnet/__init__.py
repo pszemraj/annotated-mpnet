@@ -1,3 +1,5 @@
+"""Top-level package for annotated MPNet modules."""
+
 import annotated_mpnet.data
 import annotated_mpnet.modeling
 import annotated_mpnet.scheduler
