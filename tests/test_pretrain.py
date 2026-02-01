@@ -93,6 +93,46 @@ class TestPretrainHelpers(unittest.TestCase):
             optimizer_dir / "optimizer_state.pt",
         )
 
+    def test_apply_checkpoint_architecture_args_restores_max_tokens(self) -> None:
+        """Ensure checkpoint args restore max_tokens and align max_positions.
+
+        :return None: This test returns nothing.
+        """
+        args = Namespace(
+            encoder_layers=1,
+            encoder_embed_dim=64,
+            encoder_ffn_dim=128,
+            encoder_attention_heads=4,
+            dropout=0.1,
+            attention_dropout=0.1,
+            activation_dropout=0.1,
+            activation_fn="gelu",
+            relative_attention_num_buckets=32,
+            original_vocab_size=100,
+            padded_vocab_size=100,
+            max_tokens=128,
+            max_positions=128,
+        )
+        checkpoint_args = {
+            "encoder_layers": 2,
+            "encoder_embed_dim": 32,
+            "encoder_ffn_dim": 64,
+            "encoder_attention_heads": 2,
+            "dropout": 0.2,
+            "attention_dropout": 0.2,
+            "activation_dropout": 0.2,
+            "activation_fn": "relu",
+            "relative_attention_num_buckets": 16,
+            "original_vocab_size": 200,
+            "padded_vocab_size": 256,
+            "max_tokens": 256,
+        }
+
+        pretrain_mpnet._apply_checkpoint_architecture_args(args, checkpoint_args)
+
+        self.assertEqual(args.max_tokens, 256)
+        self.assertEqual(args.max_positions, 256)
+
     def test_normalize_training_accuracy(self) -> None:
         """Validate training accuracy normalization helper.
 

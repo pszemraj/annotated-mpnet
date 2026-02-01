@@ -110,6 +110,53 @@ def _get_initial_best_loss(checkpoint: dict | None) -> float:
     return checkpoint.get("best_loss", DEFAULT_BEST_LOSS)
 
 
+def _warn_if_max_positions_mismatch(args: Namespace) -> None:
+    """Warn if max_positions and max_tokens are set to different values.
+
+    :param Namespace args: Parsed CLI arguments.
+    :return None: This function returns nothing.
+    """
+    if args.max_positions is not None and args.max_positions != args.max_tokens:
+        LOGGER.warning(
+            "You have chosen to set a different number for max_positions and max_tokens. While "
+            "this is allowed by this training script for experimental purposes, it will most "
+            "likely lead to unexpected behavior. Please only proceed IF YOU KNOW WHAT YOU'RE "
+            "DOING!!!"
+        )
+
+
+def _apply_checkpoint_architecture_args(args: Namespace, checkpoint_args: Namespace | dict) -> None:
+    """Apply architecture settings from a checkpoint to the args.
+
+    :param Namespace args: Current CLI args.
+    :param Namespace | dict checkpoint_args: Stored checkpoint args.
+    :return None: This function returns nothing.
+    """
+    if isinstance(checkpoint_args, Namespace):
+        checkpoint_args = vars(checkpoint_args)
+
+    # Restore model architecture parameters
+    args.encoder_layers = checkpoint_args["encoder_layers"]
+    args.encoder_embed_dim = checkpoint_args["encoder_embed_dim"]
+    args.encoder_ffn_dim = checkpoint_args["encoder_ffn_dim"]
+    args.encoder_attention_heads = checkpoint_args["encoder_attention_heads"]
+    args.dropout = checkpoint_args.get("dropout", args.dropout)
+    args.attention_dropout = checkpoint_args.get("attention_dropout", args.attention_dropout)
+    args.activation_dropout = checkpoint_args.get("activation_dropout", args.activation_dropout)
+    args.activation_fn = checkpoint_args.get("activation_fn", args.activation_fn)
+    args.relative_attention_num_buckets = checkpoint_args.get(
+        "relative_attention_num_buckets", args.relative_attention_num_buckets
+    )
+    args.original_vocab_size = checkpoint_args.get("original_vocab_size", args.original_vocab_size)
+    args.padded_vocab_size = checkpoint_args.get("padded_vocab_size", args.padded_vocab_size)
+
+    args.max_tokens = checkpoint_args.get("max_tokens", args.max_tokens)
+    if "max_positions" in checkpoint_args:
+        args.max_positions = checkpoint_args.get("max_positions", args.max_positions)
+    else:
+        args.max_positions = args.max_tokens
+
+
 def _select_architecture_source(args: Namespace) -> str:
     """Select the architecture source based on CLI arguments.
 
@@ -254,14 +301,7 @@ def main(args: Namespace) -> None:
     # First test to see if max_positions and max_tokens are set differently. If they are, raise a
     # warning to the user to let them know this is very experimental and will most likely lead to
     # unexpect behavior
-    if args.max_positions is not None:
-        if args.max_positions != args.max_tokens:
-            LOGGER.warning(
-                "You have chosen to set a different number for max_positions and max_tokens. While "
-                "this is allowed by this training script for experimental purposes, it will most "
-                "likely lead to unexpected behavior. Please only proceed IF YOU KNOW WHAT YOU'RE "
-                "DOING!!!"
-            )
+    _warn_if_max_positions_mismatch(args)
 
     # If max_positions is unset (as expected) we set max_positions to the same number as max_tokens
     if args.max_positions is None:
@@ -341,29 +381,9 @@ def main(args: Namespace) -> None:
         # Restore architecture args from checkpoint
         if "args" in resume_checkpoint:
             checkpoint_args = resume_checkpoint["args"]
-            # Restore model architecture parameters
-            args.encoder_layers = checkpoint_args["encoder_layers"]
-            args.encoder_embed_dim = checkpoint_args["encoder_embed_dim"]
-            args.encoder_ffn_dim = checkpoint_args["encoder_ffn_dim"]
-            args.encoder_attention_heads = checkpoint_args["encoder_attention_heads"]
-            args.dropout = checkpoint_args.get("dropout", args.dropout)
-            args.attention_dropout = checkpoint_args.get(
-                "attention_dropout", args.attention_dropout
-            )
-            args.activation_dropout = checkpoint_args.get(
-                "activation_dropout", args.activation_dropout
-            )
-            args.activation_fn = checkpoint_args.get("activation_fn", args.activation_fn)
-            args.relative_attention_num_buckets = checkpoint_args.get(
-                "relative_attention_num_buckets", args.relative_attention_num_buckets
-            )
-            args.original_vocab_size = checkpoint_args.get(
-                "original_vocab_size", args.original_vocab_size
-            )
-            args.padded_vocab_size = checkpoint_args.get(
-                "padded_vocab_size", args.padded_vocab_size
-            )
-            args.max_positions = checkpoint_args.get("max_positions", args.max_positions)
+            _apply_checkpoint_architecture_args(args, checkpoint_args)
+            tokenizer.model_max_length = args.max_tokens
+            _warn_if_max_positions_mismatch(args)
 
             LOGGER.info(
                 f"Restored model architecture from checkpoint: {args.encoder_layers} layers, "
