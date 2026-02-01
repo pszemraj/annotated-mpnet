@@ -22,7 +22,14 @@ from torch.utils.data import DataLoader, Sampler
 from transformers import PreTrainedTokenizer
 
 from annotated_mpnet.utils import utils
-from annotated_mpnet.utils.perm_utils_fast import make_span_perm
+
+try:
+    from annotated_mpnet.utils.perm_utils_fast import make_span_perm
+except ImportError:
+    make_span_perm = None
+    LOGGER.warning(
+        "Fast span permutation extension not available; falling back to Python implementation."
+    )
 
 
 class MPNetDataset(torch.utils.data.Dataset):
@@ -116,6 +123,8 @@ class HFStreamingDataset(torch.utils.data.IterableDataset):
         seed: int = 42,
         min_text_length: int = 200,
         text_field: str = "text",
+        skip_samples: int = 0,
+        max_samples: Optional[int] = None,
     ) -> None:
         """Initialize the streaming dataset.
 
@@ -128,6 +137,8 @@ class HFStreamingDataset(torch.utils.data.IterableDataset):
         :param int seed: Random seed for reproducibility, defaults to 42.
         :param int min_text_length: Minimum text length to keep, defaults to 200.
         :param str text_field: Field containing text, defaults to "text".
+        :param int skip_samples: Number of samples to skip, defaults to 0.
+        :param int max_samples: Maximum number of samples to yield, defaults to None.
         :raises ValueError: If neither ``dataset_name`` nor ``dataset_stream`` is provided.
         """
         super().__init__()
@@ -138,6 +149,8 @@ class HFStreamingDataset(torch.utils.data.IterableDataset):
         self.seed = seed
         self.min_text_length = min_text_length
         self.text_field = text_field
+        self.skip_samples = skip_samples
+        self.max_samples = max_samples
 
         # Set random seed
         random.seed(seed)
@@ -145,6 +158,7 @@ class HFStreamingDataset(torch.utils.data.IterableDataset):
         # Either use provided stream or load a new one
         if dataset_stream is not None:
             LOGGER.info("Using provided dataset stream")
+            # min_text_length filtering is applied only when loading a dataset_name.
             self.dataset = dataset_stream
         elif dataset_name is not None:
             # Load the dataset in streaming mode
@@ -181,6 +195,10 @@ class HFStreamingDataset(torch.utils.data.IterableDataset):
         else:
             dataset_iter = iter(self.dataset)
 
+        # skip_samples/max_samples apply per worker when multiple workers are used.
+        skip_samples = self.skip_samples
+        max_samples = self.max_samples
+
         # Initialize buffer
         buffer = []
 
@@ -193,6 +211,8 @@ class HFStreamingDataset(torch.utils.data.IterableDataset):
                 break
 
         # Continue as long as there are items in buffer
+        skipped = 0
+        yielded = 0
         while buffer:
             # Randomly select an example from the buffer
             idx = random.randint(0, len(buffer) - 1)
@@ -208,6 +228,13 @@ class HFStreamingDataset(torch.utils.data.IterableDataset):
                 # Remove the used example if no more examples
                 buffer.pop(idx)
 
+            if skipped < skip_samples:
+                skipped += 1
+                continue
+            if max_samples is not None and yielded >= max_samples:
+                break
+
+            yielded += 1
             yield processed
 
     def _process_example(self, example: Dict[str, Any]) -> Dict[str, torch.Tensor]:
@@ -262,6 +289,8 @@ def create_hf_dataloader(
     :param Callable collator: Data collator callable, defaults to None.
     :param int num_workers: Number of worker processes, defaults to 4.
     :return DataLoader: PyTorch DataLoader for the dataset.
+
+    Note: ``skip_samples`` and ``max_samples`` apply per worker when ``num_workers`` > 0.
     """
     dataset = HFStreamingDataset(
         tokenizer=tokenizer,
@@ -318,6 +347,12 @@ class DataCollatorForMaskedPermutedLanguageModeling:
         self.rand_prob = rand_prob
 
         self.use_fast = use_fast
+        if self.use_fast and make_span_perm is None:
+            LOGGER.warning(
+                "use_fast=True requested but fast span permutation extension is unavailable; "
+                "falling back to Python implementation."
+            )
+            self.use_fast = False
 
         self.random_seed = random_seed
 

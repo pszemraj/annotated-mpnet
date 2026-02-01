@@ -66,7 +66,7 @@ def convert_hf_model_to_mpnet(
             encoder_attention_heads=hf_config.num_attention_heads,
             dropout=hf_config.hidden_dropout_prob,
             attention_dropout=hf_config.attention_probs_dropout_prob,
-            activation_dropout=hf_config.hidden_dropout_prob,
+            activation_dropout=hf_config.hidden_dropout_prob,  # HF does not expose this separately.
             activation_fn=hf_config.hidden_act,
             normalize_before=False,
             max_positions=hf_config.max_position_embeddings,  # HF already includes special tokens
@@ -186,7 +186,7 @@ def convert_hf_model_to_mpnet(
                     # If our model has more positions (e.g., 514 vs 512), pad the HF tensor
                     if our_tensor.shape[0] > hf_tensor.shape[0]:
                         padding_size = our_tensor.shape[0] - hf_tensor.shape[0]
-                        # Initialize extra positions with small random values
+                        # Initialize extra positions with small random values for continued training.
                         padding = torch.randn(padding_size, hf_tensor.shape[1]) * 0.02
                         hf_tensor = torch.cat([hf_tensor, padding], dim=0)
                         LOGGER.info(f"Padded HF position embeddings by {padding_size} positions")

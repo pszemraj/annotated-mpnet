@@ -7,8 +7,10 @@ import unittest
 import torch
 from transformers import AutoTokenizer
 
+from annotated_mpnet.data import mpnet_data
 from annotated_mpnet.data.mpnet_data import (
     DataCollatorForMaskedPermutedLanguageModeling,
+    HFStreamingDataset,
     RandomSamplerWithSeed,
 )
 
@@ -131,3 +133,40 @@ class TestData(unittest.TestCase):
             list(sampler_epoch_1.__iter__()),
             "Sampler seed may be broken since epoch 0 and epoch 1 are showing the same smpl order",
         )
+
+    def test_streaming_dataset_skip_and_max(self) -> None:
+        """Validate skip/max sample handling for streaming datasets.
+
+        :return None: This test returns nothing.
+        """
+        tokenizer = AutoTokenizer.from_pretrained("microsoft/mpnet-base")
+        dataset_stream = [{"text": f"sample {i}"} for i in range(10)]
+        dataset = HFStreamingDataset(
+            tokenizer=tokenizer,
+            dataset_stream=dataset_stream,
+            block_size=8,
+            buffer_size=2,
+            seed=0,
+            min_text_length=0,
+            skip_samples=2,
+            max_samples=3,
+            text_field="text",
+        )
+        samples = list(iter(dataset))
+        self.assertEqual(len(samples), 3)
+
+    def test_collator_falls_back_without_fast_perm(self) -> None:
+        """Ensure collator disables fast path when extension is missing.
+
+        :return None: This test returns nothing.
+        """
+        tokenizer = AutoTokenizer.from_pretrained("microsoft/mpnet-base")
+        original = mpnet_data.make_span_perm
+        try:
+            mpnet_data.make_span_perm = None
+            collator = DataCollatorForMaskedPermutedLanguageModeling(
+                tokenizer=tokenizer, use_fast=True
+            )
+            self.assertFalse(collator.use_fast)
+        finally:
+            mpnet_data.make_span_perm = original

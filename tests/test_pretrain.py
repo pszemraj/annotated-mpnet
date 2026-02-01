@@ -127,6 +127,28 @@ class TestPretrainHelpers(unittest.TestCase):
             external_checkpoint.parent / "optimizer",
         )
 
+    def test_strip_compile_prefix(self) -> None:
+        """Ensure compile prefixes are removed from state dict keys.
+
+        :return None: This test returns nothing.
+        """
+        state = {"_orig_mod.layer.weight": torch.tensor([1.0]), "layer.bias": torch.tensor([0.0])}
+        stripped = pretrain_mpnet._strip_compile_prefix(state)
+        self.assertIn("layer.weight", stripped)
+        self.assertIn("layer.bias", stripped)
+        self.assertNotIn("_orig_mod.layer.weight", stripped)
+
+    def test_coerce_rng_state(self) -> None:
+        """Ensure RNG state is coerced to uint8 CPU tensor.
+
+        :return None: This test returns nothing.
+        """
+        state = torch.tensor([1, 2, 3], dtype=torch.int64)
+        coerced = pretrain_mpnet._coerce_rng_state(state)
+        self.assertEqual(coerced.dtype, torch.uint8)
+        self.assertEqual(coerced.device.type, "cpu")
+        self.assertTrue(torch.equal(coerced, torch.tensor([1, 2, 3], dtype=torch.uint8)))
+
     def test_apply_checkpoint_architecture_args_restores_max_tokens(self) -> None:
         """Ensure checkpoint args restore max_tokens and align max_positions.
 
@@ -142,6 +164,8 @@ class TestPretrainHelpers(unittest.TestCase):
             activation_dropout=0.1,
             activation_fn="gelu",
             relative_attention_num_buckets=32,
+            relative_attention_max_distance=64,
+            normalize_before=False,
             original_vocab_size=100,
             padded_vocab_size=100,
             max_tokens=128,
@@ -157,6 +181,8 @@ class TestPretrainHelpers(unittest.TestCase):
             "activation_dropout": 0.2,
             "activation_fn": "relu",
             "relative_attention_num_buckets": 16,
+            "relative_attention_max_distance": 128,
+            "normalize_before": True,
             "original_vocab_size": 200,
             "padded_vocab_size": 256,
             "max_tokens": 256,
@@ -166,6 +192,8 @@ class TestPretrainHelpers(unittest.TestCase):
 
         self.assertEqual(args.max_tokens, 256)
         self.assertEqual(args.max_positions, 256)
+        self.assertEqual(args.relative_attention_max_distance, 128)
+        self.assertTrue(args.normalize_before)
 
     def test_normalize_training_accuracy(self) -> None:
         """Validate training accuracy normalization helper.

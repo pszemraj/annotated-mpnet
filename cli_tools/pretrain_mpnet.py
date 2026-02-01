@@ -12,6 +12,7 @@ import os
 import pathlib
 import sys
 from argparse import Namespace
+from typing import Any
 
 import numpy as np
 from rich.logging import RichHandler
@@ -46,6 +47,7 @@ from annotated_mpnet.utils.utils import (
 )
 
 DEFAULT_BEST_LOSS = 10e6
+VOCAB_SIZE_ALIGNMENT = 128  # Align vocab size for efficient GPU kernels.
 
 
 def accuracy(output: torch.Tensor, target: torch.Tensor, ignore_index: int | None = None) -> int:
@@ -110,6 +112,26 @@ def _get_initial_best_loss(checkpoint: dict | None) -> float:
     return checkpoint.get("best_loss", DEFAULT_BEST_LOSS)
 
 
+def _strip_compile_prefix(model_states: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    """Strip torch.compile prefixes from state dict keys.
+
+    :param dict model_states: Raw model state dict.
+    :return dict: State dict with compile prefixes removed.
+    """
+    return {k.replace("_orig_mod.", ""): v for k, v in model_states.items()}
+
+
+def _coerce_rng_state(rng_state: Any) -> torch.ByteTensor:
+    """Coerce RNG state into a CPU uint8 tensor for torch.set_rng_state.
+
+    :param Any rng_state: RNG state payload.
+    :return torch.ByteTensor: CPU uint8 RNG tensor.
+    """
+    if isinstance(rng_state, torch.Tensor):
+        rng_state = rng_state.detach().cpu()
+    return torch.as_tensor(rng_state, dtype=torch.uint8)
+
+
 def _resolve_best_loss(checkpoint: dict | None, checkpoint_dir: pathlib.Path) -> float:
     """Resolve the best loss from a checkpoint or the best checkpoint file.
 
@@ -171,6 +193,13 @@ def _apply_checkpoint_architecture_args(args: Namespace, checkpoint_args: Namesp
     args.activation_fn = checkpoint_args.get("activation_fn", args.activation_fn)
     args.relative_attention_num_buckets = checkpoint_args.get(
         "relative_attention_num_buckets", args.relative_attention_num_buckets
+    )
+    args.relative_attention_max_distance = checkpoint_args.get(
+        "relative_attention_max_distance",
+        getattr(args, "relative_attention_max_distance", None),
+    )
+    args.normalize_before = checkpoint_args.get(
+        "normalize_before", getattr(args, "normalize_before", False)
     )
     args.original_vocab_size = checkpoint_args.get("original_vocab_size", args.original_vocab_size)
     args.padded_vocab_size = checkpoint_args.get("padded_vocab_size", args.padded_vocab_size)
@@ -370,7 +399,9 @@ def main(args: Namespace) -> None:
         args.padded_vocab_size = original_vocab_size
     else:
         # When training from scratch, pad vocab size for GPU performance
-        target_vocab_size = ((original_vocab_size + 127) // 128) * 128  # Round up to nearest 128
+        target_vocab_size = (
+            (original_vocab_size + VOCAB_SIZE_ALIGNMENT - 1) // VOCAB_SIZE_ALIGNMENT
+        ) * VOCAB_SIZE_ALIGNMENT
 
         if target_vocab_size > original_vocab_size:
             LOGGER.info(
@@ -501,7 +532,7 @@ def main(args: Namespace) -> None:
         LOGGER.info(f"Using HuggingFace dataset: {args.dataset_name}")
 
         try:
-            # Load the dataset ONCE in streaming mode
+            # Load the dataset ONCE in streaming mode (streaming datasets are lazy and cheap to keep).
             LOGGER.info(f"Loading streaming dataset: {args.dataset_name}")
             train_stream = load_dataset(args.dataset_name, split="train", streaming=True)
 
@@ -670,8 +701,7 @@ def main(args: Namespace) -> None:
                 )
 
             # Extract model states
-            model_states = checkpoint["model_states"]
-            model_states = {k.replace("_orig_mod.", ""): v for k, v in model_states.items()}
+            model_states = _strip_compile_prefix(checkpoint["model_states"])
 
             # Load model weights
             model.load_state_dict(model_states)
@@ -706,13 +736,8 @@ def main(args: Namespace) -> None:
             try:
                 rng_state = checkpoint["rng_state"]
                 if rng_state.get("torch") is not None:
-                    # Ensure the RNG state is a ByteTensor
                     torch_rng = rng_state["torch"]
-                    if not isinstance(torch_rng, torch.ByteTensor):
-                        if hasattr(torch_rng, "cpu"):
-                            torch_rng = torch_rng.cpu()
-                        torch_rng = torch.ByteTensor(torch_rng)
-                    torch.set_rng_state(torch_rng)
+                    torch.set_rng_state(_coerce_rng_state(torch_rng))
                     LOGGER.info("Restored torch RNG state")
 
                 if torch.cuda.is_available() and rng_state.get("cuda") is not None:
@@ -721,18 +746,10 @@ def main(args: Namespace) -> None:
                     if isinstance(cuda_states, list):
                         processed_states = []
                         for state in cuda_states:
-                            if not isinstance(state, torch.ByteTensor):
-                                if hasattr(state, "cpu"):
-                                    state = state.cpu()
-                                state = torch.ByteTensor(state)
-                            processed_states.append(state)
+                            processed_states.append(_coerce_rng_state(state))
                         torch.cuda.set_rng_state_all(processed_states)
                     else:
-                        if not isinstance(cuda_states, torch.ByteTensor):
-                            if hasattr(cuda_states, "cpu"):
-                                cuda_states = cuda_states.cpu()
-                            cuda_states = torch.ByteTensor(cuda_states)
-                        torch.cuda.set_rng_state(cuda_states)
+                        torch.cuda.set_rng_state(_coerce_rng_state(cuda_states))
                     LOGGER.info("Restored CUDA RNG state")
 
                 if "numpy.random" in sys.modules and rng_state.get("numpy") is not None:
@@ -743,8 +760,7 @@ def main(args: Namespace) -> None:
                 LOGGER.info("Continuing with current RNG state")
 
         # Extract model states
-        model_states = checkpoint["model_states"]
-        model_states = {k.replace("_orig_mod.", ""): v for k, v in model_states.items()}
+        model_states = _strip_compile_prefix(checkpoint["model_states"])
 
         # Load model weights
         model.load_state_dict(model_states)
@@ -799,6 +815,7 @@ def main(args: Namespace) -> None:
     # Flag to track if non-trainable model repo files were saved at first checkpoint.
     initial_outputs_saved = False
 
+    # In streaming mode, epochs are logical boundaries; total_updates stops the loop.
     while steps <= args.total_updates:
         # Handle either streaming or file-based training
         if train_streaming:
@@ -855,7 +872,7 @@ def main(args: Namespace) -> None:
 
         # Create an accumulation loss and accumulation accuracy counter
         accumulation_loss = 0
-        accumulation_acc = 0
+        accumulation_acc = 0  # Count of correct predictions; normalize by predicted tokens later.
         accumulation_input_tokens = 0
         accumulation_pred_tokens = 0
 
@@ -967,7 +984,7 @@ def main(args: Namespace) -> None:
 
             # Check if we've reached a gradient accumulation step
             if (i + 1) % args.update_freq == 0:
-                # Scale accumulated gradients by total predicted tokens for correct GA
+                # Scale by total predicted tokens to match per-token mean loss across microbatches.
                 _scale_gradients_by_tokens(model, accumulation_pred_tokens)
 
                 # Apply gradient clipping on the accumulated gradients
@@ -1189,8 +1206,7 @@ def main(args: Namespace) -> None:
         loaded_args = Namespace(**loaded_args)
 
     # Handle potential _orig_mod prefix in state dict from compiled models
-    model_states = dicts["model_states"]
-    model_states = {k.replace("_orig_mod.", ""): v for k, v in model_states.items()}
+    model_states = _strip_compile_prefix(dicts["model_states"])
 
     # Load an empty shell of the model architecture using those args
     test_model = MPNetForPretraining(loaded_args, tokenizer)
