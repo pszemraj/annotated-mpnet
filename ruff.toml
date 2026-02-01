@@ -12,9 +12,9 @@ select = ["E", "F"]
 
 # Ignore specific rules
 ignore = [
-    "E402",  # Module level import not at top of file
-    "F401",  # Imported but unused (common in __init__.py)
-    "E501",  # Line too long (handled by formatter)
+    "E402", # Module level import not at top of file
+    "F401", # Imported but unused (common in __init__.py)
+    "E501", # Line too long (handled by formatter)
 ]
 
 [format]
