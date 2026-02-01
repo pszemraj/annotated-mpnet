@@ -29,6 +29,12 @@ class TestPretrainHelpers(unittest.TestCase):
             "hf",
         )
         self.assertEqual(
+            pretrain_mpnet._select_architecture_source(
+                Namespace(resume=False, hf_model_path="hf/path")
+            ),
+            "hf",
+        )
+        self.assertEqual(
             pretrain_mpnet._select_architecture_source(Namespace(resume=True, hf_model_path=None)),
             "resume",
         )
