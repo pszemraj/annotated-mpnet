@@ -18,6 +18,7 @@ logging.basicConfig(level="INFO", format=LOG_FORMAT, datefmt="[%X] ", handlers=[
 LOGGER = logging.getLogger(__name__)
 
 
+import numpy as np
 import torch
 from torch.serialization import safe_globals
 from transformers import AutoTokenizer, MPNetConfig, MPNetForMaskedLM
@@ -44,7 +45,7 @@ def convert_mpnet_checkpoint_to_pytorch(
     # Load up the state dicts (one for the weights and one for the args) from the provided
     # serialization path
     # PyTorch 2.6+ requires weights_only=False for loading checkpoints with custom objects
-    with safe_globals([Namespace]):
+    with safe_globals([Namespace, np.ndarray, np.dtype, np._core.multiarray._reconstruct]):
         state_dicts = torch.load(mpnet_checkpoint_path, map_location="cpu", weights_only=False)
 
     # Extract the model args so that we can properly set the config later on

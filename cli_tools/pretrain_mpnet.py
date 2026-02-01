@@ -132,18 +132,29 @@ def _coerce_rng_state(rng_state: Any) -> torch.ByteTensor:
     return torch.as_tensor(rng_state, dtype=torch.uint8)
 
 
-def _resolve_best_loss(checkpoint: dict | None, checkpoint_dir: pathlib.Path) -> float:
+def _resolve_best_loss(
+    checkpoint: dict | None,
+    checkpoint_dir: pathlib.Path,
+    resume_checkpoint_path: pathlib.Path | None = None,
+) -> float:
     """Resolve the best loss from a checkpoint or the best checkpoint file.
 
     :param dict checkpoint: Loaded checkpoint or None.
     :param pathlib.Path checkpoint_dir: Directory containing checkpoints.
+    :param pathlib.Path resume_checkpoint_path: Resume checkpoint path, defaults to None.
     :return float: Best loss value.
     """
     best_loss = _get_initial_best_loss(checkpoint)
     if checkpoint is not None and "best_loss" in checkpoint:
         return best_loss
 
-    best_checkpoint_path = checkpoint_dir / "best_checkpoint.pt"
+    best_checkpoint_root = checkpoint_dir
+    if resume_checkpoint_path is not None:
+        resume_root = resume_checkpoint_path.parent
+        if resume_root.resolve() != checkpoint_dir.resolve():
+            best_checkpoint_root = resume_root
+
+    best_checkpoint_path = best_checkpoint_root / "best_checkpoint.pt"
     if best_checkpoint_path.exists():
         try:
             with safe_globals([Namespace, np.ndarray, np.dtype, np._core.multiarray._reconstruct]):
@@ -741,7 +752,7 @@ def main(args: Namespace) -> None:
             epoch = checkpoint["epoch"]
             LOGGER.info(f"Resuming from epoch {epoch}")
 
-        best_loss = _resolve_best_loss(checkpoint, checkpoint_dir)
+        best_loss = _resolve_best_loss(checkpoint, checkpoint_dir, resume_checkpoint_path)
         if best_loss != DEFAULT_BEST_LOSS:
             LOGGER.info(f"Best validation loss from checkpoint: {best_loss}")
 

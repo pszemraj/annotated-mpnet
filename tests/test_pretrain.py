@@ -48,6 +48,27 @@ class TestPretrainHelpers(unittest.TestCase):
 
             self.assertEqual(best_loss, 1.23)
 
+    def test_resolve_best_loss_prefers_resume_checkpoint_dir(self) -> None:
+        """Prefer best checkpoint in resume checkpoint directory when external.
+
+        :return None: This test returns nothing.
+        """
+        with TemporaryDirectory() as tmpdir:
+            checkpoint_dir = pathlib.Path(tmpdir) / "new_run"
+            resume_dir = pathlib.Path(tmpdir) / "resume_run"
+            checkpoint_dir.mkdir()
+            resume_dir.mkdir()
+
+            best_checkpoint_path = resume_dir / "best_checkpoint.pt"
+            torch.save({"best_loss": 2.34}, best_checkpoint_path)
+
+            resume_checkpoint = resume_dir / "checkpoint10.pt"
+            best_loss = pretrain_mpnet._resolve_best_loss(
+                {"steps": 10}, checkpoint_dir, resume_checkpoint
+            )
+
+            self.assertEqual(best_loss, 2.34)
+
     def test_select_architecture_source(self) -> None:
         """Verify architecture source selection precedence.
 
