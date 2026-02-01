@@ -37,6 +37,33 @@ class TestPretrainHelpers(unittest.TestCase):
             "new",
         )
 
+    def test_select_resume_checkpoint_path(self) -> None:
+        checkpoint_dir = pathlib.Path("/tmp/checkpoints")
+        self.assertEqual(
+            pretrain_mpnet._select_resume_checkpoint_path(checkpoint_dir, None),
+            checkpoint_dir / "best_checkpoint.pt",
+        )
+        self.assertEqual(
+            pretrain_mpnet._select_resume_checkpoint_path(
+                checkpoint_dir, "/tmp/checkpoints/checkpoint123.pt"
+            ),
+            pathlib.Path("/tmp/checkpoints/checkpoint123.pt"),
+        )
+
+    def test_select_optimizer_state_path(self) -> None:
+        optimizer_dir = pathlib.Path("/tmp/checkpoints/optimizer")
+        best_checkpoint = pathlib.Path("/tmp/checkpoints/best_checkpoint.pt")
+        latest_checkpoint = pathlib.Path("/tmp/checkpoints/checkpoint123.pt")
+
+        self.assertEqual(
+            pretrain_mpnet._select_optimizer_state_path(optimizer_dir, best_checkpoint),
+            optimizer_dir / "best_optimizer_state.pt",
+        )
+        self.assertEqual(
+            pretrain_mpnet._select_optimizer_state_path(optimizer_dir, latest_checkpoint),
+            optimizer_dir / "optimizer_state.pt",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -119,6 +119,34 @@ def _select_architecture_source(args: Namespace) -> str:
     return "new"
 
 
+def _select_resume_checkpoint_path(
+    checkpoint_dir: pathlib.Path, resume_checkpoint: str | None
+) -> pathlib.Path:
+    """Select the checkpoint path for resuming training.
+
+    :param pathlib.Path checkpoint_dir: Base checkpoint directory.
+    :param str resume_checkpoint: Explicit checkpoint path or None.
+    :return pathlib.Path: Checkpoint path to resume from.
+    """
+    if resume_checkpoint is None:
+        return checkpoint_dir / "best_checkpoint.pt"
+    return pathlib.Path(resume_checkpoint)
+
+
+def _select_optimizer_state_path(
+    optimizer_dir: pathlib.Path, resume_checkpoint_path: pathlib.Path
+) -> pathlib.Path:
+    """Select the optimizer state path that matches the resume checkpoint.
+
+    :param pathlib.Path optimizer_dir: Directory containing optimizer states.
+    :param pathlib.Path resume_checkpoint_path: Checkpoint being resumed.
+    :return pathlib.Path: Optimizer state path to load.
+    """
+    if resume_checkpoint_path.name == "best_checkpoint.pt":
+        return optimizer_dir / "best_optimizer_state.pt"
+    return optimizer_dir / "optimizer_state.pt"
+
+
 def check_and_activate_tf32() -> None:
     """Check GPU capability and enable TF32 if supported.
 
@@ -249,10 +277,9 @@ def main(args: Namespace) -> None:
 
     if arch_source == "resume":
         # Load checkpoint to get architecture before creating model
-        if args.resume_checkpoint is None:
-            resume_checkpoint_path = checkpoint_dir / "best_checkpoint.pt"
-        else:
-            resume_checkpoint_path = pathlib.Path(args.resume_checkpoint)
+        resume_checkpoint_path = _select_resume_checkpoint_path(
+            checkpoint_dir, args.resume_checkpoint
+        )
 
         LOGGER.info(f"Loading architecture from checkpoint: {resume_checkpoint_path}")
         with safe_globals([Namespace, np.ndarray, np.dtype, np._core.multiarray._reconstruct]):
@@ -608,7 +635,9 @@ def main(args: Namespace) -> None:
 
         # Check if optimizer state exists and load it if requested
         if args.save_optimizer_state:
-            optimizer_state_path = optimizer_dir / "optimizer_state.pt"
+            optimizer_state_path = _select_optimizer_state_path(
+                optimizer_dir, resume_checkpoint_path
+            )
             if optimizer_state_path.exists():
                 LOGGER.info(f"Loading optimizer state from {optimizer_state_path}")
                 with safe_globals(
