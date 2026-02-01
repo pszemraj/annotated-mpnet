@@ -1,8 +1,11 @@
+"""Smoke tests for the pretraining CLI."""
+
 import pathlib
 import sys
 import unittest
 from contextlib import contextmanager
 from tempfile import TemporaryDirectory
+from typing import Iterator, Sequence
 
 import torch
 
@@ -14,7 +17,12 @@ from cli_tools import pretrain_mpnet
 
 
 @contextmanager
-def _argv_ctx(args):
+def _argv_ctx(args: Sequence[str]) -> Iterator[None]:
+    """Temporarily override argv for CLI testing.
+
+    :param Sequence[str] args: Arguments to set for the duration of the context.
+    :return Iterator[None]: Context manager that restores argv.
+    """
     original = sys.argv[:]
     sys.argv = args
     try:
@@ -24,8 +32,14 @@ def _argv_ctx(args):
 
 
 class TestPretrainSmoke(unittest.TestCase):
+    """Smoke tests for training and resume flows."""
+
     @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
     def test_resume_smoke_run(self) -> None:
+        """Run a tiny train + resume cycle on GPU.
+
+        :return None: This test returns nothing.
+        """
         with TemporaryDirectory() as tmpdir:
             tmp_path = pathlib.Path(tmpdir)
             data_dir = tmp_path / "data"

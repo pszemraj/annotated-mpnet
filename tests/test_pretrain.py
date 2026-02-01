@@ -1,3 +1,5 @@
+"""Unit tests for pretraining helper utilities."""
+
 import pathlib
 import sys
 import unittest
@@ -14,7 +16,13 @@ from cli_tools import pretrain_mpnet
 
 
 class TestPretrainHelpers(unittest.TestCase):
+    """Unit tests for pretrain helper functions."""
+
     def test_get_initial_best_loss(self) -> None:
+        """Ensure best-loss initialization falls back correctly.
+
+        :return None: This test returns nothing.
+        """
         self.assertEqual(
             pretrain_mpnet._get_initial_best_loss(None), pretrain_mpnet.DEFAULT_BEST_LOSS
         )
@@ -25,6 +33,10 @@ class TestPretrainHelpers(unittest.TestCase):
         )
 
     def test_select_architecture_source(self) -> None:
+        """Verify architecture source selection precedence.
+
+        :return None: This test returns nothing.
+        """
         self.assertEqual(
             pretrain_mpnet._select_architecture_source(
                 Namespace(resume=True, hf_model_path="hf/path")
@@ -47,6 +59,10 @@ class TestPretrainHelpers(unittest.TestCase):
         )
 
     def test_select_resume_checkpoint_path(self) -> None:
+        """Check resume checkpoint path selection behavior.
+
+        :return None: This test returns nothing.
+        """
         checkpoint_dir = pathlib.Path("/tmp/checkpoints")
         self.assertEqual(
             pretrain_mpnet._select_resume_checkpoint_path(checkpoint_dir, None),
@@ -60,6 +76,10 @@ class TestPretrainHelpers(unittest.TestCase):
         )
 
     def test_select_optimizer_state_path(self) -> None:
+        """Confirm optimizer state path matches resume checkpoint type.
+
+        :return None: This test returns nothing.
+        """
         optimizer_dir = pathlib.Path("/tmp/checkpoints/optimizer")
         best_checkpoint = pathlib.Path("/tmp/checkpoints/best_checkpoint.pt")
         latest_checkpoint = pathlib.Path("/tmp/checkpoints/checkpoint123.pt")
@@ -74,10 +94,18 @@ class TestPretrainHelpers(unittest.TestCase):
         )
 
     def test_normalize_training_accuracy(self) -> None:
+        """Validate training accuracy normalization helper.
+
+        :return None: This test returns nothing.
+        """
         self.assertEqual(pretrain_mpnet._normalize_training_accuracy(0.0, 0), 0.0)
         self.assertAlmostEqual(pretrain_mpnet._normalize_training_accuracy(8.0, 10), 0.8)
 
     def test_accuracy_ignores_pad_tokens(self) -> None:
+        """Ensure accuracy ignores padding tokens when requested.
+
+        :return None: This test returns nothing.
+        """
         logits = torch.tensor([[[0.1, 0.9], [2.0, 0.0]]])
         targets = torch.tensor([[1, 0]])
         self.assertEqual(pretrain_mpnet.accuracy(logits, targets), 2)
@@ -87,10 +115,18 @@ class TestPretrainHelpers(unittest.TestCase):
         )
 
     def test_count_pred_tokens(self) -> None:
+        """Check predicted token counting with padding.
+
+        :return None: This test returns nothing.
+        """
         targets = torch.tensor([[1, 0, 2], [0, 0, 3]])
         self.assertEqual(pretrain_mpnet._count_pred_tokens(targets, 0), 3)
 
     def test_ga_gradients_match_full_batch(self) -> None:
+        """Verify GA gradients match full-batch gradients.
+
+        :return None: This test returns nothing.
+        """
         torch.manual_seed(0)
         vocab_size = 11
         seq_len = 5

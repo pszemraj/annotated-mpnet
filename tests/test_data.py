@@ -14,7 +14,13 @@ from annotated_mpnet.data.mpnet_data import (
 
 
 class TestData(unittest.TestCase):
-    def setUp(self):
+    """Unit tests for MPNet data utilities."""
+
+    def setUp(self) -> None:
+        """Set up common fixtures for data tests.
+
+        :return None: This method returns nothing.
+        """
         self.examples = [
             {
                 "input_ids": torch.tensor(
@@ -34,7 +40,11 @@ class TestData(unittest.TestCase):
             tokenizer=tokenizer, random_seed=12345
         )
 
-    def test_permuted_batch(self):
+    def test_permuted_batch(self) -> None:
+        """Validate permuted batch outputs from the collator.
+
+        :return None: This test returns nothing.
+        """
         correct_return = {
             "input_ids": torch.tensor(
                 [
@@ -103,7 +113,11 @@ class TestData(unittest.TestCase):
             "Language modeling targets aren't correct",
         )
 
-    def test_training_seeded_sampling(self):
+    def test_training_seeded_sampling(self) -> None:
+        """Verify deterministic sampling across epochs with a seed.
+
+        :return None: This test returns nothing.
+        """
         sampler_epoch_0 = RandomSamplerWithSeed([self.examples] * 10, epoch=0, random_seed=12345)
         sampler_epoch_1 = RandomSamplerWithSeed([self.examples] * 10, epoch=1, random_seed=12345)
 
