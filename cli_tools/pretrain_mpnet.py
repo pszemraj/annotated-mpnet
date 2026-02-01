@@ -147,6 +147,18 @@ def _select_optimizer_state_path(
     return optimizer_dir / "optimizer_state.pt"
 
 
+def _normalize_training_accuracy(accumulation_acc: float, accumulation_pred_tokens: int) -> float:
+    """Normalize accumulated accuracy by predicted token count.
+
+    :param float accumulation_acc: Accumulated correct predictions.
+    :param int accumulation_pred_tokens: Number of predicted tokens.
+    :return float: Normalized accuracy value.
+    """
+    if accumulation_pred_tokens == 0:
+        return 0.0
+    return accumulation_acc / accumulation_pred_tokens
+
+
 def check_and_activate_tf32() -> None:
     """Check GPU capability and enable TF32 if supported.
 
@@ -870,8 +882,10 @@ def main(args: Namespace) -> None:
 
                 # Calculate metrics - since we're now tracking per-token loss, our normalization is simpler
                 # We just need to average across the accumulated steps
-                # For accuracy, we need to normalize by the total number of tokens predicted
-                normal_acc = accumulation_acc / accumulation_tokens
+                # For accuracy, normalize by the total number of predicted tokens
+                normal_acc = _normalize_training_accuracy(
+                    accumulation_acc, accumulation_sample_sizes
+                )
                 # We're already tracking per-token loss, so just convert to bits if needed
                 normal_loss = accumulation_loss / args.update_freq / math.log(2)
 

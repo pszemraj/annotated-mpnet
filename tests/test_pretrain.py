@@ -64,6 +64,10 @@ class TestPretrainHelpers(unittest.TestCase):
             optimizer_dir / "optimizer_state.pt",
         )
 
+    def test_normalize_training_accuracy(self) -> None:
+        self.assertEqual(pretrain_mpnet._normalize_training_accuracy(0.0, 0), 0.0)
+        self.assertAlmostEqual(pretrain_mpnet._normalize_training_accuracy(8.0, 10), 0.8)
+
 
 if __name__ == "__main__":
     unittest.main()
