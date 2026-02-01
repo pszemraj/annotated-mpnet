@@ -424,10 +424,11 @@ def main(args: Namespace) -> None:
 
     # Instantiate the tensorboard writers
     if args.tensorboard_log_dir is not None:
+        log_dir = pathlib.Path(args.tensorboard_log_dir)
         writers = {
-            "train": SummaryWriter(os.path.join(args.tensorboard_log_dir, "train")),
-            "valid": SummaryWriter(os.path.join(args.tensorboard_log_dir, "valid")),
-            "test": SummaryWriter(os.path.join(args.tensorboard_log_dir, "test")),
+            "train": SummaryWriter(str(log_dir / "train")),
+            "valid": SummaryWriter(str(log_dir / "valid")),
+            "test": SummaryWriter(str(log_dir / "test")),
         }
 
     # Check if we're resuming and need to load architecture from checkpoint
@@ -625,11 +626,8 @@ def main(args: Namespace) -> None:
         )
 
         # Get each of the files in the training directory
-        train_files = [
-            f"{args.train_dir}{f}"
-            for f in os.listdir(args.train_dir)
-            if os.path.isfile(os.path.join(args.train_dir, f))
-        ]
+        train_dir = pathlib.Path(args.train_dir)
+        train_files = [str(path) for path in train_dir.iterdir() if path.is_file()]
 
     # Note: checkpoint_dir is already created above when handling resume logic
 
@@ -709,8 +707,11 @@ def main(args: Namespace) -> None:
 
         except Exception as e:
             LOGGER.error(f"Error loading HuggingFace model: {e}")
-            LOGGER.warning(f"Full error: {str(e)}")
-            LOGGER.warning("Proceeding with default initialization")
+            LOGGER.error(
+                "Failed to initialize from HuggingFace model. Remove --hf-model-path to use "
+                "random initialization."
+            )
+            raise
 
     # Handle resuming from checkpoint if enabled
     elif args.resume:

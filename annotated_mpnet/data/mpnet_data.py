@@ -4,7 +4,7 @@ as the data collator
 """
 
 import logging
-import os
+import pathlib
 import random
 from typing import Any, Callable, Dict, Iterator, Optional, Sequence, Sized
 
@@ -73,7 +73,7 @@ class MPNetDataset(torch.utils.data.Dataset):
                 lines = [example[field_name] for example in dataset]
         elif file_path is not None:
             # Check if the file path exists
-            if os.path.isfile(file_path) is False:
+            if not pathlib.Path(file_path).is_file():
                 raise ValueError(f"Input file path {file_path} not found")
 
             LOGGER.info(f"Creating features from dataset file at {file_path}")

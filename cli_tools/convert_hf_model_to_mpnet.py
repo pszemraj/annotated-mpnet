@@ -5,7 +5,7 @@ This is the reverse of convert_pretrained_mpnet_to_hf_model.py.
 
 import argparse
 import logging
-import os
+import pathlib
 from argparse import Namespace
 
 from rich.logging import RichHandler
@@ -200,15 +200,16 @@ def convert_hf_model_to_mpnet(
             model.state_dict()[our_key].copy_(hf_tensor)
 
     # Create checkpoint directory if it doesn't exist
-    checkpoint_dir = os.path.dirname(mpnet_checkpoint_path)
-    if checkpoint_dir and not os.path.exists(checkpoint_dir):
-        os.makedirs(checkpoint_dir)
+    checkpoint_path = pathlib.Path(mpnet_checkpoint_path)
+    checkpoint_dir = checkpoint_path.parent
+    if checkpoint_dir != pathlib.Path(".") and not checkpoint_dir.exists():
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
     # Save the model
-    LOGGER.info(f"Saving converted model to {mpnet_checkpoint_path}")
+    LOGGER.info(f"Saving converted model to {checkpoint_path}")
     torch.save(
         {"args": vars(args), "model_states": model.state_dict()},
-        mpnet_checkpoint_path,
+        checkpoint_path,
     )
     LOGGER.info("Conversion completed successfully")
 
