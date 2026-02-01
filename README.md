@@ -47,6 +47,10 @@ cd annotated-mpnet
 pip install -e .
 ```
 
+> [!TIP]
+> Installing the package pulls in runtime deps like `rich` and `datasets` used by logging and the
+> streaming data pipeline. If you run from source with `PYTHONPATH`, install those explicitly.
+
 > [!NOTE]
 > Pretraining MPNet is computationally intensive and requires a CUDA-enabled GPU. The training script will exit if CUDA is not available.
 
