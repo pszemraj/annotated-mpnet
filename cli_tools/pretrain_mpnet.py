@@ -223,6 +223,20 @@ def _select_optimizer_state_path(
     return optimizer_dir / f"{resume_checkpoint_path.stem}_optimizer_state.pt"
 
 
+def _resolve_optimizer_state_dir(
+    checkpoint_dir: pathlib.Path, resume_checkpoint_path: pathlib.Path
+) -> pathlib.Path:
+    """Resolve optimizer state directory for a resume checkpoint.
+
+    :param pathlib.Path checkpoint_dir: Current output checkpoint directory.
+    :param pathlib.Path resume_checkpoint_path: Checkpoint being resumed.
+    :return pathlib.Path: Optimizer state directory to use.
+    """
+    if resume_checkpoint_path.parent.resolve() != checkpoint_dir.resolve():
+        return resume_checkpoint_path.parent / "optimizer"
+    return checkpoint_dir / "optimizer"
+
+
 def _normalize_training_accuracy(accumulation_acc: float, accumulation_pred_tokens: int) -> float:
     """Normalize accumulated accuracy by predicted token count.
 
@@ -738,8 +752,16 @@ def main(args: Namespace) -> None:
 
         # Check if optimizer state exists and load it if requested
         if args.save_optimizer_state:
+            optimizer_state_dir = _resolve_optimizer_state_dir(
+                checkpoint_dir, resume_checkpoint_path
+            )
+            if optimizer_state_dir.resolve() != optimizer_dir.resolve():
+                LOGGER.warning(
+                    "Resume checkpoint is outside checkpoint_dir; looking for optimizer state in "
+                    f"{optimizer_state_dir}."
+                )
             optimizer_state_path = _select_optimizer_state_path(
-                optimizer_dir, resume_checkpoint_path
+                optimizer_state_dir, resume_checkpoint_path
             )
             if optimizer_state_path.exists():
                 LOGGER.info(f"Loading optimizer state from {optimizer_state_path}")

@@ -109,6 +109,24 @@ class TestPretrainHelpers(unittest.TestCase):
             optimizer_dir / "checkpoint123_optimizer_state.pt",
         )
 
+    def test_resolve_optimizer_state_dir(self) -> None:
+        """Ensure optimizer state dir follows resume checkpoint location.
+
+        :return None: This test returns nothing.
+        """
+        checkpoint_dir = pathlib.Path("/tmp/checkpoints")
+        resume_checkpoint = checkpoint_dir / "best_checkpoint.pt"
+        external_checkpoint = pathlib.Path("/tmp/other_runs/best_checkpoint.pt")
+
+        self.assertEqual(
+            pretrain_mpnet._resolve_optimizer_state_dir(checkpoint_dir, resume_checkpoint),
+            checkpoint_dir / "optimizer",
+        )
+        self.assertEqual(
+            pretrain_mpnet._resolve_optimizer_state_dir(checkpoint_dir, external_checkpoint),
+            external_checkpoint.parent / "optimizer",
+        )
+
     def test_apply_checkpoint_architecture_args_restores_max_tokens(self) -> None:
         """Ensure checkpoint args restore max_tokens and align max_positions.
 
