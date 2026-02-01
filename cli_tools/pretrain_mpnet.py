@@ -106,6 +106,19 @@ def _get_initial_best_loss(checkpoint: dict | None) -> float:
     return checkpoint.get("best_loss", DEFAULT_BEST_LOSS)
 
 
+def _select_architecture_source(args: Namespace) -> str:
+    """Select the architecture source based on CLI arguments.
+
+    :param Namespace args: Parsed CLI arguments.
+    :return str: One of "hf", "resume", or "new".
+    """
+    if args.hf_model_path is not None:
+        return "hf"
+    if args.resume:
+        return "resume"
+    return "new"
+
+
 def check_and_activate_tf32() -> None:
     """Check GPU capability and enable TF32 if supported.
 
@@ -232,7 +245,9 @@ def main(args: Namespace) -> None:
     checkpoint_dir = pathlib.Path(args.checkpoint_dir)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
-    if args.resume:
+    arch_source = _select_architecture_source(args)
+
+    if arch_source == "resume":
         # Load checkpoint to get architecture before creating model
         if args.resume_checkpoint is None:
             resume_checkpoint_path = checkpoint_dir / "best_checkpoint.pt"
@@ -278,7 +293,7 @@ def main(args: Namespace) -> None:
             )
 
     # If loading from HuggingFace model, we need to get the config first
-    elif args.hf_model_path is not None:
+    elif arch_source == "hf":
         LOGGER.info(f"Loading config from HuggingFace model: {args.hf_model_path}")
         from transformers import AutoConfig
 
