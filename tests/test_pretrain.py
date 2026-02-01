@@ -4,6 +4,7 @@ import pathlib
 import sys
 import unittest
 from argparse import Namespace
+from tempfile import TemporaryDirectory
 
 import torch
 import torch.nn.functional as F
@@ -31,6 +32,21 @@ class TestPretrainHelpers(unittest.TestCase):
             pretrain_mpnet._get_initial_best_loss({"steps": 5}),
             pretrain_mpnet.DEFAULT_BEST_LOSS,
         )
+
+    def test_resolve_best_loss_falls_back_to_best_checkpoint(self) -> None:
+        """Fallback to best checkpoint best_loss when missing in resume checkpoint.
+
+        :return None: This test returns nothing.
+        """
+        with TemporaryDirectory() as tmpdir:
+            checkpoint_dir = pathlib.Path(tmpdir)
+            best_checkpoint_path = checkpoint_dir / "best_checkpoint.pt"
+
+            torch.save({"best_loss": 1.23}, best_checkpoint_path)
+
+            best_loss = pretrain_mpnet._resolve_best_loss({"steps": 5}, checkpoint_dir)
+
+            self.assertEqual(best_loss, 1.23)
 
     def test_select_architecture_source(self) -> None:
         """Verify architecture source selection precedence.
