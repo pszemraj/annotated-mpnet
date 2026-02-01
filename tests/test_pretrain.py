@@ -127,6 +127,26 @@ class TestPretrainHelpers(unittest.TestCase):
             external_checkpoint.parent / "optimizer",
         )
 
+    def test_get_optimizer_state_path_for_resume(self) -> None:
+        """Ensure optimizer state path resolves for internal/external checkpoints.
+
+        :return None: This test returns nothing.
+        """
+        checkpoint_dir = pathlib.Path("/tmp/checkpoints")
+        resume_checkpoint = checkpoint_dir / "best_checkpoint.pt"
+        external_checkpoint = pathlib.Path("/tmp/other_runs/checkpoint42.pt")
+
+        self.assertEqual(
+            pretrain_mpnet._get_optimizer_state_path_for_resume(checkpoint_dir, resume_checkpoint),
+            checkpoint_dir / "optimizer" / "best_optimizer_state.pt",
+        )
+        self.assertEqual(
+            pretrain_mpnet._get_optimizer_state_path_for_resume(
+                checkpoint_dir, external_checkpoint
+            ),
+            external_checkpoint.parent / "optimizer" / "checkpoint42_optimizer_state.pt",
+        )
+
     def test_strip_compile_prefix(self) -> None:
         """Ensure compile prefixes are removed from state dict keys.
 

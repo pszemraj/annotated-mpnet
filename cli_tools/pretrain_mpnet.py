@@ -266,6 +266,19 @@ def _resolve_optimizer_state_dir(
     return checkpoint_dir / "optimizer"
 
 
+def _get_optimizer_state_path_for_resume(
+    checkpoint_dir: pathlib.Path, resume_checkpoint_path: pathlib.Path
+) -> pathlib.Path:
+    """Return optimizer state path for a resume checkpoint.
+
+    :param pathlib.Path checkpoint_dir: Current output checkpoint directory.
+    :param pathlib.Path resume_checkpoint_path: Checkpoint being resumed.
+    :return pathlib.Path: Optimizer state path to load if available.
+    """
+    optimizer_state_dir = _resolve_optimizer_state_dir(checkpoint_dir, resume_checkpoint_path)
+    return _select_optimizer_state_path(optimizer_state_dir, resume_checkpoint_path)
+
+
 def _normalize_training_accuracy(accumulation_acc: float, accumulation_pred_tokens: int) -> float:
     """Normalize accumulated accuracy by predicted token count.
 
@@ -767,39 +780,35 @@ def main(args: Namespace) -> None:
         model.load_state_dict(model_states)
         LOGGER.info("Model weights loaded successfully")
 
-        # Check if optimizer state exists and load it if requested
-        if args.save_optimizer_state:
-            optimizer_state_dir = _resolve_optimizer_state_dir(
-                checkpoint_dir, resume_checkpoint_path
+        # Load optimizer state if present; save flag only controls writing new state files.
+        optimizer_state_dir = _resolve_optimizer_state_dir(checkpoint_dir, resume_checkpoint_path)
+        expected_optimizer_dir = checkpoint_dir / "optimizer"
+        if optimizer_state_dir.resolve() != expected_optimizer_dir.resolve():
+            LOGGER.warning(
+                "Resume checkpoint is outside checkpoint_dir; looking for optimizer state in "
+                f"{optimizer_state_dir}."
             )
-            if optimizer_state_dir.resolve() != optimizer_dir.resolve():
-                LOGGER.warning(
-                    "Resume checkpoint is outside checkpoint_dir; looking for optimizer state in "
-                    f"{optimizer_state_dir}."
+        optimizer_state_path = _select_optimizer_state_path(
+            optimizer_state_dir, resume_checkpoint_path
+        )
+        if optimizer_state_path.exists():
+            LOGGER.info(f"Loading optimizer state from {optimizer_state_path}")
+            with safe_globals([Namespace, np.ndarray, np.dtype, np._core.multiarray._reconstruct]):
+                optimizer_state = torch.load(
+                    optimizer_state_path, map_location=device, weights_only=False
                 )
-            optimizer_state_path = _select_optimizer_state_path(
-                optimizer_state_dir, resume_checkpoint_path
+
+            # Load optimizer state
+            optimizer.load_state_dict(optimizer_state["optimizer"])
+
+            # Load scheduler state
+            scheduler.load_state_dict(optimizer_state["scheduler"])
+
+            LOGGER.info("Optimizer and scheduler states loaded successfully")
+        else:
+            LOGGER.warning(
+                f"No optimizer state found at {optimizer_state_path}, using default initialization"
             )
-            if optimizer_state_path.exists():
-                LOGGER.info(f"Loading optimizer state from {optimizer_state_path}")
-                with safe_globals(
-                    [Namespace, np.ndarray, np.dtype, np._core.multiarray._reconstruct]
-                ):
-                    optimizer_state = torch.load(
-                        optimizer_state_path, map_location=device, weights_only=False
-                    )
-
-                # Load optimizer state
-                optimizer.load_state_dict(optimizer_state["optimizer"])
-
-                # Load scheduler state
-                scheduler.load_state_dict(optimizer_state["scheduler"])
-
-                LOGGER.info("Optimizer and scheduler states loaded successfully")
-            else:
-                LOGGER.warning(
-                    f"No optimizer state found at {optimizer_state_path}, using default initialization"
-                )
 
     # Create meters for all the relevant logging statistics using the Meters module
     meters = {
