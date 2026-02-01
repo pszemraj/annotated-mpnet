@@ -433,6 +433,13 @@ def main(args: Namespace) -> None:
         args.activation_fn = hf_config.hidden_act
         # Set max_positions from HF config (already includes special tokens)
         args.max_positions = hf_config.max_position_embeddings
+        if args.max_tokens > args.max_positions:
+            LOGGER.warning(
+                "max_tokens exceeds HuggingFace max_position_embeddings; clamping max_tokens to "
+                f"{args.max_positions} to avoid position embedding mismatches."
+            )
+            args.max_tokens = args.max_positions
+            tokenizer.model_max_length = args.max_tokens
         args.relative_attention_num_buckets = getattr(
             hf_config, "relative_attention_num_buckets", 32
         )
@@ -980,8 +987,9 @@ def main(args: Namespace) -> None:
                 LOGGER.debug(accumulation_input_tokens)
 
                 # Update the meters below
-                meters["train_acc"].update(normal_acc, accumulation_pred_tokens)
-                meters["train_loss"].update(normal_loss, accumulation_pred_tokens)
+                if accumulation_pred_tokens > 0:
+                    meters["train_acc"].update(normal_acc, accumulation_pred_tokens)
+                    meters["train_loss"].update(normal_loss, accumulation_pred_tokens)
                 meters["token_throughput"].update(accumulation_input_tokens)
 
                 # Create a logging dict that will be passed to a tensorboard writer
