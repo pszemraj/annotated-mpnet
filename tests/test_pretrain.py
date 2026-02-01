@@ -3,6 +3,9 @@ import sys
 import unittest
 from argparse import Namespace
 
+import torch
+import torch.nn.functional as F
+
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -73,6 +76,58 @@ class TestPretrainHelpers(unittest.TestCase):
     def test_normalize_training_accuracy(self) -> None:
         self.assertEqual(pretrain_mpnet._normalize_training_accuracy(0.0, 0), 0.0)
         self.assertAlmostEqual(pretrain_mpnet._normalize_training_accuracy(8.0, 10), 0.8)
+
+    def test_accuracy_ignores_pad_tokens(self) -> None:
+        logits = torch.tensor([[[0.1, 0.9], [2.0, 0.0]]])
+        targets = torch.tensor([[1, 0]])
+        self.assertEqual(pretrain_mpnet.accuracy(logits, targets), 2)
+        self.assertEqual(
+            pretrain_mpnet.accuracy(logits, targets, ignore_index=0),
+            1,
+        )
+
+    def test_count_pred_tokens(self) -> None:
+        targets = torch.tensor([[1, 0, 2], [0, 0, 3]])
+        self.assertEqual(pretrain_mpnet._count_pred_tokens(targets, 0), 3)
+
+    def test_ga_gradients_match_full_batch(self) -> None:
+        torch.manual_seed(0)
+        vocab_size = 11
+        seq_len = 5
+        pad_token_id = 0
+
+        logits = torch.randn(4, seq_len, vocab_size, requires_grad=True)
+        targets = torch.randint(1, vocab_size, (4, seq_len))
+        targets[0, -2:] = pad_token_id
+        targets[2, -1:] = pad_token_id
+
+        loss_full_sum = F.nll_loss(
+            F.log_softmax(logits.view(-1, vocab_size), dim=-1),
+            targets.view(-1),
+            reduction="sum",
+            ignore_index=pad_token_id,
+        )
+        total_tokens = pretrain_mpnet._count_pred_tokens(targets, pad_token_id)
+        loss_full = loss_full_sum / total_tokens
+        loss_full.backward()
+        grads_full = logits.grad.clone()
+
+        logits_ga = logits.detach().clone().requires_grad_(True)
+        total_tokens_ga = 0
+        for start in (0, 2):
+            micro_logits = logits_ga[start : start + 2]
+            micro_targets = targets[start : start + 2]
+            loss_sum = F.nll_loss(
+                F.log_softmax(micro_logits.view(-1, vocab_size), dim=-1),
+                micro_targets.view(-1),
+                reduction="sum",
+                ignore_index=pad_token_id,
+            )
+            loss_sum.backward()
+            total_tokens_ga += pretrain_mpnet._count_pred_tokens(micro_targets, pad_token_id)
+
+        logits_ga.grad.div_(total_tokens_ga)
+        self.assertTrue(torch.allclose(grads_full, logits_ga.grad, atol=1e-6, rtol=1e-5))
 
 
 if __name__ == "__main__":

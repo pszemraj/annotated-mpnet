@@ -47,20 +47,23 @@ from annotated_mpnet.utils.utils import (
 DEFAULT_BEST_LOSS = 10e6
 
 
-def accuracy(output: torch.Tensor, target: torch.Tensor) -> int:
-    """
-    Helper function for comparing output logits to labels in target
+def accuracy(output: torch.Tensor, target: torch.Tensor, ignore_index: int | None = None) -> int:
+    """Compare output logits to labels and return correct predictions.
 
-    Args:
-        output: the output logits of the model
-        target: the labels generated from the collation process
-
-    Returns:
-        An accuracy prediction
+    :param torch.Tensor output: Output logits of the model.
+    :param torch.Tensor target: Labels generated from the collation process.
+    :param int ignore_index: Token ID to ignore in accuracy, defaults to None.
+    :return int: Number of correct predictions.
     """
     with torch.no_grad():
         _, pred = output.topk(1, -1)
-        correct = pred.view(-1).eq(target.view(-1))
+        pred = pred.view(-1)
+        target = target.view(-1)
+        if ignore_index is not None:
+            mask = target.ne(ignore_index)
+            pred = pred[mask]
+            target = target[mask]
+        correct = pred.eq(target)
     return correct.sum().item()
 
 
@@ -157,6 +160,30 @@ def _normalize_training_accuracy(accumulation_acc: float, accumulation_pred_toke
     if accumulation_pred_tokens == 0:
         return 0.0
     return accumulation_acc / accumulation_pred_tokens
+
+
+def _count_pred_tokens(targets: torch.Tensor, pad_token_id: int) -> int:
+    """Count the number of non-pad tokens in targets.
+
+    :param torch.Tensor targets: Target token IDs.
+    :param int pad_token_id: Padding token ID to ignore.
+    :return int: Number of non-pad tokens.
+    """
+    return int(targets.ne(pad_token_id).sum().item())
+
+
+def _scale_gradients_by_tokens(model: torch.nn.Module, total_tokens: int) -> None:
+    """Scale gradients by the total number of tokens.
+
+    :param torch.nn.Module model: Model with accumulated gradients.
+    :param int total_tokens: Total token count for normalization.
+    :return None: This function returns nothing.
+    """
+    if total_tokens <= 0:
+        return
+    for param in model.parameters():
+        if param.grad is not None:
+            param.grad.div_(total_tokens)
 
 
 def check_and_activate_tf32() -> None:
@@ -743,11 +770,8 @@ def main(args: Namespace) -> None:
         # Create an accumulation loss and accumulation accuracy counter
         accumulation_loss = 0
         accumulation_acc = 0
-        accumulation_tokens = 0
-
-        # Create a counter that will keep track of total number of samples passed during a gradient
-        # accumulation
-        accumulation_sample_sizes = 0
+        accumulation_input_tokens = 0
+        accumulation_pred_tokens = 0
 
         # Always reset the meters before beginning the next training epoch (except token throughput)
         for stat in ["train_loss", "train_acc", "valid_loss", "valid_acc"]:
@@ -822,12 +846,12 @@ def main(args: Namespace) -> None:
             targets = device_batch["targets"]
 
             # Track batch statistics for metrics
-            batch_size = targets.numel()
-            token_count = device_batch["ntokens"]
+            input_token_count = int(device_batch["ntokens"])
+            pred_token_count = _count_pred_tokens(targets, tokenizer.pad_token_id)
 
             # Add to accumulation counters for later metric calculations
-            accumulation_sample_sizes += batch_size
-            accumulation_tokens += token_count
+            accumulation_input_tokens += input_token_count
+            accumulation_pred_tokens += pred_token_count
 
             # Now let's process these through the model with autocast for mixed precision using bf16
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
@@ -843,23 +867,20 @@ def main(args: Namespace) -> None:
             )
 
             # Calculate accuracy
-            acc = accuracy(outs, targets)
+            acc = accuracy(outs, targets, ignore_index=tokenizer.pad_token_id)
 
-            # Calculate per-token loss for tracking metrics
-            per_token_loss = loss / batch_size
+            # Accumulate loss and accuracy stats
             accumulation_acc += acc
-            accumulation_loss += (
-                per_token_loss.item()
-            )  # Track per-token loss for more accurate reporting
+            accumulation_loss += loss.item()
 
-            # Scale the loss appropriately for backward
-            # Divide by batch_size to normalize per-token
-            # Divide by update_freq to account for gradient accumulation
-            scaled_loss = loss / batch_size / args.update_freq
-            scaled_loss.backward()
+            # Accumulate raw gradients; normalize at the accumulation boundary
+            loss.backward()
 
             # Check if we've reached a gradient accumulation step
             if (i + 1) % args.update_freq == 0:
+                # Scale accumulated gradients by total predicted tokens for correct GA
+                _scale_gradients_by_tokens(model, accumulation_pred_tokens)
+
                 # Apply gradient clipping on the accumulated gradients
                 if args.clip_grad_norm > 0.0:
                     gnorm = torch.nn.utils.clip_grad_norm_(
@@ -884,21 +905,24 @@ def main(args: Namespace) -> None:
                 # We just need to average across the accumulated steps
                 # For accuracy, normalize by the total number of predicted tokens
                 normal_acc = _normalize_training_accuracy(
-                    accumulation_acc, accumulation_sample_sizes
+                    accumulation_acc, accumulation_pred_tokens
                 )
-                # We're already tracking per-token loss, so just convert to bits if needed
-                normal_loss = accumulation_loss / args.update_freq / math.log(2)
+                # Convert to bits per token using true token normalization
+                if accumulation_pred_tokens > 0:
+                    normal_loss = accumulation_loss / accumulation_pred_tokens / math.log(2)
+                else:
+                    normal_loss = 0.0
 
                 # Log some debugging values here
                 LOGGER.debug("Accumulated batch information is below:")
-                LOGGER.debug(accumulation_sample_sizes)
+                LOGGER.debug(accumulation_pred_tokens)
                 LOGGER.debug(accumulation_loss)
-                LOGGER.debug(accumulation_tokens)
+                LOGGER.debug(accumulation_input_tokens)
 
                 # Update the meters below
-                meters["train_acc"].update(normal_acc, accumulation_sample_sizes)
-                meters["train_loss"].update(normal_loss, accumulation_sample_sizes)
-                meters["token_throughput"].update(accumulation_tokens)
+                meters["train_acc"].update(normal_acc, accumulation_pred_tokens)
+                meters["train_loss"].update(normal_loss, accumulation_pred_tokens)
+                meters["token_throughput"].update(accumulation_input_tokens)
 
                 # Create a logging dict that will be passed to a tensorboard writer
                 #
@@ -943,8 +967,8 @@ def main(args: Namespace) -> None:
                 # Reset accumulation counters here for the next set of accumulation steps
                 accumulation_acc = 0
                 accumulation_loss = 0
-                accumulation_sample_sizes = 0
-                accumulation_tokens = 0
+                accumulation_input_tokens = 0
+                accumulation_pred_tokens = 0
 
                 # Increment the step counter
                 steps += 1
@@ -981,14 +1005,15 @@ def main(args: Namespace) -> None:
                     ignore_index=tokenizer.pad_token_id,
                 )
 
-                normal_loss = loss.item() / targets.numel() / math.log(2)
-
-                # Calculate accuracy here
-                normal_acc = accuracy(outs, targets) / targets.view(-1).size(0)
-
-                # Update the meters appropriately
-                meters["valid_loss"].update(normal_loss, targets.numel())
-                meters["valid_acc"].update(normal_acc, targets.numel())
+                pred_tokens = _count_pred_tokens(targets, tokenizer.pad_token_id)
+                if pred_tokens > 0:
+                    normal_loss = loss.item() / pred_tokens / math.log(2)
+                    normal_acc = (
+                        accuracy(outs, targets, ignore_index=tokenizer.pad_token_id) / pred_tokens
+                    )
+                    # Update the meters appropriately
+                    meters["valid_loss"].update(normal_loss, pred_tokens)
+                    meters["valid_acc"].update(normal_acc, pred_tokens)
 
         # Now we calculate post validation stats
         final_valid_loss = meters["valid_loss"].avg
@@ -1116,14 +1141,15 @@ def main(args: Namespace) -> None:
                 ignore_index=tokenizer.pad_token_id,
             )
 
-            normal_loss = loss.item() / targets.numel() / math.log(2)
-
-            # Calculate accuracy here
-            normal_acc = accuracy(outs, targets) / targets.view(-1).size(0)
-
-            # Update the meters appropriately
-            meters["test_loss"].update(normal_loss, targets.numel())
-            meters["test_acc"].update(normal_acc, targets.numel())
+            pred_tokens = _count_pred_tokens(targets, tokenizer.pad_token_id)
+            if pred_tokens > 0:
+                normal_loss = loss.item() / pred_tokens / math.log(2)
+                normal_acc = (
+                    accuracy(outs, targets, ignore_index=tokenizer.pad_token_id) / pred_tokens
+                )
+                # Update the meters appropriately
+                meters["test_loss"].update(normal_loss, pred_tokens)
+                meters["test_acc"].update(normal_acc, pred_tokens)
 
     # Now we calculate post test stats
     final_test_loss = meters["test_loss"].avg
