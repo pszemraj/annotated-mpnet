@@ -44,6 +44,8 @@ from annotated_mpnet.utils.utils import (
     validate_tokenizer,
 )
 
+DEFAULT_BEST_LOSS = 10e6
+
 
 def accuracy(output: torch.Tensor, target: torch.Tensor) -> int:
     """
@@ -90,6 +92,18 @@ def log_to_wandb(logging_dict: dict, step: int, split: str) -> None:
         wandb_dict = {f"{split}/{k}": v for k, v in logging_dict.items()}
         wandb_dict["step"] = step
         wandb.log(wandb_dict)
+
+
+def _get_initial_best_loss(checkpoint: dict | None) -> float:
+    """Return the best loss from a checkpoint or a default value.
+
+    :param dict checkpoint: Loaded checkpoint or None.
+    :return float: Best loss value.
+    """
+    if checkpoint is None:
+        return DEFAULT_BEST_LOSS
+
+    return checkpoint.get("best_loss", DEFAULT_BEST_LOSS)
 
 
 def check_and_activate_tf32() -> None:
@@ -455,7 +469,7 @@ def main(args: Namespace) -> None:
     # Initialize step and epoch counters
     steps = 0
     epoch = 0
-    best_loss = 10e6  # Will be overridden if resuming from checkpoint
+    best_loss = DEFAULT_BEST_LOSS  # Will be overridden if resuming from checkpoint
 
     # Determine whether to load from HuggingFace model or resume from a checkpoint
     # HuggingFace model loading takes precedence if both are specified
@@ -524,8 +538,8 @@ def main(args: Namespace) -> None:
             epoch = checkpoint["epoch"]
             LOGGER.info(f"Resuming from epoch {epoch}")
 
+        best_loss = _get_initial_best_loss(checkpoint)
         if "best_loss" in checkpoint:
-            best_loss = checkpoint["best_loss"]
             LOGGER.info(f"Best validation loss from checkpoint: {best_loss}")
 
         # Restore RNG state if available
@@ -612,8 +626,7 @@ def main(args: Namespace) -> None:
         "token_throughput": AverageMeter(),
     }
 
-    # Additionally, we create a best loss counter that will be set arbitrarily high
-    best_loss = 10e6
+    # best_loss is already initialized above (possibly from a checkpoint)
     # Flag to track if non-trainable model repo files were saved at first checkpoint.
     initial_outputs_saved = False
 
