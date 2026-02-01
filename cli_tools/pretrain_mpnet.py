@@ -195,7 +195,7 @@ def _select_optimizer_state_path(
     """
     if resume_checkpoint_path.name == "best_checkpoint.pt":
         return optimizer_dir / "best_optimizer_state.pt"
-    return optimizer_dir / "optimizer_state.pt"
+    return optimizer_dir / f"{resume_checkpoint_path.stem}_optimizer_state.pt"
 
 
 def _normalize_training_accuracy(accumulation_acc: float, accumulation_pred_tokens: int) -> float:
@@ -853,7 +853,9 @@ def main(args: Namespace) -> None:
                         "steps": steps,
                         "epoch": epoch,
                     }
-                    optimizer_state_path = optimizer_dir / "optimizer_state.pt"
+                    optimizer_state_path = (
+                        optimizer_dir / f"{checkpoint_path.stem}_optimizer_state.pt"
+                    )
                     torch.save(optimizer_state, optimizer_state_path)
 
                 # Save the args & tokenizer if this is the first checkpoint

@@ -90,7 +90,7 @@ class TestPretrainHelpers(unittest.TestCase):
         )
         self.assertEqual(
             pretrain_mpnet._select_optimizer_state_path(optimizer_dir, latest_checkpoint),
-            optimizer_dir / "optimizer_state.pt",
+            optimizer_dir / "checkpoint123_optimizer_state.pt",
         )
 
     def test_apply_checkpoint_architecture_args_restores_max_tokens(self) -> None:
