@@ -3,6 +3,7 @@ Pretraining script for MPNet
 """
 
 import argparse
+import contextlib
 import gc
 import json
 import logging
@@ -170,6 +171,17 @@ def _count_pred_tokens(targets: torch.Tensor, pad_token_id: int) -> int:
     :return int: Number of non-pad tokens.
     """
     return int(targets.ne(pad_token_id).sum().item())
+
+
+def _get_autocast_context(device: torch.device) -> contextlib.AbstractContextManager[None]:
+    """Return the autocast context manager for the given device.
+
+    :param torch.device device: Device used for training/inference.
+    :return contextlib.AbstractContextManager[None]: Autocast context manager.
+    """
+    if device.type == "cuda":
+        return torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+    return contextlib.nullcontext()
 
 
 def _scale_gradients_by_tokens(model: torch.nn.Module, total_tokens: int) -> None:
@@ -543,7 +555,7 @@ def main(args: Namespace) -> None:
         lr=6e-9,  # starting learning rate during warmup
         eps=args.adam_eps,
         weight_decay=args.weight_decay,
-        fused=True,
+        fused=device.type == "cuda",
     )
     scheduler = PolynomialDecayLRScheduler(args, optimizer)
 
@@ -854,7 +866,7 @@ def main(args: Namespace) -> None:
             accumulation_pred_tokens += pred_token_count
 
             # Now let's process these through the model with autocast for mixed precision using bf16
-            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            with _get_autocast_context(device):
                 outs = model(**device_batch)
 
             # Process these out logits through cross entropy loss
@@ -994,7 +1006,7 @@ def main(args: Namespace) -> None:
 
             # Now we move to no_grad since we don't have to calculate weights
             with torch.no_grad():
-                with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                with _get_autocast_context(device):
                     outs = model(**device_batch)
 
                 # Calculate loss here (outside autocast for precision)
@@ -1130,7 +1142,7 @@ def main(args: Namespace) -> None:
 
         # Now we move to no_grad since we don't have to calculate weights
         with torch.no_grad():
-            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            with _get_autocast_context(device):
                 outs = test_model(**device_batch)
 
             # Calculate loss here (outside autocast for precision)

@@ -122,6 +122,14 @@ class TestPretrainHelpers(unittest.TestCase):
         targets = torch.tensor([[1, 0, 2], [0, 0, 3]])
         self.assertEqual(pretrain_mpnet._count_pred_tokens(targets, 0), 3)
 
+    def test_autocast_context_cpu_is_noop(self) -> None:
+        """Ensure CPU autocast context is a no-op.
+
+        :return None: This test returns nothing.
+        """
+        with pretrain_mpnet._get_autocast_context(torch.device("cpu")):
+            pass
+
     def test_ga_gradients_match_full_batch(self) -> None:
         """Verify GA gradients match full-batch gradients.
 
