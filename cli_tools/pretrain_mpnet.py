@@ -314,6 +314,56 @@ def _should_save_checkpoint(steps: int, checkpoint_interval: int) -> bool:
     return checkpoint_interval > 0 and steps > 0 and steps % checkpoint_interval == 0
 
 
+def _checkpoint_step_from_path(path: pathlib.Path) -> int:
+    """Extract the step number from a checkpoint filename.
+
+    :param pathlib.Path path: Checkpoint path.
+    :return int: Parsed step number or -1 if not parseable.
+    """
+    stem = path.stem
+    if stem.startswith("checkpoint"):
+        step_str = stem[len("checkpoint") :]
+        if step_str.isdigit():
+            return int(step_str)
+    return -1
+
+
+def _prune_checkpoints(
+    checkpoint_dir: pathlib.Path,
+    keep_checkpoints: int,
+    optimizer_dir: pathlib.Path | None = None,
+) -> None:
+    """Delete older interval checkpoints, keeping only the most recent N.
+
+    :param pathlib.Path checkpoint_dir: Directory containing checkpoint files.
+    :param int keep_checkpoints: Number of recent checkpoints to keep (-1 disables pruning).
+    :param pathlib.Path optimizer_dir: Optimizer state directory to prune alongside checkpoints.
+    :return None: This function returns nothing.
+    """
+    if keep_checkpoints < 0:
+        return
+
+    checkpoints = sorted(
+        checkpoint_dir.glob("checkpoint*.pt"),
+        key=_checkpoint_step_from_path,
+    )
+    if keep_checkpoints == 0:
+        to_remove = checkpoints
+    else:
+        to_remove = checkpoints[:-keep_checkpoints]
+
+    for ckpt in to_remove:
+        step = _checkpoint_step_from_path(ckpt)
+        try:
+            ckpt.unlink()
+        except FileNotFoundError:
+            continue
+        if optimizer_dir is not None and step >= 0:
+            optimizer_state = optimizer_dir / f"checkpoint{step}_optimizer_state.pt"
+            if optimizer_state.exists():
+                optimizer_state.unlink()
+
+
 def _warn_if_max_positions_mismatch(args: Namespace) -> None:
     """Warn if max_positions and max_tokens are set to different values.
 
@@ -711,7 +761,7 @@ def main(args: Namespace) -> None:
 
     # Next, we instantiate the model and the data collator
     model = MPNetForPretraining(args, tokenizer)
-    mplm = DataCollatorForMaskedPermutedLanguageModeling(tokenizer=tokenizer)
+    mplm = DataCollatorForMaskedPermutedLanguageModeling(tokenizer=tokenizer, random_seed=args.seed)
 
     # Initialize wandb if enabled (after model creation)
     if args.wandb:
@@ -1015,6 +1065,14 @@ def main(args: Namespace) -> None:
                 except (TypeError, ValueError, AttributeError) as e:
                     LOGGER.warning(f"Could not restore RNG state: {e}")
                     LOGGER.info("Continuing with current RNG state")
+
+            # Restore collator RNG state for deterministic masking when resuming.
+            if "collator_rng_state" in checkpoint:
+                try:
+                    mplm.set_rng_state(checkpoint["collator_rng_state"])
+                    LOGGER.info("Restored collator RNG state")
+                except (TypeError, ValueError, AttributeError) as e:
+                    LOGGER.warning(f"Could not restore collator RNG state: {e}")
 
         # Extract model states
         model_states = _strip_compile_prefix(checkpoint["model_states"])
@@ -1389,6 +1447,7 @@ def main(args: Namespace) -> None:
                                 np.random.get_state() if "numpy.random" in sys.modules else None
                             ),
                         },
+                        "collator_rng_state": mplm.get_rng_state(),
                     }
 
                     checkpoint_path = checkpoint_dir / f"checkpoint{steps}.pt"
@@ -1416,6 +1475,12 @@ def main(args: Namespace) -> None:
                         tokenizer.save_pretrained(tokenizer_dir)
                         initial_outputs_saved = True
 
+                    _prune_checkpoints(
+                        checkpoint_dir,
+                        args.keep_checkpoints,
+                        optimizer_dir if args.save_optimizer_state else None,
+                    )
+
                 if eval_interval_steps > 0 and steps % eval_interval_steps == 0:
                     final_valid_loss, final_valid_accuracy = _evaluate_split(
                         model, valid_dataloader, "Validation", "valid_loss", "valid_acc"
@@ -1441,6 +1506,7 @@ def main(args: Namespace) -> None:
                                     np.random.get_state() if "numpy.random" in sys.modules else None
                                 ),
                             },
+                            "collator_rng_state": mplm.get_rng_state(),
                         }
 
                         best_checkpoint_path = checkpoint_dir / "best_checkpoint.pt"
@@ -1505,6 +1571,7 @@ def main(args: Namespace) -> None:
                         np.random.get_state() if "numpy.random" in sys.modules else None
                     ),
                 },
+                "collator_rng_state": mplm.get_rng_state(),
             }
             best_checkpoint_path = checkpoint_dir / "best_checkpoint.pt"
             torch.save(best_checkpoint, best_checkpoint_path)
@@ -1853,6 +1920,12 @@ def cli_main() -> None:
         "-save_steps",
         "--checkpoint-interval",
         help="The number of steps to be taken before saving the model",
+        default=-1,
+        type=int,
+    )
+    parser.add_argument(
+        "--keep-checkpoints",
+        help="How many interval checkpoints to keep (-1 disables pruning; 0 keeps none).",
         default=-1,
         type=int,
     )

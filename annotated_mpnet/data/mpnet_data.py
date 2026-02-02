@@ -33,6 +33,36 @@ except ImportError:
     )
 
 
+def _serialize_np_generator_state(state: Any) -> Any:
+    """Convert NumPy generator state into builtin Python types for safe checkpoints.
+
+    :param Any state: NumPy generator state payload.
+    :return Any: Serialized state payload.
+    """
+    if isinstance(state, np.ndarray):
+        return state.tolist()
+    if isinstance(state, np.generic):
+        return state.item()
+    if isinstance(state, dict):
+        return {k: _serialize_np_generator_state(v) for k, v in state.items()}
+    if isinstance(state, (list, tuple)):
+        return [_serialize_np_generator_state(v) for v in state]
+    return state
+
+
+def _deserialize_np_generator_state(state: Any) -> Any:
+    """Return the NumPy generator state payload (best-effort).
+
+    :param Any state: Serialized NumPy generator state.
+    :return Any: Deserialized state payload.
+    """
+    if isinstance(state, dict):
+        return {k: _deserialize_np_generator_state(v) for k, v in state.items()}
+    if isinstance(state, list):
+        return [_deserialize_np_generator_state(v) for v in state]
+    return state
+
+
 class MPNetDataset(torch.utils.data.Dataset):
     """
     Class handling the collection of samples for MPNet pretraining
@@ -390,6 +420,31 @@ class DataCollatorForMaskedPermutedLanguageModeling:
 
     def __call__(self, examples: Sequence[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
         return self.collate_fn(examples)
+
+    def get_rng_state(self) -> Optional[Dict[str, Any]]:
+        """Return collator RNG state for deterministic resume.
+
+        :return Optional[Dict[str, Any]]: RNG state payload or None.
+        """
+        state: Dict[str, Any] = {}
+        if self._np_rng is not None:
+            state["numpy"] = _serialize_np_generator_state(self._np_rng.bit_generator.state)
+        if self._torch_generator is not None:
+            state["torch"] = self._torch_generator.get_state()
+        return state or None
+
+    def set_rng_state(self, state: Optional[Dict[str, Any]]) -> None:
+        """Restore collator RNG state from a checkpoint.
+
+        :param Optional[Dict[str, Any]] state: RNG state payload.
+        :return None: This method returns nothing.
+        """
+        if not state:
+            return
+        if self._np_rng is not None and state.get("numpy") is not None:
+            self._np_rng.bit_generator.state = _deserialize_np_generator_state(state["numpy"])
+        if self._torch_generator is not None and state.get("torch") is not None:
+            self._torch_generator.set_state(state["torch"])
 
     def collate_fn(self, examples: Sequence[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
         """Collate a batch of examples for MPNet pretraining.

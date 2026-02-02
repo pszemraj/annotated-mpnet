@@ -285,6 +285,69 @@ class TestPretrainHelpers(unittest.TestCase):
         self.assertEqual(logits.shape[:2], (batch_size, pred_size))
         self.assertEqual(mlm_logits.shape[:2], (batch_size, pred_size))
 
+    def test_pretraining_gradient_checkpointing_forward(self) -> None:
+        """Ensure pretraining forward runs with gradient checkpointing enabled.
+
+        :return None: This test returns nothing.
+        """
+        args = Namespace(
+            encoder_layers=2,
+            encoder_embed_dim=32,
+            encoder_ffn_dim=64,
+            encoder_attention_heads=4,
+            dropout=0.1,
+            attention_dropout=0.1,
+            activation_dropout=0.1,
+            activation_fn="gelu",
+            max_positions=16,
+            relative_attention_num_buckets=8,
+            relative_attention_max_distance=16,
+            normalize_before=False,
+            padded_vocab_size=30528,
+            gradient_checkpointing=True,
+        )
+        tokenizer = AutoTokenizer.from_pretrained("microsoft/mpnet-base")
+        model = pretrain_mpnet.MPNetForPretraining(args, tokenizer)
+        model.train()
+
+        batch_size = 2
+        base_seq_len = 6
+        pred_size = 2
+        input_len = base_seq_len + 2 * pred_size
+        input_ids = torch.randint(0, tokenizer.vocab_size, (batch_size, input_len))
+        positions = torch.arange(input_len).unsqueeze(0).expand(batch_size, input_len)
+
+        outs = model(input_ids, positions, pred_size, return_mlm=False)
+        loss = outs.sum()
+        loss.backward()
+        self.assertIsNotNone(model.sentence_encoder.embed_tokens.weight.grad)
+
+    def test_prune_checkpoints_keeps_recent(self) -> None:
+        """Ensure checkpoint pruning keeps the most recent checkpoints.
+
+        :return None: This test returns nothing.
+        """
+        with TemporaryDirectory() as tmpdir:
+            checkpoint_dir = pathlib.Path(tmpdir)
+            optimizer_dir = checkpoint_dir / "optimizer"
+            optimizer_dir.mkdir()
+
+            for step in range(1, 5):
+                (checkpoint_dir / f"checkpoint{step}.pt").write_text("x")
+                (optimizer_dir / f"checkpoint{step}_optimizer_state.pt").write_text("x")
+
+            pretrain_mpnet._prune_checkpoints(checkpoint_dir, 2, optimizer_dir)
+
+            remaining = sorted(p.name for p in checkpoint_dir.glob("checkpoint*.pt"))
+            self.assertEqual(remaining, ["checkpoint3.pt", "checkpoint4.pt"])
+            remaining_opt = sorted(
+                p.name for p in optimizer_dir.glob("checkpoint*_optimizer_state.pt")
+            )
+            self.assertEqual(
+                remaining_opt,
+                ["checkpoint3_optimizer_state.pt", "checkpoint4_optimizer_state.pt"],
+            )
+
     def test_select_architecture_source(self) -> None:
         """Verify architecture source selection precedence.
 

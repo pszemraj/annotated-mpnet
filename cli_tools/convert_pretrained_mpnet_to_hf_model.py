@@ -128,7 +128,14 @@ def convert_mpnet_checkpoint_to_pytorch(
     model.lm_head.dense.bias.data = mpnet_weight["lm_head.dense.bias"].type_as(tensor)
     model.lm_head.layer_norm.weight.data = mpnet_weight["lm_head.layer_norm.weight"].type_as(tensor)
     model.lm_head.layer_norm.bias.data = mpnet_weight["lm_head.layer_norm.bias"].type_as(tensor)
-    model.lm_head.decoder.weight.data = mpnet_weight["lm_head.weight"].type_as(tensor)
+    lm_head_weight_key = "lm_head.weight"
+    if lm_head_weight_key not in mpnet_weight:
+        # Some checkpoints only store the tied embedding weight.
+        LOGGER.warning(
+            "lm_head.weight missing in checkpoint; falling back to sentence_encoder.embed_tokens.weight."
+        )
+        lm_head_weight_key = "sentence_encoder.embed_tokens.weight"
+    model.lm_head.decoder.weight.data = mpnet_weight[lm_head_weight_key].type_as(tensor)
     model.lm_head.decoder.bias.data = mpnet_weight["lm_head.bias"].type_as(tensor)
 
     # Match up the relative attention bias weights with each other

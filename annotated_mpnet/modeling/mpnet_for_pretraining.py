@@ -17,6 +17,7 @@ LOGGER = logging.getLogger(__name__)
 import torch
 import torch.nn.functional as F
 from torch import nn
+from torch.utils.checkpoint import checkpoint
 from transformers import PreTrainedTokenizer
 
 from annotated_mpnet.transformer_modules import LayerNorm, SentenceEncoder
@@ -147,16 +148,46 @@ class MPNetForPretraining(nn.Module):
         )
 
         # Do the attention calculations
-        for i, layer in enumerate(self.sentence_encoder.layers):
-            c, q = encode_two_stream_attention(
-                layer,
-                c,
-                q,
-                content_mask,
-                query_mask,
-                content_position_bias,
-                query_position_bias,
-            )
+        use_checkpoint = (
+            self.sentence_encoder.gradient_checkpointing
+            and self.training
+            and torch.is_grad_enabled()
+        )
+        for layer in self.sentence_encoder.layers:
+            if use_checkpoint:
+                # Match SentenceEncoder checkpointing behavior for the pretraining path.
+                def _layer_forward(
+                    c_in: torch.Tensor, q_in: torch.Tensor, current_layer: nn.Module = layer
+                ) -> Tuple[torch.Tensor, torch.Tensor]:
+                    """Run a single encoder layer for checkpointed execution.
+
+                    :param torch.Tensor c_in: Content stream tensor.
+                    :param torch.Tensor q_in: Query stream tensor.
+                    :param nn.Module current_layer: Encoder layer module.
+                    :return Tuple[torch.Tensor, torch.Tensor]: Updated content and query tensors.
+                    """
+
+                    return encode_two_stream_attention(
+                        current_layer,
+                        c_in,
+                        q_in,
+                        content_mask,
+                        query_mask,
+                        content_position_bias,
+                        query_position_bias,
+                    )
+
+                c, q = checkpoint(_layer_forward, c, q, use_reentrant=False)
+            else:
+                c, q = encode_two_stream_attention(
+                    layer,
+                    c,
+                    q,
+                    content_mask,
+                    query_mask,
+                    content_position_bias,
+                    query_position_bias,
+                )
 
         # Process the final layer norm
         q = self.sentence_encoder.maybe_final_norm(q)
@@ -414,6 +445,46 @@ def two_stream_self_attention(
             mask = mask.reshape(bsz * self.num_heads, attn_mask.size(1), attn_mask.size(2))
         return attn_weights.masked_fill(mask, float("-inf"))
 
+    def build_attn_bias(
+        attn_mask: Optional[torch.Tensor],
+        bias: Optional[torch.Tensor],
+        target_len: int,
+        source_len: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> Optional[torch.Tensor]:
+        """Create a combined attention bias for SDPA from masks and position bias.
+
+        :param torch.Tensor attn_mask: Attention mask tensor, defaults to None.
+        :param torch.Tensor bias: Position bias tensor, defaults to None.
+        :param int target_len: Target sequence length.
+        :param int source_len: Source sequence length.
+        :param torch.device device: Device for the bias tensor.
+        :param torch.dtype dtype: Data type for the bias tensor.
+        :return Optional[torch.Tensor]: Combined attention bias or None.
+        """
+        attn_bias = None
+        if attn_mask is not None:
+            if attn_mask.dim() == 2:
+                mask = attn_mask.unsqueeze(0)
+                if mask.size(0) == 1 and bsz * self.num_heads != 1:
+                    mask = mask.expand(bsz * self.num_heads, target_len, source_len)
+            else:
+                mask = attn_mask.unsqueeze(1).expand(
+                    bsz, self.num_heads, attn_mask.size(1), attn_mask.size(2)
+                )
+                mask = mask.reshape(bsz * self.num_heads, attn_mask.size(1), attn_mask.size(2))
+
+            attn_bias = torch.zeros(mask.shape, device=device, dtype=dtype).masked_fill(
+                mask, float("-inf")
+            )
+
+        if bias is not None:
+            bias = bias.to(device=device, dtype=dtype)
+            attn_bias = bias if attn_bias is None else attn_bias + bias
+
+        return attn_bias
+
     def attn_fn(
         _q: torch.Tensor,
         k: torch.Tensor,
@@ -430,28 +501,51 @@ def two_stream_self_attention(
         :param torch.Tensor bias: Position bias, defaults to None.
         :return torch.Tensor: Attention output.
         """
-        # Process the query matrix through both the scaling and the input layer of self_attention
-        _q = transpose_fn(self.scaling * self.in_proj_q(_q))
+        use_sdpa = hasattr(F, "scaled_dot_product_attention") and not self.onnx_trace
 
-        # Calculate the energy by multiplying Q and K
-        attn_weights = torch.bmm(_q, k.transpose(1, 2))
+        # Process the query matrix through the input layer of self_attention
+        q_proj = self.in_proj_q(_q)
+        if use_sdpa:
+            _q = transpose_fn(q_proj)
+        else:
+            _q = transpose_fn(self.scaling * q_proj)
 
-        # Process bias if applicable
-        if bias is not None:
-            attn_weights += bias
+        if use_sdpa:
+            attn_bias = build_attn_bias(
+                mask,
+                bias,
+                _q.size(1),
+                k.size(1),
+                device=_q.device,
+                dtype=_q.dtype,
+            )
+            attn = F.scaled_dot_product_attention(
+                _q,
+                k,
+                v,
+                attn_mask=attn_bias,
+                dropout_p=self.dropout if self.training else 0.0,
+            )
+        else:
+            # Calculate the energy by multiplying Q and K
+            attn_weights = torch.bmm(_q, k.transpose(1, 2))
 
-        # Process attention masking
-        if mask is not None:
-            attn_weights = fill_mask(attn_weights, mask)
+            # Process bias if applicable
+            if bias is not None:
+                attn_weights += bias
 
-        # Softmax the energy to get the final attention weights
-        attn_weights = F.softmax(attn_weights, dim=-1).type_as(attn_weights)
+            # Process attention masking
+            if mask is not None:
+                attn_weights = fill_mask(attn_weights, mask)
 
-        # Do the attention dropout
-        attn_weights = F.dropout(attn_weights, p=self.dropout, training=self.training)
+            # Softmax the energy to get the final attention weights
+            attn_weights = F.softmax(attn_weights, dim=-1).type_as(attn_weights)
 
-        # Combine the final post-softmax/dropout weights with the V matrix to get the attention
-        attn = torch.bmm(attn_weights, v)
+            # Do the attention dropout
+            attn_weights = F.dropout(attn_weights, p=self.dropout, training=self.training)
+
+            # Combine the final post-softmax/dropout weights with the V matrix to get the attention
+            attn = torch.bmm(attn_weights, v)
 
         # Finally, transpose back to the embed dimension and return
         attn = attn.transpose(0, 1).contiguous().view(-1, bsz, embed_dim)
@@ -510,6 +604,8 @@ def make_query_and_content_mask(
     on a per-batch basis.
     """
 
+    device = input_ids.device
+
     # Define helper function to keep things organized
     def make_query_mask() -> torch.Tensor:
         """Build the query attention mask.
@@ -517,9 +613,9 @@ def make_query_and_content_mask(
         :return torch.Tensor: Query mask tensor.
         """
         # Create the mask portion (i.e. ones)
-        mask = torch.triu(torch.ones(pred_size, pred_size), 0)
+        mask = torch.triu(torch.ones(pred_size, pred_size, device=device), 0)
 
-        mask = (torch.ones(pred_size, seq_len - pred_size), 1 - mask, mask)
+        mask = (torch.ones(pred_size, seq_len - pred_size, device=device), 1 - mask, mask)
 
         return torch.cat(mask, dim=-1).eq(0)
 
@@ -529,18 +625,22 @@ def make_query_and_content_mask(
         :return torch.Tensor: Content mask tensor.
         """
         mask = [
-            torch.zeros(seq_len - pred_size, pred_size),
-            torch.tril(torch.ones(pred_size, pred_size), 0),
+            torch.zeros(seq_len - pred_size, pred_size, device=device),
+            torch.tril(torch.ones(pred_size, pred_size, device=device), 0),
         ]
 
-        mask.append(torch.zeros(pred_size, pred_size))
+        mask.append(torch.zeros(pred_size, pred_size, device=device))
         mask = torch.cat(mask, dim=0)
-        mask = (torch.ones(seq_len + pred_size, seq_len - pred_size), mask, 1 - mask)
+        mask = (
+            torch.ones(seq_len + pred_size, seq_len - pred_size, device=device),
+            mask,
+            1 - mask,
+        )
 
         return torch.cat(mask, dim=-1).eq(0)
 
-    query_mask = make_query_mask().to(input_ids.device)
-    content_mask = make_content_mask().to(input_ids.device)
+    query_mask = make_query_mask()
+    content_mask = make_content_mask()
 
     if pad_token_id is None:
         return query_mask, content_mask

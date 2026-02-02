@@ -134,6 +134,25 @@ class TestData(unittest.TestCase):
         sample = next(iter(dataset))
         self.assertLess(len(sample["input_ids"]), 16)
 
+    def test_collator_rng_state_roundtrip(self) -> None:
+        """Ensure collator RNG state restores deterministic masking.
+
+        :return None: This test returns nothing.
+        """
+        tokenizer = AutoTokenizer.from_pretrained("microsoft/mpnet-base")
+        collator = DataCollatorForMaskedPermutedLanguageModeling(
+            tokenizer=tokenizer, random_seed=12345
+        )
+        _ = collator.collate_fn(self.examples)
+        state = collator.get_rng_state()
+        self.assertIsNotNone(state)
+
+        batch_a = collator.collate_fn(self.examples)
+        collator.set_rng_state(state)
+        batch_b = collator.collate_fn(self.examples)
+        self.assertTrue(torch.equal(batch_a["input_ids"], batch_b["input_ids"]))
+        self.assertTrue(torch.equal(batch_a["positions"], batch_b["positions"]))
+
     def test_collator_falls_back_without_fast_perm(self) -> None:
         """Ensure collator disables fast path when extension is missing.
 
