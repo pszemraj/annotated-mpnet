@@ -417,7 +417,7 @@ def main(args: Namespace) -> None:
 
     # Determine whether to pad vocab size based on whether we're loading from existing model
     if args.resume or args.hf_model_path is not None:
-        # When loading from existing model, use its vocab size (will be set later from checkpoint/HF config)
+        # When loading from existing model, preserve its vocab size to avoid mismatched embeddings.
         LOGGER.info("Loading from existing model - will use model's vocab size")
         # These will be overridden when we load the checkpoint or HF config
         args.original_vocab_size = original_vocab_size
@@ -478,6 +478,7 @@ def main(args: Namespace) -> None:
         if "args" in resume_checkpoint:
             checkpoint_args = resume_checkpoint["args"]
             _apply_checkpoint_architecture_args(args, checkpoint_args)
+            # Update tokenizer length immediately after restoring checkpoint args.
             tokenizer.model_max_length = args.max_tokens
             _warn_if_max_positions_mismatch(args)
 
@@ -721,7 +722,7 @@ def main(args: Namespace) -> None:
             # Extract model states
             model_states = _strip_compile_prefix(checkpoint["model_states"])
 
-            # Load model weights
+            # Load model weights; strict loading will surface any key mismatches.
             model.load_state_dict(model_states)
             LOGGER.info("Model weights loaded successfully from HuggingFace model")
 
@@ -783,7 +784,7 @@ def main(args: Namespace) -> None:
         # Extract model states
         model_states = _strip_compile_prefix(checkpoint["model_states"])
 
-        # Load model weights
+        # Load model weights; strict loading will surface any key mismatches.
         model.load_state_dict(model_states)
         LOGGER.info("Model weights loaded successfully")
 

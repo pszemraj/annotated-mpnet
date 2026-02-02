@@ -74,6 +74,7 @@ def convert_mpnet_checkpoint_to_pytorch(
         # same size as max_tokens, since position embeddings start at padding_idx + 1, we need to
         # add 2 to the final count, since the lowest possible position is 2
         max_position_embeddings=mpnet_args.max_positions + 2,
+        # HF MPNetConfig doesn't expose relative_attention_max_distance; buckets cover the bias size.
         relative_attention_num_buckets=mpnet_args.relative_attention_num_buckets,
         hidden_act=mpnet_args.activation_fn,
         # Note: there are three dropouts in MPNetForPretraining, but only two in MPNetForMaskedLM

@@ -129,6 +129,7 @@ def convert_hf_model_to_mpnet(
     mappings["lm_head.dense.bias"] = "lm_head.dense.bias"
     mappings["lm_head.layer_norm.weight"] = "lm_head.layer_norm.weight"
     mappings["lm_head.layer_norm.bias"] = "lm_head.layer_norm.bias"
+    # LM head weights are tied to embeddings in our model; keep mapping for completeness.
     mappings["lm_head.decoder.weight"] = "lm_head.weight"
     mappings["lm_head.decoder.bias"] = "lm_head.bias"
 

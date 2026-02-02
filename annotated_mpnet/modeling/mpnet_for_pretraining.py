@@ -278,6 +278,8 @@ class MPNetLMHead(nn.Module):
         # If we don't provide our own weights, we need to initialize them
         if weight is None:
             weight = nn.Linear(embed_dim, output_dim, bias=False).weight
+        # When a shared embedding Parameter is provided, assigning it here registers
+        # lm_head.weight in the state dict while keeping weights tied.
         self.weight = weight
 
         # Finally create the bias layer

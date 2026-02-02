@@ -8,6 +8,7 @@ from tempfile import TemporaryDirectory
 
 import torch
 import torch.nn.functional as F
+from transformers import AutoTokenizer
 
 from annotated_mpnet.utils import utils
 
@@ -42,6 +43,34 @@ class TestPretrainHelpers(unittest.TestCase):
         """
         self.assertEqual(utils.hf_max_positions_to_internal(514), 512)
         self.assertEqual(utils.hf_max_positions_to_internal(2), 1)
+
+    def test_lm_head_weight_registered_and_tied(self) -> None:
+        """Ensure lm_head.weight is registered and tied to embeddings.
+
+        :return None: This test returns nothing.
+        """
+        args = Namespace(
+            encoder_layers=2,
+            encoder_embed_dim=64,
+            encoder_ffn_dim=128,
+            encoder_attention_heads=2,
+            dropout=0.1,
+            attention_dropout=0.1,
+            activation_dropout=0.1,
+            activation_fn="gelu",
+            max_positions=32,
+            relative_attention_num_buckets=16,
+            relative_attention_max_distance=64,
+            normalize_before=False,
+            padded_vocab_size=30528,
+        )
+        tokenizer = AutoTokenizer.from_pretrained("microsoft/mpnet-base")
+        model = pretrain_mpnet.MPNetForPretraining(args, tokenizer)
+
+        state_dict = model.state_dict()
+        self.assertIn("lm_head.weight", state_dict)
+        self.assertIn("sentence_encoder.embed_tokens.weight", state_dict)
+        self.assertIs(model.lm_head.weight, model.sentence_encoder.embed_tokens.weight)
 
     def test_resolve_best_loss_falls_back_to_best_checkpoint(self) -> None:
         """Fallback to best checkpoint best_loss when missing in resume checkpoint.
