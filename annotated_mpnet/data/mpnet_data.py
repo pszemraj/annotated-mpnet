@@ -5,7 +5,6 @@ as the data collator
 
 import logging
 import pathlib
-import random
 import time
 from typing import Any, Callable, Dict, Iterator, Optional, Sequence, Sized
 
@@ -191,8 +190,8 @@ class HFStreamingDataset(torch.utils.data.IterableDataset):
         self.skip_samples = skip_samples
         self.max_samples = max_samples
 
-        # Set random seed
-        random.seed(seed)
+        # Initialize numpy Generator for reproducible buffer shuffling
+        self._rng = np.random.default_rng(seed)
 
         # Either use provided stream or load a new one
         if dataset_stream is not None:
@@ -225,7 +224,7 @@ class HFStreamingDataset(torch.utils.data.IterableDataset):
         if worker_info is not None:
             # Use different seed for each worker
             worker_seed = worker_info.id + self.seed
-            random.seed(worker_seed)
+            self._rng = np.random.default_rng(worker_seed)
 
             # Shard the dataset based on worker id
             dataset_iter = iter(
@@ -254,7 +253,7 @@ class HFStreamingDataset(torch.utils.data.IterableDataset):
         yielded = 0
         while buffer:
             # Randomly select an example from the buffer
-            idx = random.randint(0, len(buffer) - 1)
+            idx = self._rng.integers(0, len(buffer))
             example = buffer[idx]
 
             # Process the example
@@ -293,6 +292,24 @@ class HFStreamingDataset(torch.utils.data.IterableDataset):
 
         # Leave padding to the collator to avoid redundant max_length padding here.
         return {"input_ids": torch.tensor(tokenized["input_ids"], dtype=torch.long)}
+
+    def get_rng_state(self) -> Dict[str, Any]:
+        """Return streaming dataset RNG state for deterministic resume.
+
+        :return Dict[str, Any]: RNG state payload with numpy_generator key.
+        """
+        return {"numpy_generator": _serialize_np_generator_state(self._rng.bit_generator.state)}
+
+    def set_rng_state(self, state: Optional[Dict[str, Any]]) -> None:
+        """Restore streaming dataset RNG state from a checkpoint.
+
+        :param Optional[Dict[str, Any]] state: RNG state payload.
+        :return None: This method returns nothing.
+        """
+        if state and state.get("numpy_generator") is not None:
+            self._rng.bit_generator.state = _deserialize_np_generator_state(
+                state["numpy_generator"]
+            )
 
 
 def create_hf_dataloader(

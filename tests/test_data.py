@@ -168,3 +168,29 @@ class TestData(unittest.TestCase):
             self.assertFalse(collator.use_fast)
         finally:
             mpnet_data.make_span_perm = original
+
+    def test_streaming_dataset_rng_state_roundtrip(self) -> None:
+        """Ensure streaming dataset RNG state can be saved and restored.
+
+        :return None: This test returns nothing.
+        """
+        tokenizer = AutoTokenizer.from_pretrained("microsoft/mpnet-base")
+        mock_stream = [
+            {"text": f"This is sample number {i} with enough text for testing."} for i in range(50)
+        ]
+
+        dataset = HFStreamingDataset(
+            tokenizer=tokenizer,
+            dataset_stream=mock_stream,
+            block_size=32,
+            buffer_size=10,
+            seed=12345,
+            min_text_length=0,
+        )
+
+        state = dataset.get_rng_state()
+        self.assertIsNotNone(state)
+        self.assertIn("numpy_generator", state)
+
+        # Verify state can be restored without error
+        dataset.set_rng_state(state)

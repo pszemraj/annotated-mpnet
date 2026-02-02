@@ -986,12 +986,13 @@ def main(args: Namespace) -> None:
 
     resume_mode = "streaming" if train_streaming else "files"
     resume_data_state = _normalize_data_state(resume_data_state, mode_hint=resume_mode)
+    reset_collator_rng = False  # Flag to skip loading RNG states from checkpoint
     if resume_data_state["mode"] == "unknown":
         resume_data_state["mode"] = resume_mode
     elif resume_data_state["mode"] != resume_mode:
         LOGGER.warning(
             "Resume checkpoint data_state mode (%s) does not match current dataset (%s). "
-            "Resetting resume offsets to avoid cross-mode skips.",
+            "Resetting resume offsets and RNG states to ensure consistency.",
             resume_data_state["mode"],
             resume_mode,
         )
@@ -1005,6 +1006,18 @@ def main(args: Namespace) -> None:
             },
             mode_hint=resume_mode,
         )
+
+        # Reset all RNG to fresh seed for consistency after mode mismatch.
+        # This ensures data sampling is reproducible from a clean state.
+        base_seed = args.seed
+        torch.manual_seed(base_seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(base_seed)
+        np.random.seed(base_seed)
+        LOGGER.info("Reset all RNG states due to mode mismatch")
+
+        # Set flag to skip loading RNG states from checkpoint.
+        reset_collator_rng = True
     resume_cycle_batch_index = int(resume_data_state.get("batch_index", 0) or 0)
     resume_cycle_samples = int(resume_data_state.get("samples_in_cycle", 0) or 0)
     # Legacy checkpoints (no data_state) are not resumable; we only use them to initialize weights.
@@ -1037,6 +1050,9 @@ def main(args: Namespace) -> None:
     steps = 0
     best_loss = DEFAULT_BEST_LOSS  # Will be overridden if resuming from checkpoint
     samples_processed = 0
+
+    # Streaming RNG state loaded from checkpoint; applied when dataset is created.
+    resume_streaming_rng_state: dict | None = None
 
     # Determine whether to load from HuggingFace model or resume from a checkpoint
     # HuggingFace model loading takes precedence if both are specified
@@ -1169,12 +1185,27 @@ def main(args: Namespace) -> None:
                     LOGGER.info("Continuing with current RNG state")
 
             # Restore collator RNG state for deterministic masking when resuming.
-            if "collator_rng_state" in checkpoint:
+            # Skip if mode mismatch was detected (reset_collator_rng is True).
+            if "collator_rng_state" in checkpoint and not reset_collator_rng:
                 try:
                     mplm.set_rng_state(checkpoint["collator_rng_state"])
                     LOGGER.info("Restored collator RNG state")
                 except (TypeError, ValueError, AttributeError) as e:
                     LOGGER.warning(f"Could not restore collator RNG state: {e}")
+            elif reset_collator_rng:
+                LOGGER.info("Skipped collator RNG restoration due to mode mismatch")
+
+            # Load streaming RNG state for later application when dataset is created.
+            # Skip if mode mismatch was detected.
+            if "streaming_rng_state" in checkpoint and train_streaming and not reset_collator_rng:
+                try:
+                    resume_streaming_rng_state = checkpoint["streaming_rng_state"]
+                    LOGGER.info("Loaded streaming RNG state from checkpoint")
+                except (TypeError, ValueError, AttributeError) as e:
+                    LOGGER.warning(f"Could not load streaming RNG state: {e}")
+                    resume_streaming_rng_state = None
+            else:
+                resume_streaming_rng_state = None
 
         # Extract model states
         model_states = _strip_compile_prefix(checkpoint["model_states"])
@@ -1295,6 +1326,10 @@ def main(args: Namespace) -> None:
     initial_outputs_saved = False
     last_eval_step: int | None = None
 
+    # Container to track current streaming dataset for RNG state serialization.
+    # Using a list as a mutable container allows the nested generator to update it.
+    current_streaming_dataset: list[HFStreamingDataset | None] = [None]
+
     def _iter_train_batches() -> Iterator[tuple[dict[str, Any], int, int]]:
         """Yield training batches with cycle and batch index.
 
@@ -1342,6 +1377,17 @@ def main(args: Namespace) -> None:
                     text_field=args.text_field,
                     skip_samples=local_skip,
                 )
+                # Track current streaming dataset for RNG state serialization at checkpoint time.
+                current_streaming_dataset[0] = train_dataset
+
+                # Apply streaming RNG state from checkpoint on first cycle of resume.
+                # Use nonlocal to access the outer-scope variable.
+                nonlocal resume_streaming_rng_state
+                if resume_streaming_rng_state is not None:
+                    train_dataset.set_rng_state(resume_streaming_rng_state)
+                    LOGGER.info("Applied streaming RNG state from checkpoint")
+                    resume_streaming_rng_state = None  # Only apply once
+
                 train_dataloader = torch.utils.data.DataLoader(
                     train_dataset,
                     batch_size=args.batch_size,
@@ -1548,6 +1594,11 @@ def main(args: Namespace) -> None:
                             ),
                         },
                         "collator_rng_state": mplm.get_rng_state(),
+                        "streaming_rng_state": (
+                            current_streaming_dataset[0].get_rng_state()
+                            if train_streaming and current_streaming_dataset[0] is not None
+                            else None
+                        ),
                     }
 
                     checkpoint_path = checkpoint_dir / f"checkpoint{steps}.pt"
@@ -1607,6 +1658,11 @@ def main(args: Namespace) -> None:
                                 ),
                             },
                             "collator_rng_state": mplm.get_rng_state(),
+                            "streaming_rng_state": (
+                                current_streaming_dataset[0].get_rng_state()
+                                if train_streaming and current_streaming_dataset[0] is not None
+                                else None
+                            ),
                         }
 
                         best_checkpoint_path = checkpoint_dir / "best_checkpoint.pt"
@@ -1672,6 +1728,11 @@ def main(args: Namespace) -> None:
                     ),
                 },
                 "collator_rng_state": mplm.get_rng_state(),
+                "streaming_rng_state": (
+                    current_streaming_dataset[0].get_rng_state()
+                    if train_streaming and current_streaming_dataset[0] is not None
+                    else None
+                ),
             }
             best_checkpoint_path = checkpoint_dir / "best_checkpoint.pt"
             torch.save(best_checkpoint, best_checkpoint_path)
