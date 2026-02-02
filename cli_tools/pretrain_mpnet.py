@@ -21,7 +21,7 @@ LOG_FORMAT = "%(message)s"
 logging.basicConfig(level="INFO", format=LOG_FORMAT, datefmt="[%X] ", handlers=[RichHandler()])
 LOGGER = logging.getLogger(__name__)
 
-DEFAULT_STREAMING_DATASET = "gair-prox/DCLM-pro"
+DEFAULT_STREAMING_DATASET = "HuggingFaceFW/fineweb-edu"
 
 
 import torch

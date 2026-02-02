@@ -157,7 +157,7 @@ pretrain-mpnet \
 - `--seed`: Random seed for reproducibility (default: 12345).
 
 Data source selection:
-- If `--dataset-name` is omitted, the script defaults to the streaming dataset `gair-prox/DCLM-pro`.
+- If `--dataset-name` is omitted, the script defaults to the streaming dataset `HuggingFaceFW/fineweb-edu`.
 - If you provide `--train-dir`, `--valid-file`, and `--test-file`, the file-based path is used automatically (no need to pass `--dataset-name ""`).
 
 The script validates the tokenizer. For optimal performance with the default `whole_word_mask=True` in the data collator, a WordPiece-compatible tokenizer is expected.
