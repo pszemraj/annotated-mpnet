@@ -207,6 +207,26 @@ class TestPretrainHelpers(unittest.TestCase):
             external_checkpoint.parent / "optimizer" / "checkpoint42_optimizer_state.pt",
         )
 
+    def test_select_best_checkpoint_path_prefers_resume_root(self) -> None:
+        """Fallback to resume root best checkpoint when local is missing.
+
+        :return None: This test returns nothing.
+        """
+        with TemporaryDirectory() as tmpdir:
+            checkpoint_dir = pathlib.Path(tmpdir) / "new_run"
+            resume_dir = pathlib.Path(tmpdir) / "resume_run"
+            checkpoint_dir.mkdir()
+            resume_dir.mkdir()
+
+            resume_best = resume_dir / "best_checkpoint.pt"
+            torch.save({"best_loss": 1.0}, resume_best)
+            resume_checkpoint = resume_dir / "checkpoint10.pt"
+
+            selected = pretrain_mpnet._select_best_checkpoint_path(
+                checkpoint_dir, resume_checkpoint
+            )
+            self.assertEqual(selected, resume_best)
+
     def test_strip_compile_prefix(self) -> None:
         """Ensure compile prefixes are removed from state dict keys.
 

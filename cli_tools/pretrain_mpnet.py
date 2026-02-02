@@ -291,6 +291,28 @@ def _get_optimizer_state_path_for_resume(
     return _select_optimizer_state_path(optimizer_state_dir, resume_checkpoint_path)
 
 
+def _select_best_checkpoint_path(
+    checkpoint_dir: pathlib.Path, resume_checkpoint_path: pathlib.Path | None
+) -> pathlib.Path:
+    """Select a best checkpoint path, falling back to resume root if needed.
+
+    :param pathlib.Path checkpoint_dir: Current output checkpoint directory.
+    :param pathlib.Path resume_checkpoint_path: Resume checkpoint path, defaults to None.
+    :return pathlib.Path: Best checkpoint path to load for final eval.
+    """
+    best_checkpoint_path = checkpoint_dir / "best_checkpoint.pt"
+    if best_checkpoint_path.exists():
+        return best_checkpoint_path
+
+    if resume_checkpoint_path is not None:
+        resume_root = resume_checkpoint_path.parent
+        resume_best = resume_root / "best_checkpoint.pt"
+        if resume_best.exists():
+            return resume_best
+
+    return best_checkpoint_path
+
+
 def _normalize_training_accuracy(accumulation_acc: float, accumulation_pred_tokens: int) -> float:
     """Normalize accumulated accuracy by predicted token count.
 
@@ -461,6 +483,7 @@ def main(args: Namespace) -> None:
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
     arch_source = _select_architecture_source(args)
+    resume_checkpoint_path: pathlib.Path | None = None
 
     if arch_source == "resume":
         # Load checkpoint to get architecture before creating model
@@ -1220,7 +1243,8 @@ def main(args: Namespace) -> None:
 
     # Begin by loading the model states and args from the best checkpoint
     with safe_globals([Namespace, np.ndarray, np.dtype, np._core.multiarray._reconstruct]):
-        best_checkpoint_path = checkpoint_dir / "best_checkpoint.pt"
+        # Prefer local best checkpoint; fall back to resume root if none was written.
+        best_checkpoint_path = _select_best_checkpoint_path(checkpoint_dir, resume_checkpoint_path)
         dicts = torch.load(best_checkpoint_path, weights_only=False)
 
     # Handle args that might be dict or Namespace
