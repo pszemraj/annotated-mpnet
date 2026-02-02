@@ -390,14 +390,16 @@ def model_summary(model: nn.Module, max_depth: int = 4, show_input_size: bool = 
         """
         return "x".join(str(x) for x in size) if size else "N/A"
 
-    def count_parameters(module: nn.Module) -> Tuple[int, int]:
+    def count_parameters(module: nn.Module, recurse: bool = False) -> Tuple[int, int]:
         """Count total and trainable parameters for a module.
 
         :param nn.Module module: Module to inspect.
+        :param bool recurse: Whether to include child module parameters, defaults to False.
         :return Tuple[int, int]: Total and trainable parameter counts.
         """
-        total_params = sum(p.numel() for p in module.parameters())
-        trainable_params = sum(p.numel() for p in module.parameters() if p.requires_grad)
+        params = list(module.parameters(recurse=recurse))
+        total_params = sum(p.numel() for p in params)
+        trainable_params = sum(p.numel() for p in params if p.requires_grad)
         return total_params, trainable_params
 
     def recursive_summarize(
@@ -413,7 +415,8 @@ def model_summary(model: nn.Module, max_depth: int = 4, show_input_size: bool = 
         """
         summary = []
 
-        total_params, trainable_params = count_parameters(module)
+        # Count only the module's own params here to avoid double-counting children.
+        total_params, trainable_params = count_parameters(module, recurse=False)
 
         if depth <= max_depth:
             layer_name = f"{prefix}{type(module).__name__}"
@@ -445,7 +448,7 @@ def model_summary(model: nn.Module, max_depth: int = 4, show_input_size: bool = 
             f"{name:<{max_name_length}} {shape_str:>{max_shape_length}} {format_params(num_params):>12} {str(trainable_params > 0):>10}"
         )
 
-    total_params, trainable_params = count_parameters(model)
+    total_params, trainable_params = count_parameters(model, recurse=True)
     print("=" * (max_name_length + 50))
     print(f"Total params: {format_params(total_params)}")
     print(f"Trainable params: {format_params(trainable_params)}")

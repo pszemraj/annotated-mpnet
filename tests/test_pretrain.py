@@ -101,9 +101,38 @@ class TestPretrainHelpers(unittest.TestCase):
         model.train()
         tokens = torch.randint(0, 128, (2, 8))
         inner_states, sentence_rep = model(tokens)
-        self.assertEqual(inner_states[-1].shape[0], tokens.shape[1])
-        self.assertEqual(inner_states[-1].shape[1], tokens.shape[0])
+        self.assertEqual(inner_states[-1].shape[0], tokens.shape[0])
+        self.assertEqual(inner_states[-1].shape[1], tokens.shape[1])
         self.assertEqual(sentence_rep.shape[0], tokens.shape[0])
+
+    def test_sentence_encoder_inner_states_layout(self) -> None:
+        """Ensure inner_states layout is consistent across last_state_only modes.
+
+        :return None: This test returns nothing.
+        """
+        model = SentenceEncoder(
+            padding_idx=1,
+            vocab_size=128,
+            num_encoder_layers=1,
+            embedding_dim=32,
+            ffn_embedding_dim=64,
+            num_attention_heads=4,
+            dropout=0.1,
+            attention_dropout=0.1,
+            activation_dropout=0.1,
+            max_seq_len=16,
+            num_segments=0,
+            encoder_normalize_before=True,
+            activation_fn="gelu",
+            normalize_before=False,
+            relative_attention_num_buckets=8,
+            relative_attention_max_distance=16,
+        )
+        tokens = torch.randint(0, 128, (2, 8))
+        all_states, _ = model(tokens, last_state_only=False)
+        last_only, _ = model(tokens, last_state_only=True)
+        self.assertEqual(all_states[-1].shape, last_only[0].shape)
+        self.assertEqual(all_states[-1].shape[:2], tokens.shape)
 
     def test_resolve_best_loss_falls_back_to_best_checkpoint(self) -> None:
         """Fallback to best checkpoint best_loss when missing in resume checkpoint.
@@ -192,7 +221,69 @@ class TestPretrainHelpers(unittest.TestCase):
                 {"steps": 10}, checkpoint_dir, resume_checkpoint
             )
 
-            self.assertEqual(best_loss, 2.34)
+        self.assertEqual(best_loss, 2.34)
+
+    def test_model_summary_avoids_double_counting(self) -> None:
+        """Ensure model_summary reports parent params without child double-counting.
+
+        :return None: This test returns nothing.
+        """
+
+        class Parent(torch.nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.child = torch.nn.Linear(2, 3)
+
+        model = Parent()
+        expected_total = sum(p.numel() for p in model.parameters())
+
+        from io import StringIO
+        from contextlib import redirect_stdout
+
+        buf = StringIO()
+        with redirect_stdout(buf):
+            utils.model_summary(model, max_depth=2)
+        output = buf.getvalue().splitlines()
+        parent_line = next(line for line in output if line.strip().startswith("Parent"))
+        self.assertIn("--", parent_line)
+        self.assertIn(f"Total params: {expected_total}", buf.getvalue())
+
+    def test_pretraining_forward_return_mlm(self) -> None:
+        """Ensure return_mlm path runs and yields logits with expected shapes.
+
+        :return None: This test returns nothing.
+        """
+        args = Namespace(
+            encoder_layers=2,
+            encoder_embed_dim=32,
+            encoder_ffn_dim=64,
+            encoder_attention_heads=4,
+            dropout=0.1,
+            attention_dropout=0.1,
+            activation_dropout=0.1,
+            activation_fn="gelu",
+            max_positions=16,
+            relative_attention_num_buckets=8,
+            relative_attention_max_distance=16,
+            normalize_before=False,
+            padded_vocab_size=30528,
+        )
+        tokenizer = AutoTokenizer.from_pretrained("microsoft/mpnet-base")
+        model = pretrain_mpnet.MPNetForPretraining(args, tokenizer)
+        model.eval()
+
+        batch_size = 2
+        base_seq_len = 6
+        pred_size = 2
+        input_len = base_seq_len + 2 * pred_size
+        input_ids = torch.randint(0, tokenizer.vocab_size, (batch_size, input_len))
+        positions = torch.arange(input_len).unsqueeze(0).expand(batch_size, input_len)
+
+        with torch.no_grad():
+            logits, mlm_logits = model(input_ids, positions, pred_size, return_mlm=True)
+
+        self.assertEqual(logits.shape[:2], (batch_size, pred_size))
+        self.assertEqual(mlm_logits.shape[:2], (batch_size, pred_size))
 
     def test_select_architecture_source(self) -> None:
         """Verify architecture source selection precedence.

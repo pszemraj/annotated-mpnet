@@ -13,8 +13,6 @@ LOG_FORMAT = "%(message)s"
 logging.basicConfig(level="INFO", format=LOG_FORMAT, datefmt="[%X] ", handlers=[RichHandler()])
 LOGGER = logging.getLogger(__name__)
 
-POSITION_OFFSET = 2  # Account for CLS/SEP positions in learned positional embeddings.
-
 
 import torch
 import torch.nn.functional as F
@@ -125,7 +123,7 @@ class MPNetForPretraining(nn.Module):
         """
 
         # Calculate initial embeddings
-        emb = self.encode_emb(self.sentence_encoder, input_ids, positions)
+        emb = self.sentence_encoder.encode_emb(input_ids, positions)
 
         # Reverse the tensor for easier extraction
         x = reverse_tensor(emb)
@@ -134,8 +132,9 @@ class MPNetForPretraining(nn.Module):
         c, q = split_tensor(x, pred_size)
 
         # Get the content and query position biases
-        content_position_bias = self.encode_relative_emb(
-            self.sentence_encoder, positions[:, :-pred_size]
+        # Use the shared encoder helper to keep relative position bucketing in one place.
+        content_position_bias = self.sentence_encoder.compute_position_bias_from_positions(
+            positions[:, :-pred_size]
         )
         query_position_bias = content_position_bias[:, -pred_size:].contiguous()
 
@@ -160,7 +159,7 @@ class MPNetForPretraining(nn.Module):
             )
 
         # Process the final layer norm
-        q = self.maybe_final_norm(self.sentence_encoder, q)
+        q = self.sentence_encoder.maybe_final_norm(q)
 
         # Re-reverse the tensor so we can have it back in the correct format
         q = reverse_tensor(q)
@@ -171,88 +170,15 @@ class MPNetForPretraining(nn.Module):
         # If we also want MLM loss, we can branch to the below logic. Probably not useful for us
         if return_mlm is True:
             c = c[-pred_size:]
-            c = self.maybe_final_norm(self.decoder.sentence_encoder, c)
+            # Use the sentence encoder here (no decoder exists); keep return_mlm functional.
+            c = self.sentence_encoder.maybe_final_norm(c)
             c = reverse_tensor(c)
             c = self.output_layer(c)
             return x, c
 
         return x
 
-    # We define some class static methods here that will be used quite a bit across the board
-    @staticmethod
-    def encode_emb(
-        encoder: "SentenceEncoder",
-        input_ids: torch.Tensor,
-        positions: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        """Embed input tokens using the sentence encoder.
-
-        :param SentenceEncoder encoder: Sentence encoder instance providing embedding layers.
-        :param torch.Tensor input_ids: Input token IDs for the batch.
-        :param torch.Tensor positions: Precomputed position indices, defaults to None.
-        :return torch.Tensor: Embedded token representations.
-        """
-
-        # Use the embedding layer of the sentence encoder to embed these (passed in via the self
-        # arg)
-        x = encoder.embed_tokens(input_ids)
-
-        # Scale the embeddings if necessary
-        if encoder.embed_scale is not None:
-            x *= encoder.embed_scale
-
-        # Add in positions
-        if positions is not None:
-            x += F.embedding(
-                positions + POSITION_OFFSET, encoder.embed_positions.weight, encoder.padding_idx
-            )
-
-        # Do layer norm
-        if encoder.emb_layer_norm is not None and not encoder.normalize_before:
-            x = encoder.emb_layer_norm(x)
-
-        # Process dropout
-        x = F.dropout(x, p=encoder.dropout, training=encoder.training)
-
-        return x
-
-    @staticmethod
-    def maybe_final_norm(encoder: "SentenceEncoder", x: torch.Tensor) -> torch.Tensor:
-        """Apply final layer normalization if configured.
-
-        :param SentenceEncoder encoder: Sentence encoder instance.
-        :param torch.Tensor x: Tensor to normalize.
-        :return torch.Tensor: Normalized tensor.
-        """
-        if encoder.emb_layer_norm is not None and encoder.normalize_before:
-            return encoder.emb_layer_norm(x)
-        return x
-
-    @staticmethod
-    def encode_relative_emb(encoder: "SentenceEncoder", positions: torch.Tensor) -> torch.Tensor:
-        """Compute relative position bias embeddings.
-
-        :param SentenceEncoder encoder: Sentence encoder instance.
-        :param torch.Tensor positions: Position indices for the batch.
-        :return torch.Tensor: Relative position bias values.
-        """
-        qlen, klen = positions.size(1), positions.size(1)
-        context_position = positions[:, :, None]
-        memory_position = positions[:, None, :]
-
-        relative_position = memory_position - context_position
-
-        # Keep in sync with SentenceEncoder.compute_position_bias for relative position bucketing.
-        rp_bucket = encoder.relative_position_bucket(
-            relative_position,
-            num_buckets=encoder.relative_attention_num_buckets,
-            max_distance=encoder.relative_attention_max_distance,
-        )
-        rp_bucket = rp_bucket.to(positions.device)
-        values = encoder.relative_attention_bias(rp_bucket)
-        values = values.permute(0, 3, 1, 2).contiguous()  # [bsz, head, qlen, klen]
-        values = values.view(-1, qlen, klen)
-        return values
+    # Relative position bias and embedding helpers now live on SentenceEncoder for reuse.
 
 
 class MPNetLMHead(nn.Module):

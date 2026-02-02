@@ -251,12 +251,10 @@ class HFStreamingDataset(torch.utils.data.IterableDataset):
             text,
             max_length=self.block_size,
             truncation=True,
-            padding="max_length",
-            return_tensors="pt",
         )
 
-        # Extract the input IDs and return them in the expected format
-        return {"input_ids": tokenized["input_ids"].squeeze(0)}
+        # Leave padding to the collator to avoid redundant max_length padding here.
+        return {"input_ids": torch.tensor(tokenized["input_ids"], dtype=torch.long)}
 
 
 def create_hf_dataloader(

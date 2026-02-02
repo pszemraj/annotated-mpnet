@@ -575,9 +575,17 @@ def main(args: Namespace) -> None:
     LOGGER.info(f"Loading tokenizer from {args.tokenizer_name}")
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_name, model_max_length=args.max_tokens)
     is_valid, details = validate_tokenizer(tokenizer)
-    assert is_valid and details["whole_word_mask"], (
-        f"Invalid tokenizer: {args.tokenizer_name}. Debug w/ verbose output from validate_tokenizer()"
+    assert is_valid, (
+        f"Tokenizer validation failed for {args.tokenizer_name}. "
+        "Run validate_tokenizer(tokenizer, verbose=True) for details."
     )
+    if not details.get("whole_word_mask", False):
+        # Tokenizer can be valid but incompatible with WordPiece-style whole-word masking.
+        LOGGER.warning(
+            "Tokenizer %s does not appear to support whole-word masking; "
+            "the data collator will fall back to token-level masking.",
+            args.tokenizer_name,
+        )
 
     # Get the tokenizer vocab size
     original_vocab_size = len(
@@ -1239,174 +1247,131 @@ def main(args: Namespace) -> None:
                     torch.cuda.empty_cache()
 
     train_iter = _iter_train_batches()
-    scheduler.optimizer.zero_grad()
-    model.train()
+    try:
+        scheduler.optimizer.zero_grad()
+        model.train()
 
-    accumulation_loss = 0
-    accumulation_acc = 0  # Count of correct predictions; normalize by predicted tokens later.
-    accumulation_input_tokens = 0
-    accumulation_pred_tokens = 0
-    micro_steps = 0
-    current_cycle = resume_data_state["cycle"]
-    cycle_samples_processed = resume_cycle_samples
-    cycle_batch_index = resume_cycle_batch_index
+        accumulation_loss = 0
+        accumulation_acc = 0  # Count of correct predictions; normalize by predicted tokens later.
+        accumulation_input_tokens = 0
+        accumulation_pred_tokens = 0
+        micro_steps = 0
+        current_cycle = resume_data_state["cycle"]
+        cycle_samples_processed = resume_cycle_samples
+        cycle_batch_index = resume_cycle_batch_index
 
-    while steps < args.total_updates:
-        batch, batch_cycle, batch_index = next(train_iter)
-        if batch_cycle != current_cycle:
-            current_cycle = batch_cycle
-            cycle_samples_processed = 0
+        while steps < args.total_updates:
+            batch, batch_cycle, batch_index = next(train_iter)
+            if batch_cycle != current_cycle:
+                current_cycle = batch_cycle
+                cycle_samples_processed = 0
 
-        device_batch = {
-            data_type: (t.to(device) if isinstance(t, torch.Tensor) else t)
-            for data_type, t in batch.items()
-            if data_type != "attention_mask"
-        }
+            device_batch = {
+                data_type: (t.to(device) if isinstance(t, torch.Tensor) else t)
+                for data_type, t in batch.items()
+                if data_type != "attention_mask"
+            }
 
-        batch_size = int(device_batch["input_ids"].shape[0])
-        samples_processed += batch_size
-        cycle_samples_processed += batch_size
-        cycle_batch_index = batch_index
+            batch_size = int(device_batch["input_ids"].shape[0])
+            samples_processed += batch_size
+            cycle_samples_processed += batch_size
+            cycle_batch_index = batch_index
 
-        targets = device_batch["targets"]
-        input_token_count = int(device_batch["ntokens"])
-        pred_token_count = _count_pred_tokens(targets, tokenizer.pad_token_id)
+            targets = device_batch["targets"]
+            input_token_count = int(device_batch["ntokens"])
+            pred_token_count = _count_pred_tokens(targets, tokenizer.pad_token_id)
 
-        accumulation_input_tokens += input_token_count
-        accumulation_pred_tokens += pred_token_count
+            accumulation_input_tokens += input_token_count
+            accumulation_pred_tokens += pred_token_count
 
-        with _get_autocast_context(device):
-            outs = model(**device_batch)
+            with _get_autocast_context(device):
+                outs = model(**device_batch)
 
-        # Compute loss in fp32 outside autocast for numerical stability.
-        loss = F.nll_loss(
-            F.log_softmax(outs.view(-1, outs.size(-1)), dim=-1, dtype=torch.float32),
-            targets.view(-1),
-            reduction="sum",
-            ignore_index=tokenizer.pad_token_id,
-        )
+            # Compute loss in fp32 outside autocast for numerical stability.
+            loss = F.nll_loss(
+                F.log_softmax(outs.view(-1, outs.size(-1)), dim=-1, dtype=torch.float32),
+                targets.view(-1),
+                reduction="sum",
+                ignore_index=tokenizer.pad_token_id,
+            )
 
-        acc = accuracy(outs, targets, ignore_index=tokenizer.pad_token_id)
-        accumulation_acc += acc
-        accumulation_loss += loss.item()
-        loss.backward()
-        micro_steps += 1
+            acc = accuracy(outs, targets, ignore_index=tokenizer.pad_token_id)
+            accumulation_acc += acc
+            accumulation_loss += loss.item()
+            loss.backward()
+            micro_steps += 1
 
-        if micro_steps % args.update_freq == 0:
-            _scale_gradients_by_tokens(model, accumulation_pred_tokens)
+            if micro_steps % args.update_freq == 0:
+                _scale_gradients_by_tokens(model, accumulation_pred_tokens)
 
-            if args.clip_grad_norm > 0.0:
-                gnorm = torch.nn.utils.clip_grad_norm_(
-                    model.parameters(), args.clip_grad_norm
-                ).item()
-            else:
-                gnorm = math.sqrt(
-                    sum(p.grad.data.norm() ** 2 for p in model.parameters() if p.grad is not None)
+                if args.clip_grad_norm > 0.0:
+                    gnorm = torch.nn.utils.clip_grad_norm_(
+                        model.parameters(), args.clip_grad_norm
+                    ).item()
+                else:
+                    gnorm = math.sqrt(
+                        sum(
+                            p.grad.data.norm() ** 2
+                            for p in model.parameters()
+                            if p.grad is not None
+                        )
+                    )
+
+                lr = scheduler.step(steps)
+                scheduler.optimizer.zero_grad()
+
+                normal_acc = _normalize_training_accuracy(
+                    accumulation_acc, accumulation_pred_tokens
                 )
+                if accumulation_pred_tokens > 0:
+                    normal_loss = accumulation_loss / accumulation_pred_tokens / math.log(2)
+                else:
+                    normal_loss = 0.0
 
-            lr = scheduler.step(steps)
-            scheduler.optimizer.zero_grad()
+                LOGGER.debug("Accumulated batch information is below:")
+                LOGGER.debug(accumulation_pred_tokens)
+                LOGGER.debug(accumulation_loss)
+                LOGGER.debug(accumulation_input_tokens)
 
-            normal_acc = _normalize_training_accuracy(accumulation_acc, accumulation_pred_tokens)
-            if accumulation_pred_tokens > 0:
-                normal_loss = accumulation_loss / accumulation_pred_tokens / math.log(2)
-            else:
-                normal_loss = 0.0
+                if accumulation_pred_tokens > 0:
+                    meters["train_acc"].update(normal_acc, accumulation_pred_tokens)
+                    meters["train_loss"].update(normal_loss, accumulation_pred_tokens)
+                meters["token_throughput"].update(accumulation_input_tokens)
 
-            LOGGER.debug("Accumulated batch information is below:")
-            LOGGER.debug(accumulation_pred_tokens)
-            LOGGER.debug(accumulation_loss)
-            LOGGER.debug(accumulation_input_tokens)
-
-            if accumulation_pred_tokens > 0:
-                meters["train_acc"].update(normal_acc, accumulation_pred_tokens)
-                meters["train_loss"].update(normal_loss, accumulation_pred_tokens)
-            meters["token_throughput"].update(accumulation_input_tokens)
-
-            logging_dict = {
-                "acc": meters["train_acc"].avg,
-                "loss": normal_loss,
-                "sbal": meters["train_loss"].avg,
-                "lr": lr,
-                "gnorm": gnorm,
-                "ttp": meters["token_throughput"].sum,
-                "tpb": meters["token_throughput"].avg,
-            }
-
-            if args.tensorboard_log_dir is not None:
-                write_to_tensorboard(writers["train"], logging_dict, steps)
-            else:
-                LOGGER.info(logging_dict)
-
-            if args.wandb:
-                log_to_wandb(logging_dict, steps, "train")
-
-            accumulation_acc = 0
-            accumulation_loss = 0
-            accumulation_input_tokens = 0
-            accumulation_pred_tokens = 0
-
-            steps += 1
-
-            data_state = {
-                "mode": resume_mode,
-                "cycle": current_cycle,
-                "batch_index": cycle_batch_index,
-                "samples_in_cycle": cycle_samples_processed,
-            }
-
-            if _should_save_checkpoint(steps, args.checkpoint_interval):
-                checkpoint = {
-                    "args": vars(args),
-                    "model_states": model.state_dict(),
-                    "steps": steps,
-                    "best_loss": best_loss,
-                    "samples_processed": samples_processed,
-                    "data_state": data_state,
-                    "rng_state": {
-                        "torch": torch.get_rng_state(),
-                        "cuda": (
-                            torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
-                        ),
-                        "numpy": _serialize_numpy_rng_state(
-                            np.random.get_state() if "numpy.random" in sys.modules else None
-                        ),
-                    },
+                logging_dict = {
+                    "acc": meters["train_acc"].avg,
+                    "loss": normal_loss,
+                    "sbal": meters["train_loss"].avg,
+                    "lr": lr,
+                    "gnorm": gnorm,
+                    "ttp": meters["token_throughput"].sum,
+                    "tpb": meters["token_throughput"].avg,
                 }
 
-                checkpoint_path = checkpoint_dir / f"checkpoint{steps}.pt"
-                torch.save(checkpoint, checkpoint_path)
+                if args.tensorboard_log_dir is not None:
+                    write_to_tensorboard(writers["train"], logging_dict, steps)
+                else:
+                    LOGGER.info(logging_dict)
 
-                if args.save_optimizer_state:
-                    optimizer_state = {
-                        "optimizer": optimizer.state_dict(),
-                        "scheduler": scheduler.state_dict(),
-                        "steps": steps,
-                        "data_state": data_state,
-                    }
-                    optimizer_state_path = (
-                        optimizer_dir / f"{checkpoint_path.stem}_optimizer_state.pt"
-                    )
-                    torch.save(optimizer_state, optimizer_state_path)
+                if args.wandb:
+                    log_to_wandb(logging_dict, steps, "train")
 
-                if not initial_outputs_saved:
-                    args_dict = vars(args) if not isinstance(args, dict) else args
-                    args_path = checkpoint_dir / "training_args.json"
-                    with open(args_path, "w") as f:
-                        json.dump(args_dict, f, indent=4)
+                accumulation_acc = 0
+                accumulation_loss = 0
+                accumulation_input_tokens = 0
+                accumulation_pred_tokens = 0
 
-                    tokenizer_dir = checkpoint_dir / "tokenizer"
-                    tokenizer.save_pretrained(tokenizer_dir)
-                    initial_outputs_saved = True
+                steps += 1
 
-            if eval_interval_steps > 0 and steps % eval_interval_steps == 0:
-                final_valid_loss, final_valid_accuracy = _evaluate_split(
-                    model, valid_dataloader, "Validation", "valid_loss", "valid_acc"
-                )
-                last_eval_step = steps
-                if final_valid_loss < best_loss:
-                    best_loss = final_valid_loss
-                    best_checkpoint = {
+                data_state = {
+                    "mode": resume_mode,
+                    "cycle": current_cycle,
+                    "batch_index": cycle_batch_index,
+                    "samples_in_cycle": cycle_samples_processed,
+                }
+
+                if _should_save_checkpoint(steps, args.checkpoint_interval):
+                    checkpoint = {
                         "args": vars(args),
                         "model_states": model.state_dict(),
                         "steps": steps,
@@ -1426,39 +1391,94 @@ def main(args: Namespace) -> None:
                         },
                     }
 
-                    best_checkpoint_path = checkpoint_dir / "best_checkpoint.pt"
-                    torch.save(best_checkpoint, best_checkpoint_path)
+                    checkpoint_path = checkpoint_dir / f"checkpoint{steps}.pt"
+                    torch.save(checkpoint, checkpoint_path)
 
                     if args.save_optimizer_state:
-                        best_optimizer_state = {
+                        optimizer_state = {
                             "optimizer": optimizer.state_dict(),
                             "scheduler": scheduler.state_dict(),
                             "steps": steps,
-                            "best_loss": best_loss,
                             "data_state": data_state,
                         }
-                        best_optimizer_state_path = optimizer_dir / "best_optimizer_state.pt"
-                        torch.save(best_optimizer_state, best_optimizer_state_path)
+                        optimizer_state_path = (
+                            optimizer_dir / f"{checkpoint_path.stem}_optimizer_state.pt"
+                        )
+                        torch.save(optimizer_state, optimizer_state_path)
 
-                logging_dict = {
-                    "loss": final_valid_loss,
-                    "acc": final_valid_accuracy,
-                    "best_loss": best_loss,
-                }
+                    if not initial_outputs_saved:
+                        args_dict = vars(args) if not isinstance(args, dict) else args
+                        args_path = checkpoint_dir / "training_args.json"
+                        with open(args_path, "w") as f:
+                            json.dump(args_dict, f, indent=4)
 
-                if args.tensorboard_log_dir:
-                    write_to_tensorboard(writers["valid"], logging_dict, steps)
-                else:
-                    LOGGER.info("Validation stats:")
-                    LOGGER.info(logging_dict)
+                        tokenizer_dir = checkpoint_dir / "tokenizer"
+                        tokenizer.save_pretrained(tokenizer_dir)
+                        initial_outputs_saved = True
 
-                if args.wandb:
-                    log_to_wandb(logging_dict, steps, "valid")
+                if eval_interval_steps > 0 and steps % eval_interval_steps == 0:
+                    final_valid_loss, final_valid_accuracy = _evaluate_split(
+                        model, valid_dataloader, "Validation", "valid_loss", "valid_acc"
+                    )
+                    last_eval_step = steps
+                    if final_valid_loss < best_loss:
+                        best_loss = final_valid_loss
+                        best_checkpoint = {
+                            "args": vars(args),
+                            "model_states": model.state_dict(),
+                            "steps": steps,
+                            "best_loss": best_loss,
+                            "samples_processed": samples_processed,
+                            "data_state": data_state,
+                            "rng_state": {
+                                "torch": torch.get_rng_state(),
+                                "cuda": (
+                                    torch.cuda.get_rng_state_all()
+                                    if torch.cuda.is_available()
+                                    else None
+                                ),
+                                "numpy": _serialize_numpy_rng_state(
+                                    np.random.get_state() if "numpy.random" in sys.modules else None
+                                ),
+                            },
+                        }
 
-                for stat in ["train_loss", "train_acc"]:
-                    meters[stat].reset()
-                model.train()
+                        best_checkpoint_path = checkpoint_dir / "best_checkpoint.pt"
+                        torch.save(best_checkpoint, best_checkpoint_path)
 
+                        if args.save_optimizer_state:
+                            best_optimizer_state = {
+                                "optimizer": optimizer.state_dict(),
+                                "scheduler": scheduler.state_dict(),
+                                "steps": steps,
+                                "best_loss": best_loss,
+                                "data_state": data_state,
+                            }
+                            best_optimizer_state_path = optimizer_dir / "best_optimizer_state.pt"
+                            torch.save(best_optimizer_state, best_optimizer_state_path)
+
+                    logging_dict = {
+                        "loss": final_valid_loss,
+                        "acc": final_valid_accuracy,
+                        "best_loss": best_loss,
+                    }
+
+                    if args.tensorboard_log_dir:
+                        write_to_tensorboard(writers["valid"], logging_dict, steps)
+                    else:
+                        LOGGER.info("Validation stats:")
+                        LOGGER.info(logging_dict)
+
+                    if args.wandb:
+                        log_to_wandb(logging_dict, steps, "valid")
+
+                    for stat in ["train_loss", "train_acc"]:
+                        meters[stat].reset()
+                    model.train()
+
+    finally:
+        # Ensure streaming/file dataloaders release resources on exit.
+        train_iter.close()
     if last_eval_step != steps and len(valid_dataloader) > 0:
         final_valid_loss, final_valid_accuracy = _evaluate_split(
             model, valid_dataloader, "Validation", "valid_loss", "valid_acc"
@@ -1540,48 +1560,10 @@ def main(args: Namespace) -> None:
     test_model.to(device)
     test_model.eval()
 
-    # Now we iterate through the test dataloader
-    for i, batch in track(
-        enumerate(test_dataloader),
-        description="Test evaluation",
-        total=len(test_dataloader),
-    ):
-        # Load the tensors onto the appropriate device
-        device_batch = {
-            data_type: (t.to(device) if isinstance(t, torch.Tensor) else t)
-            for data_type, t in batch.items()
-            if data_type != "attention_mask"
-        }
-
-        # Extract the targets since we'll use them a bunch below
-        targets = device_batch["targets"]
-
-        # Now we move to no_grad since we don't have to calculate weights
-        with torch.no_grad():
-            with _get_autocast_context(device):
-                outs = test_model(**device_batch)
-
-            # Calculate loss here (outside autocast for precision)
-            loss = F.nll_loss(
-                F.log_softmax(outs.view(-1, outs.size(-1)), dim=-1, dtype=torch.float32),
-                targets.view(-1),
-                reduction="sum",
-                ignore_index=tokenizer.pad_token_id,
-            )
-
-            pred_tokens = _count_pred_tokens(targets, tokenizer.pad_token_id)
-            if pred_tokens > 0:
-                normal_loss = loss.item() / pred_tokens / math.log(2)
-                normal_acc = (
-                    accuracy(outs, targets, ignore_index=tokenizer.pad_token_id) / pred_tokens
-                )
-                # Update the meters appropriately
-                meters["test_loss"].update(normal_loss, pred_tokens)
-                meters["test_acc"].update(normal_acc, pred_tokens)
-
-    # Now we calculate post test stats
-    final_test_loss = meters["test_loss"].avg
-    final_test_accuracy = meters["test_acc"].avg
+    # Reuse the shared evaluation helper to keep test/valid logic consistent.
+    final_test_loss, final_test_accuracy = _evaluate_split(
+        test_model, test_dataloader, "Test", "test_loss", "test_acc"
+    )
 
     # Load these into a logging dict and pass it on to be written in tensorboard
     logging_dict = {

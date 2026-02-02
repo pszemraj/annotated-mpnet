@@ -20,11 +20,8 @@ import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
 from torch import nn
 
-from annotated_mpnet.transformer_modules import (
-    LayerNorm,
-    PositionalEmbedding,
-    SentenceEncoderLayer,
-)
+from annotated_mpnet.constants import POSITION_OFFSET
+from annotated_mpnet.transformer_modules import LayerNorm, PositionalEmbedding, SentenceEncoderLayer
 
 
 class SentenceEncoder(nn.Module):
@@ -244,6 +241,43 @@ class SentenceEncoder(nn.Module):
         """
         self.gradient_checkpointing = enable
 
+    def encode_emb(
+        self, input_ids: torch.Tensor, positions: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        """Embed input tokens using the encoder's embedding layers.
+
+        :param torch.Tensor input_ids: Input token IDs for the batch.
+        :param torch.Tensor positions: Optional precomputed positions for permuted inputs.
+        :return torch.Tensor: Embedded token representations.
+        """
+        x = self.embed_tokens(input_ids)
+        if self.embed_scale is not None:
+            x *= self.embed_scale
+
+        if positions is not None:
+            # Use the shared offset so learned positions stay consistent across modules.
+            x += F.embedding(
+                positions + POSITION_OFFSET, self.embed_positions.weight, self.padding_idx
+            )
+        elif self.embed_positions is not None:
+            x += self.embed_positions(input_ids)
+
+        if self.emb_layer_norm is not None and not self.normalize_before:
+            x = self.emb_layer_norm(x)
+
+        x = F.dropout(x, p=self.dropout, training=self.training)
+        return x
+
+    def maybe_final_norm(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply final layer normalization if configured.
+
+        :param torch.Tensor x: Tensor to normalize.
+        :return torch.Tensor: Normalized tensor.
+        """
+        if self.emb_layer_norm is not None and self.normalize_before:
+            return self.emb_layer_norm(x)
+        return x
+
     def forward(
         self,
         tokens: torch.Tensor,
@@ -341,6 +375,10 @@ class SentenceEncoder(nn.Module):
         # T x B x C -> B x T x C
         x = x.transpose(0, 1)
 
+        if not last_state_only:
+            # Normalize inner state layout to B x T x C regardless of last_state_only.
+            inner_states = [state.transpose(0, 1) for state in inner_states]
+
         # Get the sentence representation by extracting the CLS token embedding (index 0)
         sentence_rep = x[:, 0, :]
 
@@ -369,17 +407,68 @@ class SentenceEncoder(nn.Module):
 
         relative_position = memory_position - context_position
 
+        return self._relative_position_bias(
+            relative_position,
+            qlen,
+            klen,
+            num_buckets=num_buckets,
+            max_distance=max_distance,
+            batch_size=bsz,
+        )
+
+    def compute_position_bias_from_positions(self, positions: torch.Tensor) -> torch.Tensor:
+        """Compute relative position bias using explicit position indices.
+
+        :param torch.Tensor positions: Position indices with shape (bsz, seq_len).
+        :return torch.Tensor: Relative position bias tensor.
+        """
+        qlen, klen = positions.size(1), positions.size(1)
+        context_position = positions[:, :, None]
+        memory_position = positions[:, None, :]
+        relative_position = memory_position - context_position
+        return self._relative_position_bias(relative_position, qlen, klen)
+
+    def _relative_position_bias(
+        self,
+        relative_position: torch.Tensor,
+        qlen: int,
+        klen: int,
+        num_buckets: Optional[int] = None,
+        max_distance: Optional[int] = None,
+        batch_size: Optional[int] = None,
+    ) -> torch.Tensor:
+        """Shared helper to bucket relative positions and return attention bias.
+
+        :param torch.Tensor relative_position: Relative position tensor (qlen x klen or bsz x qlen x klen).
+        :param int qlen: Query length.
+        :param int klen: Key length.
+        :param int num_buckets: Optional bucket override.
+        :param int max_distance: Optional max distance override.
+        :param int batch_size: Optional batch size for broadcasted (qlen x klen) inputs.
+        :return torch.Tensor: Relative position bias tensor.
+        """
+        if num_buckets is None:
+            num_buckets = self.relative_attention_num_buckets
+        if max_distance is None:
+            max_distance = self.relative_attention_max_distance
+
         rp_bucket = self.relative_position_bucket(
             relative_position,
             num_buckets=num_buckets,
             max_distance=max_distance,
         )
-        rp_bucket = rp_bucket.to(x.device)
+        rp_bucket = rp_bucket.to(relative_position.device)
         values = self.relative_attention_bias(rp_bucket)
-        values = values.permute([2, 0, 1]).unsqueeze(0)
-        values = values.expand((bsz, -1, qlen, klen)).contiguous()
-        values = values.view(-1, qlen, klen)
-        return values
+
+        if relative_position.dim() == 2:
+            values = values.permute(2, 0, 1).unsqueeze(0)
+            if batch_size is None:
+                batch_size = 1
+            values = values.expand((batch_size, -1, qlen, klen)).contiguous()
+        else:
+            values = values.permute(0, 3, 1, 2).contiguous()
+
+        return values.view(-1, qlen, klen)
 
     @staticmethod
     def relative_position_bucket(

@@ -113,6 +113,27 @@ class TestData(unittest.TestCase):
         samples = list(iter(dataset))
         self.assertEqual(len(samples), 3)
 
+    def test_streaming_dataset_defers_padding_to_collator(self) -> None:
+        """Ensure streaming dataset does not pad to max_length.
+
+        :return None: This test returns nothing.
+        """
+        tokenizer = AutoTokenizer.from_pretrained("microsoft/mpnet-base")
+        dataset_stream = [{"text": "hi"}]
+        dataset = HFStreamingDataset(
+            tokenizer=tokenizer,
+            dataset_stream=dataset_stream,
+            block_size=16,
+            buffer_size=1,
+            seed=0,
+            min_text_length=0,
+            skip_samples=0,
+            max_samples=1,
+            text_field="text",
+        )
+        sample = next(iter(dataset))
+        self.assertLess(len(sample["input_ids"]), 16)
+
     def test_collator_falls_back_without_fast_perm(self) -> None:
         """Ensure collator disables fast path when extension is missing.
 
