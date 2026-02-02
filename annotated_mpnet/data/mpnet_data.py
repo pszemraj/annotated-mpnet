@@ -6,6 +6,7 @@ as the data collator
 import logging
 import pathlib
 import random
+import time
 from typing import Any, Callable, Dict, Iterator, Optional, Sequence, Sized
 
 from rich.logging import RichHandler
@@ -383,12 +384,14 @@ class DataCollatorForMaskedPermutedLanguageModeling:
             )
             self.use_fast = False
 
+        # Always seed RNGs for reproducibility; use time-based seed if none provided
+        # This ensures get_rng_state() never returns None, enabling proper resume
+        if random_seed is None:
+            random_seed = int(time.time() * 1000) % (2**32)
         self.random_seed = random_seed
-        self._np_rng = np.random.default_rng(random_seed) if random_seed is not None else None
-        self._torch_generator = None
-        if random_seed is not None:
-            self._torch_generator = torch.Generator()
-            self._torch_generator.manual_seed(random_seed)
+        self._np_rng = np.random.default_rng(random_seed)
+        self._torch_generator = torch.Generator()
+        self._torch_generator.manual_seed(random_seed)
 
         # Let's also create a byte tensor that maps words that begin with ##
         # We'll use this later on to do whole word masking
@@ -421,17 +424,15 @@ class DataCollatorForMaskedPermutedLanguageModeling:
     def __call__(self, examples: Sequence[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
         return self.collate_fn(examples)
 
-    def get_rng_state(self) -> Optional[Dict[str, Any]]:
+    def get_rng_state(self) -> Dict[str, Any]:
         """Return collator RNG state for deterministic resume.
 
-        :return Optional[Dict[str, Any]]: RNG state payload or None.
+        :return Dict[str, Any]: RNG state payload (always valid since RNGs are always seeded).
         """
-        state: Dict[str, Any] = {}
-        if self._np_rng is not None:
-            state["numpy"] = _serialize_np_generator_state(self._np_rng.bit_generator.state)
-        if self._torch_generator is not None:
-            state["torch"] = self._torch_generator.get_state()
-        return state or None
+        return {
+            "numpy": _serialize_np_generator_state(self._np_rng.bit_generator.state),
+            "torch": self._torch_generator.get_state(),
+        }
 
     def set_rng_state(self, state: Optional[Dict[str, Any]]) -> None:
         """Restore collator RNG state from a checkpoint.
@@ -441,9 +442,9 @@ class DataCollatorForMaskedPermutedLanguageModeling:
         """
         if not state:
             return
-        if self._np_rng is not None and state.get("numpy") is not None:
+        if state.get("numpy") is not None:
             self._np_rng.bit_generator.state = _deserialize_np_generator_state(state["numpy"])
-        if self._torch_generator is not None and state.get("torch") is not None:
+        if state.get("torch") is not None:
             self._torch_generator.set_state(state["torch"])
 
     def collate_fn(self, examples: Sequence[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
@@ -464,17 +465,14 @@ class DataCollatorForMaskedPermutedLanguageModeling:
 
         # Use these inline tokens with the padding_idx ignored to get the total number of tokens in
         # the batch
-        ntokens = inline_tokens[inline_tokens != 1].numel()
+        ntokens = inline_tokens[inline_tokens != self.tokenizer.pad_token_id].numel()
 
         # Let's get the batch dimension
         sz = src_tokens.size()
 
-        # Calculate the pred_size for this batch
-        pred_size = round(sz[1] * self.pred_prob)
-
-        # If the sequence is too short to have a masked token, we will mask the whole thing
-        if pred_size == 0:
-            pred_size = sz[1]
+        # Calculate the pred_size for this batch, ensuring at least 1 token is masked
+        # This avoids masking the entire sequence for short inputs (which distorts the training objective)
+        pred_size = max(1, round(sz[1] * self.pred_prob))
 
         # If we DO want to mask whole words, we use the span perm function which will permute whole
         # spans / words. Otherwise, we simply do a random permutation
@@ -538,6 +536,12 @@ class DataCollatorForMaskedPermutedLanguageModeling:
         # where each index represents the start of a word
         word_begins_idx = word_begins_mask.nonzero().view(-1).tolist()
 
+        # Guard: if no word boundaries found (all subword tokens), fall back to token-level permutation
+        if len(word_begins_idx) == 0:
+            if self._torch_generator is not None:
+                return torch.randperm(x.size(0), generator=self._torch_generator)
+            return torch.randperm(x.size(0))
+
         # Get the size of the positional sequence
         sz = len(word_begins_idx)
 
@@ -561,6 +565,11 @@ class DataCollatorForMaskedPermutedLanguageModeling:
         # leave the Python implementation as a branch here so that the reader can fully understand
         # how the permutations are generated without having to read into less friendly Cython
         if self.use_fast:
+            # Bounds check: ensure perm indices are valid for word_begins_idx access
+            # The Cython code accesses word_begins_idx[perm[i] + 1], so max(perm) + 1 < len(word_begins_idx)
+            assert perm.max() + 1 < len(word_begins_idx), (
+                f"perm index out of bounds: max(perm)+1={perm.max() + 1} >= len(word_begins_idx)={len(word_begins_idx)}"
+            )
             # Pass the necessary components into the Cython function and get the ndarray back
             spans = make_span_perm(perm, word_begins_idx, x.size(0))
 

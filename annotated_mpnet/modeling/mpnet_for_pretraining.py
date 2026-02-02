@@ -539,7 +539,10 @@ def two_stream_self_attention(
                 attn_weights = fill_mask(attn_weights, mask)
 
             # Softmax the energy to get the final attention weights
-            attn_weights = F.softmax(attn_weights, dim=-1).type_as(attn_weights)
+            # Upcast to float32 before softmax to avoid bf16/fp16 overflow, matching standard attention
+            attn_weights = F.softmax(attn_weights, dim=-1, dtype=torch.float32).type_as(
+                attn_weights
+            )
 
             # Do the attention dropout
             attn_weights = F.dropout(attn_weights, p=self.dropout, training=self.training)
