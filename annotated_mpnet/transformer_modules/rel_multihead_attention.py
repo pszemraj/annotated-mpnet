@@ -205,9 +205,6 @@ class RelativeMultiHeadAttention(nn.Module):
             k = self.in_proj_k(key)
             v = self.in_proj_v(value)
 
-        # Get scaled Q before performing energy calculation
-        q = q * self.scaling
-
         # If bias has been specified on the K, V matrices, process it here
         if self.bias_k is not None:
             assert self.bias_v is not None
@@ -325,6 +322,9 @@ class RelativeMultiHeadAttention(nn.Module):
             attn = attn.transpose(0, 1).contiguous().view(tgt_len, bsz, embed_dim)
             attn = self.out_proj(attn)
             return attn, None
+
+        # Apply explicit scaling for the non-SDPA path (SDPA handles scaling internally).
+        q = q * self.scaling
 
         # Extract the attention weights, i.e., do the energy calculation (QK) before inputting to
         # softmax below.
