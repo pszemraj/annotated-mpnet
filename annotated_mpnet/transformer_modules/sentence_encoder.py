@@ -17,6 +17,7 @@ import math
 
 import torch
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 from torch import nn
 
 from annotated_mpnet.transformer_modules import (
@@ -70,6 +71,7 @@ class SentenceEncoder(nn.Module):
         embed_scale: float = None,
         freeze_embeddings: bool = False,
         n_trans_layers_to_freeze: int = 0,
+        gradient_checkpointing: bool = False,
         relative_attention_num_buckets: int = None,
         relative_attention_max_distance: int = None,
         normalize_before: bool = False,
@@ -113,6 +115,7 @@ class SentenceEncoder(nn.Module):
                 frozen. This is probably only useful for finetuning
             n_trans_layers_to_freeze: the number of encoder layers to freeze within the encoder.
                 This is probably only useful for finetuning
+            gradient_checkpointing: whether to enable activation checkpointing for encoder layers
             relative_attention_num_buckets: the number of buckets to add to the relative atttention
                 portion of the attention mechanism
             relative_attention_max_distance: the maximum distance (in tokens) to consider in the relative
@@ -133,6 +136,7 @@ class SentenceEncoder(nn.Module):
         self.num_segments = num_segments
         self.use_position_embeddings = use_position_embeddings
         self.learned_pos_embedding = learned_pos_embedding
+        self.gradient_checkpointing = gradient_checkpointing
 
         # Create the embedding layer that will convert token IDs into embeds
         self.embed_tokens = nn.Embedding(self.vocab_size, self.embedding_dim, self.padding_idx)
@@ -232,6 +236,14 @@ class SentenceEncoder(nn.Module):
         for layer in range(n_trans_layers_to_freeze):
             freeze_module_params(self.layers[layer])
 
+    def set_gradient_checkpointing(self, enable: bool = True) -> None:
+        """Enable or disable activation checkpointing.
+
+        :param bool enable: Whether to enable checkpointing, defaults to True.
+        :return None: This method returns nothing.
+        """
+        self.gradient_checkpointing = enable
+
     def forward(
         self,
         tokens: torch.Tensor,
@@ -297,7 +309,21 @@ class SentenceEncoder(nn.Module):
         # Now process through all the encoder layers (and add each intermediate state if
         # last_state_only is False)
         for layer in self.layers:
-            x, _ = layer(x, self_attn_padding_mask=padding_mask, positions_bias=positions_bias)
+            if self.gradient_checkpointing and self.training and torch.is_grad_enabled():
+
+                def _layer_forward(
+                    layer_input: torch.Tensor, current_layer: nn.Module = layer
+                ) -> torch.Tensor:
+                    output, _ = current_layer(
+                        layer_input,
+                        self_attn_padding_mask=padding_mask,
+                        positions_bias=positions_bias,
+                    )
+                    return output
+
+                x = checkpoint(_layer_forward, x, use_reentrant=False)
+            else:
+                x, _ = layer(x, self_attn_padding_mask=padding_mask, positions_bias=positions_bias)
             if not last_state_only:
                 inner_states.append(x)
 

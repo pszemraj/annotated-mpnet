@@ -1723,6 +1723,12 @@ def cli_main() -> None:
         type=int,
     )
     parser.add_argument(
+        "--gradient-checkpointing",
+        help="Enable activation checkpointing for encoder layers to reduce memory usage.",
+        action="store_true",
+        default=False,
+    )
+    parser.add_argument(
         "--beta1",
         help="The beta_1 of the Adam optimizer. Will default to 0.9",
         default=0.9,

@@ -11,6 +11,7 @@ import torch.nn.functional as F
 from transformers import AutoTokenizer
 
 from annotated_mpnet.scheduler import PolynomialDecayLRScheduler
+from annotated_mpnet.transformer_modules import SentenceEncoder
 from annotated_mpnet.utils import utils
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -72,6 +73,37 @@ class TestPretrainHelpers(unittest.TestCase):
         self.assertIn("lm_head.weight", state_dict)
         self.assertIn("sentence_encoder.embed_tokens.weight", state_dict)
         self.assertIs(model.lm_head.weight, model.sentence_encoder.embed_tokens.weight)
+
+    def test_sentence_encoder_gradient_checkpointing(self) -> None:
+        """Ensure gradient checkpointing path runs without error.
+
+        :return None: This test returns nothing.
+        """
+        model = SentenceEncoder(
+            padding_idx=1,
+            vocab_size=128,
+            num_encoder_layers=2,
+            embedding_dim=32,
+            ffn_embedding_dim=64,
+            num_attention_heads=4,
+            dropout=0.1,
+            attention_dropout=0.1,
+            activation_dropout=0.1,
+            max_seq_len=16,
+            num_segments=0,
+            encoder_normalize_before=True,
+            activation_fn="gelu",
+            normalize_before=False,
+            relative_attention_num_buckets=8,
+            relative_attention_max_distance=16,
+            gradient_checkpointing=True,
+        )
+        model.train()
+        tokens = torch.randint(0, 128, (2, 8))
+        inner_states, sentence_rep = model(tokens)
+        self.assertEqual(inner_states[-1].shape[0], tokens.shape[1])
+        self.assertEqual(inner_states[-1].shape[1], tokens.shape[0])
+        self.assertEqual(sentence_rep.shape[0], tokens.shape[0])
 
     def test_resolve_best_loss_falls_back_to_best_checkpoint(self) -> None:
         """Fallback to best checkpoint best_loss when missing in resume checkpoint.

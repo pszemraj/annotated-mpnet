@@ -206,7 +206,7 @@ class RelativeMultiHeadAttention(nn.Module):
             v = self.in_proj_v(value)
 
         # Get scaled Q before performing energy calculation
-        q *= self.scaling
+        q = q * self.scaling
 
         # If bias has been specified on the K, V matrices, process it here
         if self.bias_k is not None:

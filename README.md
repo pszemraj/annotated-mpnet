@@ -140,6 +140,7 @@ pretrain-mpnet \
 - Training Parameters:
   - `--batch-size`: Per-GPU batch size (default: 16).
   - `--update-freq`: Gradient accumulation steps to simulate larger batch sizes (default: 8). Effective batch size = `batch-size * update-freq * num_gpus`.
+  - `--gradient-checkpointing`: Enable activation checkpointing to reduce memory usage (adds recompute).
   - `--lr`: Peak learning rate (default: 6e-4).
   - `--warmup-updates`: Number of steps for LR warmup (default: 10% of `total-updates`).
   - `--total-updates`: Total number of training updates (default: 10000).

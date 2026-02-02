@@ -63,8 +63,6 @@ class MPNetForPretraining(nn.Module):
         vocab_size = getattr(args, "padded_vocab_size", tokenizer.vocab_size)
 
         # Let's define the encoder here
-        # NOTE: Activation/gradient checkpointing is not enabled here; wrap encoder blocks in
-        # torch.utils.checkpoint from the training loop if you need it.
         self.args = args
         self.sentence_encoder = SentenceEncoder(
             padding_idx=tokenizer.vocab[tokenizer.pad_token],
@@ -83,6 +81,7 @@ class MPNetForPretraining(nn.Module):
             normalize_before=args.normalize_before,
             relative_attention_num_buckets=args.relative_attention_num_buckets,
             relative_attention_max_distance=args.relative_attention_max_distance,
+            gradient_checkpointing=getattr(args, "gradient_checkpointing", False),
         )
 
         # Add the language modeling head
