@@ -145,10 +145,6 @@ def _resolve_best_loss(
     :param pathlib.Path resume_checkpoint_path: Resume checkpoint path, defaults to None.
     :return float: Best loss value.
     """
-    best_loss = _get_initial_best_loss(checkpoint)
-    if checkpoint is not None and "best_loss" in checkpoint:
-        return best_loss
-
     best_checkpoint_root = checkpoint_dir
     if resume_checkpoint_path is not None:
         resume_root = resume_checkpoint_path.parent
@@ -166,7 +162,41 @@ def _resolve_best_loss(
         except (OSError, RuntimeError, ValueError) as exc:
             LOGGER.warning(f"Could not load best checkpoint for best_loss: {exc}")
 
-    return best_loss
+    return _get_initial_best_loss(checkpoint)
+
+
+def _should_save_checkpoint(steps: int, checkpoint_interval: int) -> bool:
+    """Return whether a checkpoint should be saved at the current step.
+
+    :param int steps: Number of completed update steps.
+    :param int checkpoint_interval: Interval for checkpointing.
+    :return bool: True if a checkpoint should be written.
+    """
+    return checkpoint_interval > 0 and steps > 0 and steps % checkpoint_interval == 0
+
+
+def _should_skip_resume_batch(
+    train_streaming: bool,
+    resume_epoch: int | None,
+    current_epoch: int,
+    batch_index: int,
+    resume_epoch_batches: int,
+) -> bool:
+    """Return whether to skip a batch when resuming file-based training.
+
+    :param bool train_streaming: Whether streaming datasets are in use.
+    :param int | None resume_epoch: Epoch to resume within, or None.
+    :param int current_epoch: Current epoch index.
+    :param int batch_index: Current batch index (0-based).
+    :param int resume_epoch_batches: Number of already-processed batches in resume epoch.
+    :return bool: True if the batch should be skipped.
+    """
+    return (
+        not train_streaming
+        and resume_epoch is not None
+        and current_epoch == resume_epoch
+        and batch_index < resume_epoch_batches
+    )
 
 
 def _warn_if_max_positions_mismatch(args: Namespace) -> None:
@@ -484,6 +514,10 @@ def main(args: Namespace) -> None:
 
     arch_source = _select_architecture_source(args)
     resume_checkpoint_path: pathlib.Path | None = None
+    resume_checkpoint: dict | None = None
+    resume_samples_processed = 0
+    resume_epoch_batches = 0
+    resume_epoch_complete = False
 
     if arch_source == "resume":
         # Load checkpoint to get architecture before creating model
@@ -496,6 +530,10 @@ def main(args: Namespace) -> None:
             resume_checkpoint = torch.load(
                 resume_checkpoint_path, map_location="cpu", weights_only=False
             )
+
+        resume_samples_processed = int(resume_checkpoint.get("samples_processed", 0) or 0)
+        resume_epoch_batches = int(resume_checkpoint.get("epoch_batches_processed", 0) or 0)
+        resume_epoch_complete = bool(resume_checkpoint.get("epoch_complete", False))
 
         # Restore architecture args from checkpoint
         if "args" in resume_checkpoint:
@@ -643,8 +681,18 @@ def main(args: Namespace) -> None:
                 collate_fn=mplm,
             )
 
-            # Skip validation and test samples in the training stream
-            train_stream = train_stream.skip(args.eval_samples * 2)
+            # Skip validation/test samples plus any already-processed training samples on resume.
+            stream_skip_samples = args.eval_samples * 2
+            if resume_samples_processed > 0:
+                stream_skip_samples += resume_samples_processed
+                LOGGER.info(
+                    "Resuming streaming dataset: skipping "
+                    f"{stream_skip_samples} samples "
+                    f"({args.eval_samples * 2} eval/test + {resume_samples_processed} processed)."
+                )
+            # Note: skip_samples applies per worker in HFStreamingDataset, so resume skips are
+            # best-effort when num_workers > 0.
+            train_stream = train_stream.skip(stream_skip_samples)
             train_streaming = True
 
         except Exception as e:
@@ -702,6 +750,8 @@ def main(args: Namespace) -> None:
     steps = 0
     epoch = 0
     best_loss = DEFAULT_BEST_LOSS  # Will be overridden if resuming from checkpoint
+    samples_processed = 0
+    resume_epoch: int | None = None
 
     # Determine whether to load from HuggingFace model or resume from a checkpoint
     # HuggingFace model loading takes precedence if both are specified
@@ -762,6 +812,8 @@ def main(args: Namespace) -> None:
         # Note: We already loaded the checkpoint above to get architecture
         # Now we just need to extract the other state
         checkpoint = resume_checkpoint
+        if checkpoint is None:
+            raise RuntimeError("Resume requested but no checkpoint was loaded.")
 
         # Extract training state
         if "steps" in checkpoint:
@@ -772,12 +824,31 @@ def main(args: Namespace) -> None:
             epoch = checkpoint["epoch"]
             LOGGER.info(f"Resuming from epoch {epoch}")
 
+        samples_processed = int(checkpoint.get("samples_processed", 0) or 0)
+        resume_epoch_batches = int(checkpoint.get("epoch_batches_processed", 0) or 0)
+        resume_epoch_complete = bool(checkpoint.get("epoch_complete", False))
+        if (
+            not resume_epoch_complete
+            and resume_checkpoint_path is not None
+            and resume_checkpoint_path.name == "best_checkpoint.pt"
+        ):
+            resume_epoch_complete = True
+        resume_epoch = epoch
+        if resume_epoch_complete:
+            LOGGER.info(
+                "Resume checkpoint captured after epoch completion; advancing to next epoch."
+            )
+            epoch += 1
+            resume_epoch = None
+            resume_epoch_batches = 0
+
         best_loss = _resolve_best_loss(checkpoint, checkpoint_dir, resume_checkpoint_path)
         if best_loss != DEFAULT_BEST_LOSS:
             LOGGER.info(f"Best validation loss from checkpoint: {best_loss}")
 
         # Restore RNG state if available
         if "rng_state" in checkpoint:
+            # RNG restoration is best-effort; warn and continue to avoid aborting training.
             try:
                 rng_state = checkpoint["rng_state"]
                 if rng_state.get("torch") is not None:
@@ -833,6 +904,7 @@ def main(args: Namespace) -> None:
             optimizer.load_state_dict(optimizer_state["optimizer"])
 
             # Load scheduler state
+            # Scheduler is stateless; load_state_dict is kept for legacy state dicts/overrides.
             scheduler.load_state_dict(optimizer_state["scheduler"])
 
             LOGGER.info("Optimizer and scheduler states loaded successfully")
@@ -921,6 +993,7 @@ def main(args: Namespace) -> None:
         accumulation_acc = 0  # Count of correct predictions; normalize by predicted tokens later.
         accumulation_input_tokens = 0
         accumulation_pred_tokens = 0
+        epoch_batch_index = 0
 
         # Always reset the meters before beginning the next training epoch (except token throughput)
         for stat in ["train_loss", "train_acc", "valid_loss", "valid_acc"]:
@@ -937,55 +1010,11 @@ def main(args: Namespace) -> None:
             if steps > args.total_updates:
                 break
 
-            # Next check to see if we've hit a step interval and save that to the checkpoint dir
-            if (
-                (steps + 1) % args.checkpoint_interval == 0
-                and args.checkpoint_interval > 0
-                and steps > 0
+            if _should_skip_resume_batch(
+                train_streaming, resume_epoch, epoch, i, resume_epoch_batches
             ):
-                # Create checkpoint object with model state and args
-                checkpoint = {
-                    "args": vars(args),
-                    "model_states": model.state_dict(),
-                    "steps": steps,
-                    "epoch": epoch,
-                    "best_loss": best_loss,
-                    "rng_state": {
-                        "torch": torch.get_rng_state(),
-                        "cuda": (
-                            torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
-                        ),
-                        "numpy": (np.random.get_state() if "numpy.random" in sys.modules else None),
-                    },
-                }
-
-                # Save the checkpoint
-                checkpoint_path = checkpoint_dir / f"checkpoint{steps + 1}.pt"
-                torch.save(checkpoint, checkpoint_path)
-
-                # If optimizer state saving is enabled, save the optimizer state to the optimizer directory
-                if args.save_optimizer_state:
-                    optimizer_state = {
-                        "optimizer": optimizer.state_dict(),
-                        "scheduler": scheduler.state_dict(),
-                        "steps": steps,
-                        "epoch": epoch,
-                    }
-                    optimizer_state_path = (
-                        optimizer_dir / f"{checkpoint_path.stem}_optimizer_state.pt"
-                    )
-                    torch.save(optimizer_state, optimizer_state_path)
-
-                # Save the args & tokenizer if this is the first checkpoint
-                if not initial_outputs_saved:
-                    args_dict = vars(args) if not isinstance(args, dict) else args
-                    args_path = checkpoint_dir / "training_args.json"
-                    with open(args_path, "w") as f:
-                        json.dump(args_dict, f, indent=4)
-
-                    tokenizer_dir = checkpoint_dir / "tokenizer"
-                    tokenizer.save_pretrained(tokenizer_dir)
-                    initial_outputs_saved = True
+                # Resume for file-based training: skip batches already processed in this epoch.
+                continue
 
             # Load the tensors onto the appropriate device
             device_batch = {
@@ -993,6 +1022,8 @@ def main(args: Namespace) -> None:
                 for data_type, t in batch.items()
                 if data_type != "attention_mask"
             }
+            epoch_batch_index = i + 1
+            samples_processed += int(device_batch["input_ids"].shape[0])
 
             # Extract the targets since we'll use them a bunch below
             targets = device_batch["targets"]
@@ -1126,6 +1157,58 @@ def main(args: Namespace) -> None:
                 # Increment the step counter
                 steps += 1
 
+                if _should_save_checkpoint(steps, args.checkpoint_interval):
+                    # Create checkpoint object with model state and args
+                    checkpoint = {
+                        "args": vars(args),
+                        "model_states": model.state_dict(),
+                        "steps": steps,
+                        "epoch": epoch,
+                        "best_loss": best_loss,
+                        "samples_processed": samples_processed,
+                        "epoch_batches_processed": epoch_batch_index,
+                        "epoch_complete": False,
+                        "rng_state": {
+                            "torch": torch.get_rng_state(),
+                            "cuda": (
+                                torch.cuda.get_rng_state_all()
+                                if torch.cuda.is_available()
+                                else None
+                            ),
+                            "numpy": (
+                                np.random.get_state() if "numpy.random" in sys.modules else None
+                            ),
+                        },
+                    }
+
+                    # Save the checkpoint
+                    checkpoint_path = checkpoint_dir / f"checkpoint{steps}.pt"
+                    torch.save(checkpoint, checkpoint_path)
+
+                    # If optimizer state saving is enabled, save the optimizer state to the optimizer directory
+                    if args.save_optimizer_state:
+                        optimizer_state = {
+                            "optimizer": optimizer.state_dict(),
+                            "scheduler": scheduler.state_dict(),
+                            "steps": steps,
+                            "epoch": epoch,
+                        }
+                        optimizer_state_path = (
+                            optimizer_dir / f"{checkpoint_path.stem}_optimizer_state.pt"
+                        )
+                        torch.save(optimizer_state, optimizer_state_path)
+
+                    # Save the args & tokenizer if this is the first checkpoint
+                    if not initial_outputs_saved:
+                        args_dict = vars(args) if not isinstance(args, dict) else args
+                        args_path = checkpoint_dir / "training_args.json"
+                        with open(args_path, "w") as f:
+                            json.dump(args_dict, f, indent=4)
+
+                        tokenizer_dir = checkpoint_dir / "tokenizer"
+                        tokenizer.save_pretrained(tokenizer_dir)
+                        initial_outputs_saved = True
+
         # Set the model for validation
         model.eval()
 
@@ -1184,6 +1267,9 @@ def main(args: Namespace) -> None:
                 "steps": steps,
                 "epoch": epoch,
                 "best_loss": best_loss,
+                "samples_processed": samples_processed,
+                "epoch_batches_processed": epoch_batch_index,
+                "epoch_complete": True,
                 "rng_state": {
                     "torch": torch.get_rng_state(),
                     "cuda": (torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None),

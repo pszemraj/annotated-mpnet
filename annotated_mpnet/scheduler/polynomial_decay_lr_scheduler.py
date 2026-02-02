@@ -2,7 +2,10 @@
 Module containing the polynomial decay LR scheduler with warmup step parameter
 """
 
+import logging
 from typing import Any, Dict, Optional
+
+LOGGER = logging.getLogger(__name__)
 
 
 class PolynomialDecayLRScheduler(object):
@@ -97,29 +100,30 @@ class PolynomialDecayLRScheduler(object):
 
     # A couple helper functions that seem to be required for all LR schedulers below
     def state_dict(self) -> Dict[str, Any]:
-        """Return the optimizer's state dict.
+        """Return scheduler state (stateless scheduler).
 
-        :return Dict[str, Any]: Optimizer state dictionary.
+        :return Dict[str, Any]: Scheduler state dictionary.
         """
-        return self.optimizer.state_dict()
+        return {"stateless": True}
 
     def load_state_dict(
         self,
         state_dict: Dict[str, Any],
         optimizer_overrides: Optional[Dict[str, Any]] = None,
     ) -> None:
-        """Load an optimizer state dict.
+        """Load scheduler state.
 
-        In general we should prefer the configuration of the existing optimizer
-        instance (e.g., learning rate) over that found in the state_dict. This
-        allows us to resume training from a checkpoint using a new set of
-        optimizer args.
+        This scheduler is stateless. We accept legacy optimizer-style state dicts
+        for compatibility but do not re-load optimizer state here since it is
+        loaded separately in the training loop.
 
         :param Dict[str, Any] state_dict: Optimizer state to load.
         :param Dict[str, Any] optimizer_overrides: Overrides for optimizer settings, defaults to None.
         """
-        self.optimizer.load_state_dict(state_dict)
-
+        if "state" in state_dict and "param_groups" in state_dict:
+            LOGGER.debug(
+                "Scheduler load_state_dict received optimizer state; skipping to avoid double-load."
+            )
         if optimizer_overrides is not None and len(optimizer_overrides) > 0:
             # override learning rate, momentum, etc. with latest values
             for group in self.optimizer.param_groups:

@@ -10,6 +10,7 @@ import torch
 import torch.nn.functional as F
 from transformers import AutoTokenizer
 
+from annotated_mpnet.scheduler import PolynomialDecayLRScheduler
 from annotated_mpnet.utils import utils
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -86,6 +87,23 @@ class TestPretrainHelpers(unittest.TestCase):
             best_loss = pretrain_mpnet._resolve_best_loss({"steps": 5}, checkpoint_dir)
 
             self.assertEqual(best_loss, 1.23)
+
+    def test_resolve_best_loss_prefers_best_checkpoint_over_checkpoint(self) -> None:
+        """Prefer best checkpoint best_loss over resume checkpoint value.
+
+        :return None: This test returns nothing.
+        """
+        with TemporaryDirectory() as tmpdir:
+            checkpoint_dir = pathlib.Path(tmpdir)
+            best_checkpoint_path = checkpoint_dir / "best_checkpoint.pt"
+
+            torch.save({"best_loss": 0.3}, best_checkpoint_path)
+
+            best_loss = pretrain_mpnet._resolve_best_loss(
+                {"steps": 5, "best_loss": 0.5}, checkpoint_dir
+            )
+
+            self.assertEqual(best_loss, 0.3)
 
     def test_resolve_best_loss_prefers_resume_checkpoint_dir(self) -> None:
         """Prefer best checkpoint in resume checkpoint directory when external.
@@ -226,6 +244,27 @@ class TestPretrainHelpers(unittest.TestCase):
                 checkpoint_dir, resume_checkpoint
             )
             self.assertEqual(selected, resume_best)
+
+    def test_should_save_checkpoint(self) -> None:
+        """Ensure checkpoint save decision is made at exact step boundaries.
+
+        :return None: This test returns nothing.
+        """
+        self.assertFalse(pretrain_mpnet._should_save_checkpoint(0, 1000))
+        self.assertFalse(pretrain_mpnet._should_save_checkpoint(999, 1000))
+        self.assertTrue(pretrain_mpnet._should_save_checkpoint(1000, 1000))
+        self.assertFalse(pretrain_mpnet._should_save_checkpoint(1000, 0))
+
+    def test_should_skip_resume_batch(self) -> None:
+        """Ensure resume batch skipping only applies to file-based resumes.
+
+        :return None: This test returns nothing.
+        """
+        self.assertFalse(pretrain_mpnet._should_skip_resume_batch(True, 0, 0, 0, 10))
+        self.assertFalse(pretrain_mpnet._should_skip_resume_batch(False, None, 0, 0, 10))
+        self.assertTrue(pretrain_mpnet._should_skip_resume_batch(False, 2, 2, 3, 5))
+        self.assertFalse(pretrain_mpnet._should_skip_resume_batch(False, 2, 3, 0, 5))
+        self.assertFalse(pretrain_mpnet._should_skip_resume_batch(False, 2, 2, 5, 5))
 
     def test_strip_compile_prefix(self) -> None:
         """Ensure compile prefixes are removed from state dict keys.
@@ -374,6 +413,25 @@ class TestPretrainHelpers(unittest.TestCase):
 
         logits_ga.grad.div_(total_tokens_ga)
         self.assertTrue(torch.allclose(grads_full, logits_ga.grad, atol=1e-6, rtol=1e-5))
+
+    def test_scheduler_state_dict_is_stateless(self) -> None:
+        """Ensure scheduler state_dict is stateless and load accepts optimizer dicts.
+
+        :return None: This test returns nothing.
+        """
+        args = Namespace(
+            lr=1e-3,
+            warmup_updates=1,
+            end_learning_rate=0.0,
+            total_updates=10,
+            power=1.0,
+        )
+        param = torch.nn.Parameter(torch.randn(1))
+        optimizer = torch.optim.AdamW([param], lr=args.lr)
+        scheduler = PolynomialDecayLRScheduler(args, optimizer)
+
+        self.assertTrue(scheduler.state_dict().get("stateless", False))
+        scheduler.load_state_dict(optimizer.state_dict())
 
 
 if __name__ == "__main__":
