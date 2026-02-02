@@ -72,6 +72,7 @@ See `setup.py` for a full list of dependencies.
 ### Pretraining MPNet
 
 The primary script for pretraining is `pretrain-mpnet`. You can see all available arguments by running `pretrain-mpnet -h`.
+Training is **step-based** (no user-facing epochs). Datasets are cycled and reshuffled internally as needed, and training runs for `--total-updates` steps.
 
 **1. Using a Hugging Face Dataset (Streaming):**
 This method streams data directly from the Hugging Face Hub. Validation and test sets are created by taking initial samples from the training stream.
@@ -94,7 +95,8 @@ pretrain-mpnet \
     --checkpoint-dir "./checkpoints/my_mpnet_run" \
     --tensorboard-log-dir "./logs/my_mpnet_run" \
     --wandb --wandb-project "annotated-mpnet-experiments" \
-    --save_steps 2500
+    --checkpoint-interval 2500 \
+    --eval-interval-steps 2500
 ```
 
 Key arguments for streaming:
@@ -122,7 +124,8 @@ pretrain-mpnet \
     --total-updates 100000 \
     --checkpoint-dir "./checkpoints/my_local_mpnet_run" \
     --tensorboard-log-dir "./logs/my_local_mpnet_run" \
-    --save_steps 2500
+    --checkpoint-interval 2500 \
+    --eval-interval-steps 2500
 ```
 
 **Key Pretraining Arguments (Common to both methods):**
@@ -143,13 +146,46 @@ pretrain-mpnet \
 - Logging and Saving:
   - `--checkpoint-dir`: Directory to save model checkpoints (default: `./checkpoints`).
   - `--tensorboard-log-dir`: Directory for TensorBoard logs. If unset, logs to console.
-  - `--save_steps`: Save a checkpoint every N steps (default: -1, only best and final).
+  - `--checkpoint-interval`: Save a checkpoint every N steps (default: -1, only best and final). Alias: `--save_steps`.
+  - `--eval-interval-steps`: Run validation every N steps (default: `--checkpoint-interval` if set, otherwise `--total-updates`).
   - `--wandb`: Enable Weights & Biases logging.
   - `--wandb-project`, `--wandb-name`: W\&B project and run name.
 - `--compile`: Use `torch.compile()` for the model (experimental, default: False).
 - `--seed`: Random seed for reproducibility (default: 12345).
 
 The script validates the tokenizer. For optimal performance with the default `whole_word_mask=True` in the data collator, a WordPiece-compatible tokenizer is expected.
+
+### Resuming Training
+
+Resuming is supported **only for checkpoints created by v0.1.5+** (they include `data_state` for step-based training). Legacy checkpoints from earlier versions are **not** resumable; they can only be used to initialize weights, and all optimizer/scheduler/step state will be reset.
+
+To enable full resume, save optimizer state during training:
+
+```bash
+pretrain-mpnet \
+    --dataset-name "gair-prox/DCLM-pro" \
+    --tokenizer-name "microsoft/mpnet-base" \
+    --total-updates 200000 \
+    --checkpoint-dir "./checkpoints/my_mpnet_run" \
+    --checkpoint-interval 2500 \
+    --save-optimizer-state
+```
+
+Then resume:
+
+```bash
+pretrain-mpnet \
+    --dataset-name "gair-prox/DCLM-pro" \
+    --tokenizer-name "microsoft/mpnet-base" \
+    --total-updates 200000 \
+    --checkpoint-dir "./checkpoints/my_mpnet_run" \
+    --resume \
+    --resume-checkpoint "./checkpoints/my_mpnet_run/checkpoint2500.pt"
+```
+
+Notes:
+- If you pass `--resume` with a legacy checkpoint (pre-v0.1.5), the script will **only load weights** and start fresh from step 0.
+- To initialize from a legacy checkpoint, you can also convert it to Hugging Face format and pass `--hf-model-path`.
 
 ### Porting Checkpoint to Hugging Face
 
