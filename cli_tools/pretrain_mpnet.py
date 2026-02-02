@@ -165,6 +165,35 @@ def _resolve_best_loss(
     return _get_initial_best_loss(checkpoint)
 
 
+def _get_resume_metadata(
+    checkpoint: dict, resume_checkpoint_path: pathlib.Path | None
+) -> tuple[int, int, bool]:
+    """Return resume metadata with legacy checkpoint fallback.
+
+    :param dict checkpoint: Loaded checkpoint data.
+    :param pathlib.Path resume_checkpoint_path: Checkpoint path, defaults to None.
+    :return tuple[int, int, bool]: samples_processed, epoch_batches_processed, epoch_complete.
+    """
+    missing_fields = [
+        field
+        for field in ("samples_processed", "epoch_batches_processed", "epoch_complete")
+        if field not in checkpoint
+    ]
+    if missing_fields:
+        label = str(resume_checkpoint_path) if resume_checkpoint_path is not None else "checkpoint"
+        LOGGER.warning(
+            "Legacy checkpoint format detected for %s (missing %s). "
+            "Legacy resume support will be removed in a future release.",
+            label,
+            ", ".join(missing_fields),
+        )
+    return (
+        int(checkpoint.get("samples_processed", 0) or 0),
+        int(checkpoint.get("epoch_batches_processed", 0) or 0),
+        bool(checkpoint.get("epoch_complete", False)),
+    )
+
+
 def _should_save_checkpoint(steps: int, checkpoint_interval: int) -> bool:
     """Return whether a checkpoint should be saved at the current step.
 
@@ -531,9 +560,11 @@ def main(args: Namespace) -> None:
                 resume_checkpoint_path, map_location="cpu", weights_only=False
             )
 
-        resume_samples_processed = int(resume_checkpoint.get("samples_processed", 0) or 0)
-        resume_epoch_batches = int(resume_checkpoint.get("epoch_batches_processed", 0) or 0)
-        resume_epoch_complete = bool(resume_checkpoint.get("epoch_complete", False))
+        (
+            resume_samples_processed,
+            resume_epoch_batches,
+            resume_epoch_complete,
+        ) = _get_resume_metadata(resume_checkpoint, resume_checkpoint_path)
 
         # Restore architecture args from checkpoint
         if "args" in resume_checkpoint:
@@ -824,9 +855,7 @@ def main(args: Namespace) -> None:
             epoch = checkpoint["epoch"]
             LOGGER.info(f"Resuming from epoch {epoch}")
 
-        samples_processed = int(checkpoint.get("samples_processed", 0) or 0)
-        resume_epoch_batches = int(checkpoint.get("epoch_batches_processed", 0) or 0)
-        resume_epoch_complete = bool(checkpoint.get("epoch_complete", False))
+        samples_processed = resume_samples_processed
         if (
             not resume_epoch_complete
             and resume_checkpoint_path is not None

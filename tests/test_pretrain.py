@@ -105,6 +105,19 @@ class TestPretrainHelpers(unittest.TestCase):
 
             self.assertEqual(best_loss, 0.3)
 
+    def test_get_resume_metadata_defaults_for_legacy(self) -> None:
+        """Ensure legacy checkpoints default missing resume metadata.
+
+        :return None: This test returns nothing.
+        """
+        checkpoint = {"steps": 1, "epoch": 0}
+        samples_processed, epoch_batches, epoch_complete = pretrain_mpnet._get_resume_metadata(
+            checkpoint, None
+        )
+        self.assertEqual(samples_processed, 0)
+        self.assertEqual(epoch_batches, 0)
+        self.assertFalse(epoch_complete)
+
     def test_resolve_best_loss_prefers_resume_checkpoint_dir(self) -> None:
         """Prefer best checkpoint in resume checkpoint directory when external.
 
