@@ -143,7 +143,9 @@ class MPNetForPretraining(nn.Module):
         sz = c.size(0) - pred_size
 
         # Get the query and content masks using the helper function below
-        query_mask, content_mask = make_query_and_content_mask(input_ids, sz, pred_size)
+        query_mask, content_mask = make_query_and_content_mask(
+            input_ids, sz, pred_size, self.sentence_encoder.padding_idx
+        )
 
         # Do the attention calculations
         for i, layer in enumerate(self.sentence_encoder.layers):
@@ -474,10 +476,17 @@ def two_stream_self_attention(
         """Apply attention mask to attention weights.
 
         :param torch.Tensor attn_weights: Attention weights tensor.
-        :param torch.Tensor attn_mask: Mask tensor.
+        :param torch.Tensor attn_mask: Mask tensor (tgt x src or bsz x tgt x src).
         :return torch.Tensor: Masked attention weights.
         """
-        return attn_weights.masked_fill(attn_mask.unsqueeze(0), float("-inf"))
+        if attn_mask.dim() == 2:
+            mask = attn_mask.unsqueeze(0)
+        else:
+            mask = attn_mask.unsqueeze(1).expand(
+                bsz, self.num_heads, attn_mask.size(1), attn_mask.size(2)
+            )
+            mask = mask.reshape(bsz * self.num_heads, attn_mask.size(1), attn_mask.size(2))
+        return attn_weights.masked_fill(mask, float("-inf"))
 
     def attn_fn(
         _q: torch.Tensor,
@@ -536,13 +545,14 @@ def two_stream_self_attention(
 
 
 def make_query_and_content_mask(
-    input_ids: torch.Tensor, seq_len: int, pred_size: int
+    input_ids: torch.Tensor, seq_len: int, pred_size: int, pad_token_id: Optional[int] = None
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Create content and query masks for MPNet two-stream attention.
 
     :param torch.Tensor input_ids: Input IDs for device placement.
     :param int seq_len: Sequence length of the input.
     :param int pred_size: Size of the predicted subsequence.
+    :param int pad_token_id: Optional padding token ID for per-batch key masking.
     :return Tuple[torch.Tensor, torch.Tensor]: Query and content attention masks.
 
     It looks like the below with comparisons to how it's different than XLNet-style PLM:
@@ -570,10 +580,8 @@ def make_query_and_content_mask(
     matrix-based and constructs masks based on the provided seq_len and pred_size.
     There's no need to modify this function when changing context length.
 
-    Padding note: This mask encodes MPNet's two-stream structure and does not apply per-sample
-    padding masks. We rely on pretraining data being mostly full-length blocks and on padding
-    tokens being ignored in the loss; if you need strict pad masking, extend this mask with a
-    per-batch padding mask.
+    Padding note: When ``pad_token_id`` is provided, key padding is incorporated into the masks
+    on a per-batch basis.
     """
 
     # Define helper function to keep things organized
@@ -605,4 +613,25 @@ def make_query_and_content_mask(
 
         return torch.cat(mask, dim=-1).eq(0)
 
-    return make_query_mask().to(input_ids.device), make_content_mask().to(input_ids.device)
+    query_mask = make_query_mask().to(input_ids.device)
+    content_mask = make_content_mask().to(input_ids.device)
+
+    if pad_token_id is None:
+        return query_mask, content_mask
+
+    key_len = seq_len + pred_size
+    key_padding_mask = input_ids[:, :key_len].eq(pad_token_id)
+    if not key_padding_mask.any():
+        return query_mask, content_mask
+
+    bsz = input_ids.size(0)
+    key_padding_mask = key_padding_mask.to(input_ids.device)
+
+    def _combine_mask(base_mask: torch.Tensor) -> torch.Tensor:
+        expanded_mask = base_mask.unsqueeze(0).expand(bsz, base_mask.size(0), base_mask.size(1))
+        expanded_padding = key_padding_mask.unsqueeze(1).expand(
+            bsz, base_mask.size(0), base_mask.size(1)
+        )
+        return expanded_mask | expanded_padding
+
+    return _combine_mask(query_mask), _combine_mask(content_mask)

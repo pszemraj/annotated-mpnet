@@ -141,6 +141,7 @@ pretrain-mpnet \
   - `--batch-size`: Per-GPU batch size (default: 16).
   - `--update-freq`: Gradient accumulation steps to simulate larger batch sizes (default: 8). Effective batch size = `batch-size * update-freq * num_gpus`.
   - `--gradient-checkpointing`: Enable activation checkpointing to reduce memory usage (adds recompute).
+  - Mixed precision: CUDA runs use bf16 autocast by default. FP16 is not wired and would require adding GradScaler support.
   - `--lr`: Peak learning rate (default: 6e-4).
   - `--warmup-updates`: Number of steps for LR warmup (default: 10% of `total-updates`).
   - `--total-updates`: Total number of training updates (default: 10000).
@@ -187,6 +188,7 @@ pretrain-mpnet \
 Notes:
 - If you pass `--resume` with a legacy checkpoint (pre-v0.1.5), the script will **only load weights** and start fresh from step 0.
 - To initialize from a legacy checkpoint, you can also convert it to Hugging Face format and pass `--hf-model-path`.
+- Checkpoints are loaded with safe `weights_only` by default. Use `--trust-checkpoint` to load legacy or external `.pt` files.
 
 ### Porting Checkpoint to Hugging Face
 

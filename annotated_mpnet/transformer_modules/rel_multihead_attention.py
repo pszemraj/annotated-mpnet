@@ -278,10 +278,56 @@ class RelativeMultiHeadAttention(nn.Module):
                     dim=1,
                 )
 
+        use_sdpa = (
+            hasattr(F, "scaled_dot_product_attention")
+            and not need_weights
+            and not self.onnx_trace
+            and k is not None
+            and v is not None
+        )
+        if use_sdpa:
+            attn_bias = None
+            if attn_mask is not None:
+                if attn_mask.dtype == torch.bool:
+                    attn_bias = torch.zeros(
+                        attn_mask.shape, device=q.device, dtype=q.dtype
+                    ).masked_fill(attn_mask, float("-inf"))
+                else:
+                    attn_bias = attn_mask.to(device=q.device, dtype=q.dtype)
+                if attn_bias.dim() == 2:
+                    attn_bias = attn_bias.unsqueeze(0)
+                if attn_bias.size(0) == 1 and q.size(0) != 1:
+                    attn_bias = attn_bias.expand(q.size(0), -1, -1)
+
+            if key_padding_mask is not None:
+                key_mask = key_padding_mask.to(torch.bool)
+                key_mask = key_mask.unsqueeze(1).unsqueeze(2)
+                key_mask = key_mask.expand(bsz, self.num_heads, tgt_len, src_len).reshape(
+                    bsz * self.num_heads, tgt_len, src_len
+                )
+                key_bias = torch.zeros(key_mask.shape, device=q.device, dtype=q.dtype).masked_fill(
+                    key_mask, float("-inf")
+                )
+                attn_bias = key_bias if attn_bias is None else attn_bias + key_bias
+
+            if positions_bias is not None:
+                pos_bias = positions_bias.to(device=q.device, dtype=q.dtype)
+                attn_bias = pos_bias if attn_bias is None else attn_bias + pos_bias
+
+            attn = F.scaled_dot_product_attention(
+                q,
+                k,
+                v,
+                attn_mask=attn_bias,
+                dropout_p=self.dropout if self.training else 0.0,
+            )
+            assert list(attn.size()) == [bsz * self.num_heads, tgt_len, self.head_dim]
+            attn = attn.transpose(0, 1).contiguous().view(tgt_len, bsz, embed_dim)
+            attn = self.out_proj(attn)
+            return attn, None
+
         # Extract the attention weights, i.e., do the energy calculation (QK) before inputting to
-        # softmax below
-        # NOTE: Explicit bmm keeps relative position bias support; SDPA/FlashAttention would need
-        # a refactor to inject the bias efficiently.
+        # softmax below.
         attn_weights = torch.bmm(q, k.transpose(1, 2))
         attn_weights = self.apply_sparse_mask(attn_weights, tgt_len, src_len, bsz)
 
@@ -290,6 +336,12 @@ class RelativeMultiHeadAttention(nn.Module):
 
         # Factor in the attention mask now
         if attn_mask is not None:
+            if attn_mask.dtype == torch.bool:
+                attn_mask = torch.zeros(
+                    attn_mask.shape, device=attn_weights.device, dtype=attn_weights.dtype
+                ).masked_fill(attn_mask, float("-inf"))
+            else:
+                attn_mask = attn_mask.to(device=attn_weights.device, dtype=attn_weights.dtype)
             attn_mask = attn_mask.unsqueeze(0)
             if self.onnx_trace:
                 attn_mask = attn_mask.repeat(attn_weights.size(0), 1, 1)

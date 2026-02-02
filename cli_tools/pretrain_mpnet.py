@@ -27,7 +27,6 @@ import torch.nn.functional as F
 import wandb
 from datasets import load_dataset
 from rich.progress import track
-from torch.serialization import safe_globals
 from torch.utils.tensorboard import SummaryWriter
 from transformers import AutoTokenizer
 
@@ -133,16 +132,85 @@ def _coerce_rng_state(rng_state: Any) -> torch.ByteTensor:
     return torch.as_tensor(rng_state, dtype=torch.uint8)
 
 
+def _serialize_numpy_rng_state(rng_state: Any) -> Any:
+    """Serialize numpy RNG state into builtin types for safe checkpoint loading.
+
+    :param Any rng_state: Numpy RNG state payload.
+    :return Any: Serialized RNG state payload.
+    """
+    if rng_state is None:
+        return None
+    if isinstance(rng_state, tuple) and len(rng_state) == 5:
+        algo, state, pos, has_gauss, cached_gaussian = rng_state
+        if isinstance(state, np.ndarray):
+            return {
+                "algorithm": algo,
+                "state": state.tolist(),
+                "pos": int(pos),
+                "has_gauss": int(has_gauss),
+                "cached_gaussian": float(cached_gaussian),
+            }
+    return rng_state
+
+
+def _deserialize_numpy_rng_state(rng_state: Any) -> Any:
+    """Deserialize numpy RNG state from builtin types.
+
+    :param Any rng_state: Serialized RNG state payload.
+    :return Any: Numpy RNG state tuple or original payload.
+    """
+    if rng_state is None:
+        return None
+    if isinstance(rng_state, dict) and "state" in rng_state:
+        return (
+            rng_state["algorithm"],
+            np.array(rng_state["state"], dtype=np.uint32),
+            rng_state["pos"],
+            rng_state["has_gauss"],
+            rng_state["cached_gaussian"],
+        )
+    return rng_state
+
+
+def _safe_torch_load(
+    path: pathlib.Path, map_location: str | torch.device, trust_checkpoint: bool
+) -> dict:
+    """Load a checkpoint with weights_only by default, optionally allowing unsafe fallback.
+
+    :param pathlib.Path path: Path to the checkpoint file.
+    :param str | torch.device map_location: Map location for loading tensors.
+    :param bool trust_checkpoint: Whether to allow unsafe loading fallback.
+    :return dict: Loaded checkpoint payload.
+    """
+    try:
+        return torch.load(path, map_location=map_location, weights_only=True)
+    except Exception as exc:
+        if trust_checkpoint:
+            LOGGER.warning(
+                "Falling back to unsafe torch.load for %s because --trust-checkpoint was set: %s",
+                path,
+                exc,
+            )
+            return torch.load(path, map_location=map_location, weights_only=False)
+        raise RuntimeError(
+            f"Failed to load checkpoint {path} with safe weights_only loading. "
+            "Re-export the checkpoint with this version or pass --trust-checkpoint to allow "
+            "unsafe loading."
+        ) from exc
+
+
 def _resolve_best_loss(
     checkpoint: dict | None,
     checkpoint_dir: pathlib.Path,
     resume_checkpoint_path: pathlib.Path | None = None,
+    trust_checkpoint: bool = False,
 ) -> float:
     """Resolve the best loss from a checkpoint or the best checkpoint file.
 
     :param dict checkpoint: Loaded checkpoint or None.
     :param pathlib.Path checkpoint_dir: Directory containing checkpoints.
     :param pathlib.Path resume_checkpoint_path: Resume checkpoint path, defaults to None.
+    :param bool trust_checkpoint: Whether to allow unsafe checkpoint loading, defaults to False.
     :return float: Best loss value.
     """
     best_checkpoint_root = checkpoint_dir
@@ -154,11 +222,9 @@ def _resolve_best_loss(
     best_checkpoint_path = best_checkpoint_root / "best_checkpoint.pt"
     if best_checkpoint_path.exists():
         try:
-            with safe_globals([Namespace, np.ndarray, np.dtype, np._core.multiarray._reconstruct]):
-                # NOTE: weights_only=False is required to load args; only load trusted checkpoints.
-                best_checkpoint = torch.load(
-                    best_checkpoint_path, map_location="cpu", weights_only=False
-                )
+            best_checkpoint = _safe_torch_load(
+                best_checkpoint_path, map_location="cpu", trust_checkpoint=trust_checkpoint
+            )
             return _get_initial_best_loss(best_checkpoint)
         except (OSError, RuntimeError, ValueError) as exc:
             LOGGER.warning(f"Could not load best checkpoint for best_loss: {exc}")
@@ -420,7 +486,7 @@ def _get_autocast_context(device: torch.device) -> contextlib.AbstractContextMan
     :param torch.device device: Device used for training/inference.
     :return contextlib.AbstractContextManager[None]: Autocast context manager.
     """
-    # BF16 is the default mixed-precision path; GradScaler is unnecessary for BF16.
+    # BF16 is the default mixed-precision path on CUDA; GradScaler is unnecessary for BF16.
     # If you switch to FP16, add a GradScaler and unscale before clipping.
     if device.type == "cuda":
         return torch.autocast(device_type="cuda", dtype=torch.bfloat16)
@@ -576,11 +642,11 @@ def main(args: Namespace) -> None:
         )
 
         LOGGER.info(f"Loading architecture from checkpoint: {resume_checkpoint_path}")
-        with safe_globals([Namespace, np.ndarray, np.dtype, np._core.multiarray._reconstruct]):
-            # NOTE: weights_only=False is required to load args; only load trusted checkpoints.
-            resume_checkpoint = torch.load(
-                resume_checkpoint_path, map_location="cpu", weights_only=False
-            )
+        resume_checkpoint = _safe_torch_load(
+            resume_checkpoint_path,
+            map_location="cpu",
+            trust_checkpoint=args.trust_checkpoint,
+        )
 
         resume_samples_processed, resume_data_state = _get_resume_metadata(
             resume_checkpoint, resume_checkpoint_path
@@ -846,10 +912,11 @@ def main(args: Namespace) -> None:
             if not temp_checkpoint_path.exists():
                 raise FileNotFoundError(f"Converted checkpoint not found at {temp_checkpoint_path}")
 
-            with safe_globals([Namespace, np.ndarray, np.dtype, np._core.multiarray._reconstruct]):
-                checkpoint = torch.load(
-                    temp_checkpoint_path, map_location=device, weights_only=False
-                )
+            checkpoint = _safe_torch_load(
+                temp_checkpoint_path,
+                map_location=device,
+                trust_checkpoint=args.trust_checkpoint,
+            )
 
             # Extract model states
             model_states = _strip_compile_prefix(checkpoint["model_states"])
@@ -903,7 +970,12 @@ def main(args: Namespace) -> None:
 
             samples_processed = resume_samples_processed
 
-            best_loss = _resolve_best_loss(checkpoint, checkpoint_dir, resume_checkpoint_path)
+            best_loss = _resolve_best_loss(
+                checkpoint,
+                checkpoint_dir,
+                resume_checkpoint_path,
+                trust_checkpoint=args.trust_checkpoint,
+            )
             if best_loss != DEFAULT_BEST_LOSS:
                 LOGGER.info(f"Best validation loss from checkpoint: {best_loss}")
 
@@ -930,7 +1002,7 @@ def main(args: Namespace) -> None:
                         LOGGER.info("Restored CUDA RNG state")
 
                     if "numpy.random" in sys.modules and rng_state.get("numpy") is not None:
-                        np.random.set_state(rng_state["numpy"])
+                        np.random.set_state(_deserialize_numpy_rng_state(rng_state["numpy"]))
                         LOGGER.info("Restored numpy RNG state")
                 except (TypeError, ValueError, AttributeError) as e:
                     LOGGER.warning(f"Could not restore RNG state: {e}")
@@ -959,12 +1031,11 @@ def main(args: Namespace) -> None:
             )
             if optimizer_state_path.exists():
                 LOGGER.info(f"Loading optimizer state from {optimizer_state_path}")
-                with safe_globals(
-                    [Namespace, np.ndarray, np.dtype, np._core.multiarray._reconstruct]
-                ):
-                    optimizer_state = torch.load(
-                        optimizer_state_path, map_location=device, weights_only=False
-                    )
+                optimizer_state = _safe_torch_load(
+                    optimizer_state_path,
+                    map_location=device,
+                    trust_checkpoint=args.trust_checkpoint,
+                )
 
                 # Load optimizer state
                 optimizer.load_state_dict(optimizer_state["optimizer"])
@@ -1284,7 +1355,9 @@ def main(args: Namespace) -> None:
                         "cuda": (
                             torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
                         ),
-                        "numpy": (np.random.get_state() if "numpy.random" in sys.modules else None),
+                        "numpy": _serialize_numpy_rng_state(
+                            np.random.get_state() if "numpy.random" in sys.modules else None
+                        ),
                     },
                 }
 
@@ -1334,7 +1407,7 @@ def main(args: Namespace) -> None:
                                 if torch.cuda.is_available()
                                 else None
                             ),
-                            "numpy": (
+                            "numpy": _serialize_numpy_rng_state(
                                 np.random.get_state() if "numpy.random" in sys.modules else None
                             ),
                         },
@@ -1395,7 +1468,9 @@ def main(args: Namespace) -> None:
                 "rng_state": {
                     "torch": torch.get_rng_state(),
                     "cuda": (torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None),
-                    "numpy": (np.random.get_state() if "numpy.random" in sys.modules else None),
+                    "numpy": _serialize_numpy_rng_state(
+                        np.random.get_state() if "numpy.random" in sys.modules else None
+                    ),
                 },
             }
             best_checkpoint_path = checkpoint_dir / "best_checkpoint.pt"
@@ -1428,11 +1503,11 @@ def main(args: Namespace) -> None:
     # use the test dataloader we built above to get a final test metric using the best checkpoint
 
     # Begin by loading the model states and args from the best checkpoint
-    with safe_globals([Namespace, np.ndarray, np.dtype, np._core.multiarray._reconstruct]):
-        # Prefer local best checkpoint; fall back to resume root if none was written.
-        best_checkpoint_path = _select_best_checkpoint_path(checkpoint_dir, resume_checkpoint_path)
-        # NOTE: weights_only=False is required to load args; only load trusted checkpoints.
-        dicts = torch.load(best_checkpoint_path, weights_only=False)
+    # Prefer local best checkpoint; fall back to resume root if none was written.
+    best_checkpoint_path = _select_best_checkpoint_path(checkpoint_dir, resume_checkpoint_path)
+    dicts = _safe_torch_load(
+        best_checkpoint_path, map_location="cpu", trust_checkpoint=args.trust_checkpoint
+    )
 
     # Handle args that might be dict or Namespace
     loaded_args = dicts["args"]
@@ -1838,6 +1913,12 @@ def cli_main() -> None:
         "Legacy checkpoints will only initialize weights.",
         type=str,
         default=None,
+    )
+    parser.add_argument(
+        "--trust-checkpoint",
+        help="Allow unsafe checkpoint loading for legacy or external .pt files.",
+        action="store_true",
+        default=False,
     )
     parser.add_argument(
         "--hf-model-path",
