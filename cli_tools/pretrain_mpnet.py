@@ -42,6 +42,7 @@ from annotated_mpnet.scheduler import PolynomialDecayLRScheduler
 from annotated_mpnet.tracking import AverageMeter
 from annotated_mpnet.utils.utils import (
     SUPPORTED_ACTIVATIONS,
+    hf_max_positions_to_internal,
     model_summary,
     validate_tokenizer,
 )
@@ -501,8 +502,8 @@ def main(args: Namespace) -> None:
         args.attention_dropout = hf_config.attention_probs_dropout_prob
         args.activation_dropout = hf_config.hidden_dropout_prob
         args.activation_fn = hf_config.hidden_act
-        # Set max_positions from HF config (already includes special tokens)
-        args.max_positions = hf_config.max_position_embeddings
+        # HF config includes special tokens; internal max_positions excludes them.
+        args.max_positions = hf_max_positions_to_internal(hf_config.max_position_embeddings)
         if args.max_tokens > args.max_positions:
             LOGGER.warning(
                 "max_tokens exceeds HuggingFace max_position_embeddings; clamping max_tokens to "

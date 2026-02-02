@@ -26,6 +26,15 @@ SUPPORTED_ACTIVATIONS = [
 ]
 
 
+def hf_max_positions_to_internal(max_position_embeddings: int) -> int:
+    """Convert HF max_position_embeddings to internal max_positions.
+
+    :param int max_position_embeddings: HF config max_position_embeddings (includes CLS/SEP).
+    :return int: Internal max_positions (excludes CLS/SEP).
+    """
+    return max(max_position_embeddings - 2, 1)
+
+
 def _get_full_incremental_state_key(module_instance: nn.Module, key: str) -> str:
     """Build a unique incremental state key for a module instance.
 

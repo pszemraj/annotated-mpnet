@@ -9,6 +9,8 @@ from tempfile import TemporaryDirectory
 import torch
 import torch.nn.functional as F
 
+from annotated_mpnet.utils import utils
+
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -32,6 +34,14 @@ class TestPretrainHelpers(unittest.TestCase):
             pretrain_mpnet._get_initial_best_loss({"steps": 5}),
             pretrain_mpnet.DEFAULT_BEST_LOSS,
         )
+
+    def test_hf_max_positions_to_internal(self) -> None:
+        """Ensure HF max positions convert to internal max_positions.
+
+        :return None: This test returns nothing.
+        """
+        self.assertEqual(utils.hf_max_positions_to_internal(514), 512)
+        self.assertEqual(utils.hf_max_positions_to_internal(2), 1)
 
     def test_resolve_best_loss_falls_back_to_best_checkpoint(self) -> None:
         """Fallback to best checkpoint best_loss when missing in resume checkpoint.
