@@ -8,6 +8,7 @@ from typing import List, Optional, Tuple
 from rich.logging import RichHandler
 
 LOG_FORMAT = "%(message)s"
+# NOTE: basicConfig is a no-op if logging is already configured by the host app.
 logging.basicConfig(level="INFO", format=LOG_FORMAT, datefmt="[%X] ", handlers=[RichHandler()])
 LOGGER = logging.getLogger(__name__)
 
@@ -330,8 +331,9 @@ class SentenceEncoder(nn.Module):
 
         # Get the batch size, q and k len
         bsz, qlen, klen = x.size(1), x.size(0), x.size(0)
-        context_position = torch.arange(qlen, dtype=torch.long)[:, None]
-        memory_position = torch.arange(klen, dtype=torch.long)[None, :]
+        device = x.device
+        context_position = torch.arange(qlen, dtype=torch.long, device=device)[:, None]
+        memory_position = torch.arange(klen, dtype=torch.long, device=device)[None, :]
 
         relative_position = memory_position - context_position
 

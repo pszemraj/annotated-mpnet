@@ -1,4 +1,7 @@
-"""Smoke tests for the pretraining CLI."""
+"""Smoke tests for the pretraining CLI.
+
+These are intentionally lightweight coverage tests, not exhaustive correctness checks.
+"""
 
 import pathlib
 import sys

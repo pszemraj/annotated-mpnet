@@ -9,8 +9,11 @@ from typing import Any, Optional, Sequence, Tuple, Union
 from rich.logging import RichHandler
 
 LOG_FORMAT = "%(message)s"
+# NOTE: basicConfig is a no-op if logging is already configured by the host app.
 logging.basicConfig(level="INFO", format=LOG_FORMAT, datefmt="[%X] ", handlers=[RichHandler()])
 LOGGER = logging.getLogger(__name__)
+
+POSITION_OFFSET = 2  # Account for CLS/SEP positions in learned positional embeddings.
 
 
 import torch
@@ -60,6 +63,8 @@ class MPNetForPretraining(nn.Module):
         vocab_size = getattr(args, "padded_vocab_size", tokenizer.vocab_size)
 
         # Let's define the encoder here
+        # NOTE: Activation/gradient checkpointing is not enabled here; wrap encoder blocks in
+        # torch.utils.checkpoint from the training loop if you need it.
         self.args = args
         self.sentence_encoder = SentenceEncoder(
             padding_idx=tokenizer.vocab[tokenizer.pad_token],
@@ -175,11 +180,13 @@ class MPNetForPretraining(nn.Module):
     # We define some class static methods here that will be used quite a bit across the board
     @staticmethod
     def encode_emb(
-        self, input_ids: torch.Tensor, positions: Optional[torch.Tensor] = None
+        encoder: "SentenceEncoder",
+        input_ids: torch.Tensor,
+        positions: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Embed input tokens using the sentence encoder.
 
-        :param SentenceEncoder self: Sentence encoder instance providing embedding layers.
+        :param SentenceEncoder encoder: Sentence encoder instance providing embedding layers.
         :param torch.Tensor input_ids: Input token IDs for the batch.
         :param torch.Tensor positions: Precomputed position indices, defaults to None.
         :return torch.Tensor: Embedded token representations.
@@ -187,42 +194,44 @@ class MPNetForPretraining(nn.Module):
 
         # Use the embedding layer of the sentence encoder to embed these (passed in via the self
         # arg)
-        x = self.embed_tokens(input_ids)
+        x = encoder.embed_tokens(input_ids)
 
         # Scale the embeddings if necessary
-        if self.embed_scale is not None:
-            x *= self.embed_scale
+        if encoder.embed_scale is not None:
+            x *= encoder.embed_scale
 
         # Add in positions
         if positions is not None:
-            x += F.embedding(positions + 2, self.embed_positions.weight, self.padding_idx)
+            x += F.embedding(
+                positions + POSITION_OFFSET, encoder.embed_positions.weight, encoder.padding_idx
+            )
 
         # Do layer norm
-        if self.emb_layer_norm is not None and not self.normalize_before:
-            x = self.emb_layer_norm(x)
+        if encoder.emb_layer_norm is not None and not encoder.normalize_before:
+            x = encoder.emb_layer_norm(x)
 
         # Process dropout
-        x = F.dropout(x, p=self.dropout, training=self.training)
+        x = F.dropout(x, p=encoder.dropout, training=encoder.training)
 
         return x
 
     @staticmethod
-    def maybe_final_norm(self, x: torch.Tensor) -> torch.Tensor:
+    def maybe_final_norm(encoder: "SentenceEncoder", x: torch.Tensor) -> torch.Tensor:
         """Apply final layer normalization if configured.
 
-        :param SentenceEncoder self: Sentence encoder instance.
+        :param SentenceEncoder encoder: Sentence encoder instance.
         :param torch.Tensor x: Tensor to normalize.
         :return torch.Tensor: Normalized tensor.
         """
-        if self.emb_layer_norm is not None and self.normalize_before:
-            return self.emb_layer_norm(x)
+        if encoder.emb_layer_norm is not None and encoder.normalize_before:
+            return encoder.emb_layer_norm(x)
         return x
 
     @staticmethod
-    def encode_relative_emb(self, positions: torch.Tensor) -> torch.Tensor:
+    def encode_relative_emb(encoder: "SentenceEncoder", positions: torch.Tensor) -> torch.Tensor:
         """Compute relative position bias embeddings.
 
-        :param SentenceEncoder self: Sentence encoder instance.
+        :param SentenceEncoder encoder: Sentence encoder instance.
         :param torch.Tensor positions: Position indices for the batch.
         :return torch.Tensor: Relative position bias values.
         """
@@ -232,12 +241,14 @@ class MPNetForPretraining(nn.Module):
 
         relative_position = memory_position - context_position
 
-        rp_bucket = self.relative_position_bucket(
+        # Keep in sync with SentenceEncoder.compute_position_bias for relative position bucketing.
+        rp_bucket = encoder.relative_position_bucket(
             relative_position,
-            num_buckets=self.relative_attention_num_buckets,
+            num_buckets=encoder.relative_attention_num_buckets,
+            max_distance=encoder.relative_attention_max_distance,
         )
         rp_bucket = rp_bucket.to(positions.device)
-        values = self.relative_attention_bias(rp_bucket)
+        values = encoder.relative_attention_bias(rp_bucket)
         values = values.permute(0, 3, 1, 2).contiguous()  # [bsz, head, qlen, klen]
         values = values.view(-1, qlen, klen)
         return values
@@ -330,6 +341,7 @@ def split_tensor(x: torch.Tensor, split_size: int) -> Tuple[torch.Tensor, torch.
     # Get the content stream size by subtracting out the pred_size aka split_size
     sz = x.size(0) - split_size
 
+    # contiguous() keeps downstream view/reshape operations safe after slicing.
     return x[:sz].contiguous(), x[sz:].contiguous()
 
 
@@ -558,6 +570,11 @@ def make_query_and_content_mask(
     Note: This function is designed to scale automatically with sequence length as it's
     matrix-based and constructs masks based on the provided seq_len and pred_size.
     There's no need to modify this function when changing context length.
+
+    Padding note: This mask encodes MPNet's two-stream structure and does not apply per-sample
+    padding masks. We rely on pretraining data being mostly full-length blocks and on padding
+    tokens being ignored in the loss; if you need strict pad masking, extend this mask with a
+    per-batch padding mask.
     """
 
     # Define helper function to keep things organized

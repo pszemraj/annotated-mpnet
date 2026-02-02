@@ -11,6 +11,7 @@ from typing import Any, Callable, Dict, Iterator, Optional, Sequence, Sized
 from rich.logging import RichHandler
 
 LOG_FORMAT = "%(message)s"
+# NOTE: basicConfig is a no-op if logging is already configured by the host app.
 logging.basicConfig(level="INFO", format=LOG_FORMAT, datefmt="[%X] ", handlers=[RichHandler()])
 LOGGER = logging.getLogger(__name__)
 
@@ -355,26 +356,38 @@ class DataCollatorForMaskedPermutedLanguageModeling:
             self.use_fast = False
 
         self.random_seed = random_seed
+        self._np_rng = np.random.default_rng(random_seed) if random_seed is not None else None
+        self._torch_generator = None
+        if random_seed is not None:
+            self._torch_generator = torch.Generator()
+            self._torch_generator.manual_seed(random_seed)
 
         # Let's also create a byte tensor that maps words that begin with ##
         # We'll use this later on to do whole word masking
         if whole_word_mask:
-            self.whole_word_mask_map = torch.ByteTensor(
-                [
-                    not token.startswith("##")
-                    for token, _ in sorted(tokenizer.vocab.items(), key=lambda x: x[1])
-                ]
-            )
+            vocab_items = sorted(tokenizer.vocab.items(), key=lambda x: x[1])
+            # Require a reasonable number of ## tokens to avoid false positives for non-WordPiece.
+            min_wordpiece_tokens = 100
+            wordpiece_count = sum(1 for token, _ in vocab_items if token.startswith("##"))
+            has_wordpiece = wordpiece_count >= min_wordpiece_tokens
+            if not has_wordpiece:
+                LOGGER.warning(
+                    "whole_word_mask requested but tokenizer does not look WordPiece; "
+                    "disabling whole-word masking."
+                )
+                self.whole_word_mask_map = None
+            else:
+                self.whole_word_mask_map = torch.ByteTensor(
+                    [not token.startswith("##") for token, _ in vocab_items]
+                )
         else:
             self.whole_word_mask_map = None
 
         # Finally, let's create a weight tensor that will make sure no special tokens are selected
         # when we are corrupting values later on
-        weights = np.ones(len(tokenizer.vocab))
-
+        weights = torch.ones(len(tokenizer.vocab), dtype=torch.float32)
         for idx in tokenizer.all_special_ids:
-            weights[idx] = 0
-
+            weights[idx] = 0.0
         self.weights = weights / weights.sum()
 
     def __call__(self, examples: Sequence[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
@@ -417,7 +430,12 @@ class DataCollatorForMaskedPermutedLanguageModeling:
                 [self.span_perm(src_tokens[i], pred_size) for i in range(sz[0])]
             )
         else:
-            positions = torch.stack([torch.randperm(sz[1]) for i in range(sz[0])])
+            if self._torch_generator is not None:
+                positions = torch.stack(
+                    [torch.randperm(sz[1], generator=self._torch_generator) for i in range(sz[0])]
+                )
+            else:
+                positions = torch.stack([torch.randperm(sz[1]) for i in range(sz[0])])
 
         # Now we actually do the permutation of the inputs based on the position outputs from above
         src_tokens, targets = self.permute_inputs(src_tokens, positions), None
@@ -470,15 +488,14 @@ class DataCollatorForMaskedPermutedLanguageModeling:
         # Get the size of the positional sequence
         sz = len(word_begins_idx)
 
-        # If a random seed is passed, we set the random seed before doing the perm below
-        if self.random_seed is not None:
-            np.random.seed(self.random_seed)
-
         # Create a permutation based on this size. In the example above, we would permute length
         # 6, thus would have something like:
         # np.array([1 5 3 2 4 0])
         # This will serve as the permuted indices of the positions stored in `word_begins_idx`
-        perm = np.random.permutation(sz)
+        if self._np_rng is not None:
+            perm = self._np_rng.permutation(sz)
+        else:
+            perm = np.random.permutation(sz)
 
         # We also need to append the total length of the input sequence `x` for a reason that will
         # become clear below. Essentially, you may think about each of the values in
@@ -527,10 +544,10 @@ class DataCollatorForMaskedPermutedLanguageModeling:
 
         # Now we do one last shuffle of the masked indices to make sure they are also permuted
         if pred_size is not None:
-            # Set the random seed if it's been provided
-            if self.random_seed is not None:
-                np.random.seed(self.random_seed)
-            np.random.shuffle(spans[-pred_size:])
+            if self._np_rng is not None:
+                self._np_rng.shuffle(spans[-pred_size:])
+            else:
+                np.random.shuffle(spans[-pred_size:])
 
         return torch.from_numpy(spans)
 
@@ -561,30 +578,27 @@ class DataCollatorForMaskedPermutedLanguageModeling:
             1.0 - mask_prob
         )  # i.e. rand_prob / (rand_prob + keep_prob)
 
-        # Set the torch random seed if one has been provided
-        if self.random_seed is not None:
-            torch.manual_seed(self.random_seed)
-
         # Now use torch's builtin bernoulli function to choose tokens (from a bernoulli dist.) that
         # will be masked and save their indices
         # More specifically, a tensor the size of `tokens` is created where each value is mask_prob
         # This is then passed to the bernoulli distribution, which either generates a 0 or 1 based
         # on that mask_prob
         # Finally we convert it to a boolean tensor for reasons that will be clear in the next step
-        mask_indices = torch.bernoulli(torch.full(tokens.shape, mask_prob)).bool()
-
-        # Set the torch random seed if one has been provided
-        if self.random_seed is not None:
-            torch.manual_seed(self.random_seed)
+        if self._torch_generator is not None:
+            mask_indices = torch.rand(tokens.shape, generator=self._torch_generator) < mask_prob
+        else:
+            mask_indices = torch.rand(tokens.shape) < mask_prob
 
         # Now we get the indices where we want to corrupt the tokens using a similar approach to the
         # above logic. Using corrupt_prob, we use the bernoulli distribution to get a list of
         # indices that we will want to corrupt. We also test against the boolean tensor we made
         # above to make sure that we aren't corrupting any tokens that were already slated for
         # maskin
-        corrupt_indices = (
-            torch.bernoulli(torch.full(tokens.shape, corrupt_prob)).bool() & ~mask_indices
-        )
+        if self._torch_generator is not None:
+            corrupt_draw = torch.rand(tokens.shape, generator=self._torch_generator)
+        else:
+            corrupt_draw = torch.rand(tokens.shape)
+        corrupt_indices = (corrupt_draw < corrupt_prob) & ~mask_indices
 
         # Now we mask and corrupt the tokens dictated by the indices above
         # We use the generate_random_tensor helper function to select random indices from the vocab
@@ -626,15 +640,10 @@ class DataCollatorForMaskedPermutedLanguageModeling:
         :param int sz: Number of random tokens to generate.
         :return torch.Tensor: Random token IDs tensor.
         """
-        # Set the numpy random seed if it's been provided
-        if self.random_seed is not None:
-            np.random.seed(self.random_seed)
-
-        # Generate the random choices first
-        random_indices = np.random.choice(len(self.tokenizer.vocab), sz, p=self.weights)
-
-        # Then convert to a torch tensor with the correct dtype
-        return torch.tensor(random_indices, dtype=torch.long)
+        if sz <= 0:
+            return torch.empty(0, dtype=torch.long)
+        generator = self._torch_generator if self._torch_generator is not None else None
+        return torch.multinomial(self.weights, sz, replacement=True, generator=generator)
 
 
 class RandomSamplerWithSeed(Sampler[int]):

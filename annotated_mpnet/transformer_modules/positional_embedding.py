@@ -8,9 +8,11 @@ import logging
 from rich.logging import RichHandler
 
 LOG_FORMAT = "%(message)s"
+# NOTE: basicConfig is a no-op if logging is already configured by the host app.
 logging.basicConfig(level="INFO", format=LOG_FORMAT, datefmt="[%X] ", handlers=[RichHandler()])
 LOGGER = logging.getLogger(__name__)
 
+SPECIAL_TOKEN_OFFSET = 2  # Account for CLS/SEP positions in learned positional embeddings.
 
 from torch import nn
 
@@ -34,7 +36,7 @@ def PositionalEmbedding(
 
     # If we specified "learned" to be True, we want to create a learned positional embedding module
     if learned:
-        num_embeddings = num_embeddings + 2  # Add 2 for CLS and SEP
+        num_embeddings = num_embeddings + SPECIAL_TOKEN_OFFSET  # Add 2 for CLS and SEP
 
         # Instantiate the learned positional embeddings
         m = LearnedPositionalEmbedding(num_embeddings, embedding_dim, padding_idx)
@@ -50,7 +52,7 @@ def PositionalEmbedding(
         m = SinusoidalPositionalEmbedding(
             embedding_dim,
             padding_idx,
-            init_size=num_embeddings + 2,  # Add 2 for CLS and SEP
+            init_size=num_embeddings + SPECIAL_TOKEN_OFFSET,  # Add 2 for CLS and SEP
         )
 
     return m

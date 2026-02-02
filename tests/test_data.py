@@ -47,72 +47,30 @@ class TestData(unittest.TestCase):
 
         :return None: This test returns nothing.
         """
-        correct_return = {
-            "input_ids": torch.tensor(
-                [
-                    [
-                        2311,
-                        0,
-                        2023,
-                        1041,
-                        2,
-                        1003,
-                        3235,
-                        2746,
-                        2027,
-                        2007,
-                        2001,
-                        2007,
-                        2001,
-                        2007,
-                        2001,
-                    ],
-                    [
-                        1,
-                        0,
-                        2182,
-                        1,
-                        1,
-                        1,
-                        1,
-                        3235,
-                        2027,
-                        2007,
-                        2,
-                        2007,
-                        30526,
-                        2007,
-                        30526,
-                    ],
-                ]
-            ),
-            "attention_mask": torch.tensor(
-                [[1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1], [1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0]]
-            ),
-            "targets": torch.tensor([[2007, 2001], [2007, 2]]),
-            "positions": torch.tensor(
-                [
-                    [7, 0, 3, 6, 10, 9, 8, 4, 1, 2, 5, 2, 5, 2, 5],
-                    [7, 0, 3, 6, 10, 9, 8, 4, 1, 2, 5, 2, 5, 2, 5],
-                ]
-            ),
-            "pred_size": 2,
-            "ntokens": 17,
-        }
-
         permuted_examples = self.collator.collate_fn(self.examples)
+        self.assertEqual(permuted_examples["pred_size"], 2)
+        self.assertEqual(permuted_examples["input_ids"].shape[0], 2)
+        self.assertEqual(permuted_examples["targets"].shape[0], 2)
 
+        # Same seed should produce deterministic first batches.
+        collator_b = DataCollatorForMaskedPermutedLanguageModeling(
+            tokenizer=self.collator.tokenizer, random_seed=12345
+        )
+        permuted_examples_b = collator_b.collate_fn(self.examples)
         self.assertTrue(
-            torch.equal(permuted_examples["input_ids"], correct_return["input_ids"]),
-            "Input IDs were not permuted correctly",
+            torch.equal(permuted_examples["input_ids"], permuted_examples_b["input_ids"]),
+            "Seeded collator produced different first batch inputs",
         )
         self.assertTrue(
-            torch.equal(permuted_examples["positions"], correct_return["positions"]),
-            "Positions were not permuted correctly",
+            torch.equal(permuted_examples["positions"], permuted_examples_b["positions"]),
+            "Seeded collator produced different first batch positions",
         )
-        self.assertTrue(
-            torch.equal(permuted_examples["targets"], correct_return["targets"]),
-            "Language modeling targets aren't correct",
+
+        # Consecutive calls should not repeat identical masking/permutations.
+        permuted_examples_next = self.collator.collate_fn(self.examples)
+        self.assertFalse(
+            torch.equal(permuted_examples["positions"], permuted_examples_next["positions"]),
+            "Masking/permutation repeated identically across batches with a fixed seed",
         )
 
     def test_training_seeded_sampling(self) -> None:

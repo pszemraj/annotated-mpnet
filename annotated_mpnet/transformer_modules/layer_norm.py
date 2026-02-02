@@ -22,6 +22,8 @@ def LayerNorm(
     :return torch.nn.Module: LayerNorm module instance.
     """
 
+    # NOTE: We prefer fused LayerNorm when available (Apex), otherwise default to PyTorch's
+    # LayerNorm which can be fused by torch.compile or downstream graph optimizations.
     if not export and torch.cuda.is_available():
         try:
             from apex.normalization import FusedLayerNorm

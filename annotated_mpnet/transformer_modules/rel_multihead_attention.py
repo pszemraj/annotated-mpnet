@@ -8,6 +8,7 @@ from typing import Any, Dict, Optional, Tuple
 from rich.logging import RichHandler
 
 LOG_FORMAT = "%(message)s"
+# NOTE: basicConfig is a no-op if logging is already configured by the host app.
 logging.basicConfig(level="INFO", format=LOG_FORMAT, datefmt="[%X] ", handlers=[RichHandler()])
 LOGGER = logging.getLogger(__name__)
 
@@ -109,12 +110,6 @@ class RelativeMultiHeadAttention(nn.Module):
 
         # Not useful for us, but is used down below, so we set it anyway
         self.onnx_trace = False
-
-        self.enable_torch_version = False
-        if hasattr(F, "multi_head_attention_forward"):
-            self.enable_torch_version = True
-        else:
-            self.enable_torch_version = False
 
         self.reset_parameters()
 
@@ -285,6 +280,8 @@ class RelativeMultiHeadAttention(nn.Module):
 
         # Extract the attention weights, i.e., do the energy calculation (QK) before inputting to
         # softmax below
+        # NOTE: Explicit bmm keeps relative position bias support; SDPA/FlashAttention would need
+        # a refactor to inject the bias efficiently.
         attn_weights = torch.bmm(q, k.transpose(1, 2))
         attn_weights = self.apply_sparse_mask(attn_weights, tgt_len, src_len, bsz)
 

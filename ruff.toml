@@ -20,6 +20,7 @@ ignore = [
 [format]
 # Use double quotes for strings
 quote-style = "double"
+# NOTE: We do not enforce f-string vs .format usage; pick the clearer option per call site.
 
 # Format docstrings
 docstring-code-format = true

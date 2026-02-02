@@ -155,6 +155,7 @@ def _resolve_best_loss(
     if best_checkpoint_path.exists():
         try:
             with safe_globals([Namespace, np.ndarray, np.dtype, np._core.multiarray._reconstruct]):
+                # NOTE: weights_only=False is required to load args; only load trusted checkpoints.
                 best_checkpoint = torch.load(
                     best_checkpoint_path, map_location="cpu", weights_only=False
                 )
@@ -419,6 +420,8 @@ def _get_autocast_context(device: torch.device) -> contextlib.AbstractContextMan
     :param torch.device device: Device used for training/inference.
     :return contextlib.AbstractContextManager[None]: Autocast context manager.
     """
+    # BF16 is the default mixed-precision path; GradScaler is unnecessary for BF16.
+    # If you switch to FP16, add a GradScaler and unscale before clipping.
     if device.type == "cuda":
         return torch.autocast(device_type="cuda", dtype=torch.bfloat16)
     return contextlib.nullcontext()
@@ -574,6 +577,7 @@ def main(args: Namespace) -> None:
 
         LOGGER.info(f"Loading architecture from checkpoint: {resume_checkpoint_path}")
         with safe_globals([Namespace, np.ndarray, np.dtype, np._core.multiarray._reconstruct]):
+            # NOTE: weights_only=False is required to load args; only load trusted checkpoints.
             resume_checkpoint = torch.load(
                 resume_checkpoint_path, map_location="cpu", weights_only=False
             )
@@ -1057,10 +1061,24 @@ def main(args: Namespace) -> None:
                 if hasattr(current_stream, "set_epoch"):
                     current_stream.set_epoch(cycle)
 
-                if skip_samples > 0:
+                local_skip = skip_samples
+                num_workers = args.num_workers if hasattr(args, "num_workers") else 0
+                if local_skip > 0 and num_workers > 0:
+                    per_worker_skip = local_skip // max(num_workers, 1)
+                    if per_worker_skip > 0:
+                        local_skip = per_worker_skip
+                    else:
+                        local_skip = 0
+                    LOGGER.info(
+                        "Resuming streaming dataset: global skip %s -> per-worker skip %s.",
+                        skip_samples,
+                        local_skip,
+                    )
+
+                if local_skip > 0:
                     LOGGER.info(
                         "Resuming streaming dataset: skipping %s already-processed samples.",
-                        skip_samples,
+                        local_skip,
                     )
                     # Note: skip_samples applies per worker in HFStreamingDataset, so resume skips are
                     # best-effort when num_workers > 0.
@@ -1072,7 +1090,7 @@ def main(args: Namespace) -> None:
                     buffer_size=args.buffer_size,
                     seed=args.seed + cycle,
                     text_field=args.text_field,
-                    skip_samples=skip_samples,
+                    skip_samples=local_skip,
                 )
                 train_dataloader = torch.utils.data.DataLoader(
                     train_dataset,
@@ -1088,6 +1106,8 @@ def main(args: Namespace) -> None:
                 cycle += 1
                 del train_dataloader
                 gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
         else:
             cycle = resume_data_state["cycle"]
             skip_batches = resume_cycle_batch_index if resume_mode == "files" else 0
@@ -1131,6 +1151,8 @@ def main(args: Namespace) -> None:
                 del train_dataloader
                 del epoch_train_dataset
                 gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
 
     train_iter = _iter_train_batches()
     scheduler.optimizer.zero_grad()
@@ -1172,6 +1194,7 @@ def main(args: Namespace) -> None:
         with _get_autocast_context(device):
             outs = model(**device_batch)
 
+        # Compute loss in fp32 outside autocast for numerical stability.
         loss = F.nll_loss(
             F.log_softmax(outs.view(-1, outs.size(-1)), dim=-1, dtype=torch.float32),
             targets.view(-1),
@@ -1408,6 +1431,7 @@ def main(args: Namespace) -> None:
     with safe_globals([Namespace, np.ndarray, np.dtype, np._core.multiarray._reconstruct]):
         # Prefer local best checkpoint; fall back to resume root if none was written.
         best_checkpoint_path = _select_best_checkpoint_path(checkpoint_dir, resume_checkpoint_path)
+        # NOTE: weights_only=False is required to load args; only load trusted checkpoints.
         dicts = torch.load(best_checkpoint_path, weights_only=False)
 
     # Handle args that might be dict or Namespace
