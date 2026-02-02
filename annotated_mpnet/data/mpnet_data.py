@@ -52,13 +52,20 @@ def _serialize_np_generator_state(state: Any) -> Any:
 
 
 def _deserialize_np_generator_state(state: Any) -> Any:
-    """Return the NumPy generator state payload (best-effort).
+    """Return the NumPy generator state payload with arrays rehydrated.
+
+    NumPy Generator bit_generator.state may contain numpy arrays that were
+    serialized to lists. While NumPy's state setter can handle lists, we
+    reconstruct arrays explicitly for clarity and robustness.
 
     :param Any state: Serialized NumPy generator state.
     :return Any: Deserialized state payload.
     """
     if isinstance(state, dict):
         return {k: _deserialize_np_generator_state(v) for k, v in state.items()}
+    if isinstance(state, list) and state and isinstance(state[0], (int, float)):
+        # Likely a serialized numpy array - reconstruct as uint64 (Generator default)
+        return np.asarray(state, dtype=np.uint64)
     if isinstance(state, list):
         return [_deserialize_np_generator_state(v) for v in state]
     return state
