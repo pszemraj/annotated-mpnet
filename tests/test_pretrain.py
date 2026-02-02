@@ -113,6 +113,8 @@ class TestPretrainHelpers(unittest.TestCase):
         checkpoint = {"steps": 1, "epoch": 0}
         samples_processed, data_state = pretrain_mpnet._get_resume_metadata(checkpoint, None)
         self.assertEqual(samples_processed, 0)
+        self.assertTrue(data_state["legacy"])
+        self.assertEqual(data_state["mode"], "legacy")
         self.assertEqual(data_state["cycle"], 0)
         self.assertEqual(data_state["batch_index"], 0)
         self.assertEqual(data_state["samples_in_cycle"], 0)
@@ -134,6 +136,7 @@ class TestPretrainHelpers(unittest.TestCase):
         samples_processed, data_state = pretrain_mpnet._get_resume_metadata(checkpoint, None)
         self.assertEqual(samples_processed, 10)
         self.assertEqual(data_state["mode"], "streaming")
+        self.assertFalse(data_state["legacy"])
         self.assertEqual(data_state["cycle"], 2)
         self.assertEqual(data_state["batch_index"], 5)
         self.assertEqual(data_state["samples_in_cycle"], 128)

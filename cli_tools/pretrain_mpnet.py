@@ -180,6 +180,7 @@ def _normalize_data_state(
         "cycle": int(data_state.get("cycle", 0) or 0),
         "batch_index": int(data_state.get("batch_index", 0) or 0),
         "samples_in_cycle": int(data_state.get("samples_in_cycle", 0) or 0),
+        "legacy": bool(data_state.get("legacy", False)),
     }
 
 
@@ -207,7 +208,8 @@ def _get_resume_metadata(
             )
             LOGGER.warning(
                 "Legacy checkpoint format detected for %s (missing %s). "
-                "Legacy resume support will be removed in a future release.",
+                "Legacy resume is no longer supported; this checkpoint can only be used to "
+                "initialize weights.",
                 label,
                 ", ".join(missing_fields),
             )
@@ -222,13 +224,14 @@ def _get_resume_metadata(
                 "cycle": legacy_cycle,
                 "batch_index": legacy_batches,
                 "samples_in_cycle": 0,
-                "mode": "unknown",
+                "mode": "legacy",
+                "legacy": True,
             }
         )
         if legacy_batches:
             LOGGER.warning(
                 "Legacy resume metadata does not include per-cycle sample counts; "
-                "streaming resumes may skip from the start of the cycle."
+                "streaming resumes are not supported and will be reinitialized."
             )
 
     return int(checkpoint.get("samples_processed", 0) or 0), normalized
@@ -774,6 +777,8 @@ def main(args: Namespace) -> None:
         resume_data_state["mode"] = resume_mode
     resume_cycle_batch_index = int(resume_data_state.get("batch_index", 0) or 0)
     resume_cycle_samples = int(resume_data_state.get("samples_in_cycle", 0) or 0)
+    # Legacy checkpoints (no data_state) are not resumable; we only use them to initialize weights.
+    legacy_resume = bool(resume_data_state.get("legacy", False))
 
     # Create optimizer state directory if saving optimizer states
     if args.save_optimizer_state:
@@ -865,45 +870,67 @@ def main(args: Namespace) -> None:
         if checkpoint is None:
             raise RuntimeError("Resume requested but no checkpoint was loaded.")
 
-        # Extract training state
-        if "steps" in checkpoint:
-            steps = checkpoint["steps"]
-            LOGGER.info(f"Resuming from step {steps}")
+        if legacy_resume:
+            LOGGER.warning(
+                "Resume requested for a legacy checkpoint (no data_state). "
+                "Full resume is not supported; loading weights only and reinitializing "
+                "optimizer/scheduler/step counters."
+            )
+            steps = 0
+            samples_processed = 0
+            best_loss = DEFAULT_BEST_LOSS
+            resume_data_state = _normalize_data_state(
+                {
+                    "mode": resume_mode,
+                    "cycle": 0,
+                    "batch_index": 0,
+                    "samples_in_cycle": 0,
+                    "legacy": False,
+                },
+                mode_hint=resume_mode,
+            )
+            resume_cycle_batch_index = 0
+            resume_cycle_samples = 0
+        else:
+            # Extract training state
+            if "steps" in checkpoint:
+                steps = checkpoint["steps"]
+                LOGGER.info(f"Resuming from step {steps}")
 
-        samples_processed = resume_samples_processed
+            samples_processed = resume_samples_processed
 
-        best_loss = _resolve_best_loss(checkpoint, checkpoint_dir, resume_checkpoint_path)
-        if best_loss != DEFAULT_BEST_LOSS:
-            LOGGER.info(f"Best validation loss from checkpoint: {best_loss}")
+            best_loss = _resolve_best_loss(checkpoint, checkpoint_dir, resume_checkpoint_path)
+            if best_loss != DEFAULT_BEST_LOSS:
+                LOGGER.info(f"Best validation loss from checkpoint: {best_loss}")
 
-        # Restore RNG state if available
-        if "rng_state" in checkpoint:
-            # RNG restoration is best-effort; warn and continue to avoid aborting training.
-            try:
-                rng_state = checkpoint["rng_state"]
-                if rng_state.get("torch") is not None:
-                    torch_rng = rng_state["torch"]
-                    torch.set_rng_state(_coerce_rng_state(torch_rng))
-                    LOGGER.info("Restored torch RNG state")
+            # Restore RNG state if available
+            if "rng_state" in checkpoint:
+                # RNG restoration is best-effort; warn and continue to avoid aborting training.
+                try:
+                    rng_state = checkpoint["rng_state"]
+                    if rng_state.get("torch") is not None:
+                        torch_rng = rng_state["torch"]
+                        torch.set_rng_state(_coerce_rng_state(torch_rng))
+                        LOGGER.info("Restored torch RNG state")
 
-                if torch.cuda.is_available() and rng_state.get("cuda") is not None:
-                    cuda_states = rng_state["cuda"]
-                    # Handle list of CUDA states for multi-GPU
-                    if isinstance(cuda_states, list):
-                        processed_states = []
-                        for state in cuda_states:
-                            processed_states.append(_coerce_rng_state(state))
-                        torch.cuda.set_rng_state_all(processed_states)
-                    else:
-                        torch.cuda.set_rng_state(_coerce_rng_state(cuda_states))
-                    LOGGER.info("Restored CUDA RNG state")
+                    if torch.cuda.is_available() and rng_state.get("cuda") is not None:
+                        cuda_states = rng_state["cuda"]
+                        # Handle list of CUDA states for multi-GPU
+                        if isinstance(cuda_states, list):
+                            processed_states = []
+                            for state in cuda_states:
+                                processed_states.append(_coerce_rng_state(state))
+                            torch.cuda.set_rng_state_all(processed_states)
+                        else:
+                            torch.cuda.set_rng_state(_coerce_rng_state(cuda_states))
+                        LOGGER.info("Restored CUDA RNG state")
 
-                if "numpy.random" in sys.modules and rng_state.get("numpy") is not None:
-                    np.random.set_state(rng_state["numpy"])
-                    LOGGER.info("Restored numpy RNG state")
-            except (TypeError, ValueError, AttributeError) as e:
-                LOGGER.warning(f"Could not restore RNG state: {e}")
-                LOGGER.info("Continuing with current RNG state")
+                    if "numpy.random" in sys.modules and rng_state.get("numpy") is not None:
+                        np.random.set_state(rng_state["numpy"])
+                        LOGGER.info("Restored numpy RNG state")
+                except (TypeError, ValueError, AttributeError) as e:
+                    LOGGER.warning(f"Could not restore RNG state: {e}")
+                    LOGGER.info("Continuing with current RNG state")
 
         # Extract model states
         model_states = _strip_compile_prefix(checkpoint["model_states"])
@@ -912,36 +939,41 @@ def main(args: Namespace) -> None:
         model.load_state_dict(model_states)
         LOGGER.info("Model weights loaded successfully")
 
-        # Load optimizer state if present; save flag only controls writing new state files.
-        optimizer_state_dir = _resolve_optimizer_state_dir(checkpoint_dir, resume_checkpoint_path)
-        expected_optimizer_dir = checkpoint_dir / "optimizer"
-        if optimizer_state_dir.resolve() != expected_optimizer_dir.resolve():
-            LOGGER.warning(
-                "Resume checkpoint is outside checkpoint_dir; looking for optimizer state in "
-                f"{optimizer_state_dir}."
+        if not legacy_resume:
+            # Load optimizer state if present; save flag only controls writing new state files.
+            optimizer_state_dir = _resolve_optimizer_state_dir(
+                checkpoint_dir, resume_checkpoint_path
             )
-        optimizer_state_path = _select_optimizer_state_path(
-            optimizer_state_dir, resume_checkpoint_path
-        )
-        if optimizer_state_path.exists():
-            LOGGER.info(f"Loading optimizer state from {optimizer_state_path}")
-            with safe_globals([Namespace, np.ndarray, np.dtype, np._core.multiarray._reconstruct]):
-                optimizer_state = torch.load(
-                    optimizer_state_path, map_location=device, weights_only=False
+            expected_optimizer_dir = checkpoint_dir / "optimizer"
+            if optimizer_state_dir.resolve() != expected_optimizer_dir.resolve():
+                LOGGER.warning(
+                    "Resume checkpoint is outside checkpoint_dir; looking for optimizer state in "
+                    f"{optimizer_state_dir}."
                 )
-
-            # Load optimizer state
-            optimizer.load_state_dict(optimizer_state["optimizer"])
-
-            # Load scheduler state
-            # Scheduler is stateless; load_state_dict is kept for legacy state dicts/overrides.
-            scheduler.load_state_dict(optimizer_state["scheduler"])
-
-            LOGGER.info("Optimizer and scheduler states loaded successfully")
-        else:
-            LOGGER.warning(
-                f"No optimizer state found at {optimizer_state_path}, using default initialization"
+            optimizer_state_path = _select_optimizer_state_path(
+                optimizer_state_dir, resume_checkpoint_path
             )
+            if optimizer_state_path.exists():
+                LOGGER.info(f"Loading optimizer state from {optimizer_state_path}")
+                with safe_globals(
+                    [Namespace, np.ndarray, np.dtype, np._core.multiarray._reconstruct]
+                ):
+                    optimizer_state = torch.load(
+                        optimizer_state_path, map_location=device, weights_only=False
+                    )
+
+                # Load optimizer state
+                optimizer.load_state_dict(optimizer_state["optimizer"])
+
+                # Load scheduler state
+                # Scheduler is stateless; load_state_dict is kept for legacy state dicts/overrides.
+                scheduler.load_state_dict(optimizer_state["scheduler"])
+
+                LOGGER.info("Optimizer and scheduler states loaded successfully")
+            else:
+                LOGGER.warning(
+                    f"No optimizer state found at {optimizer_state_path}, using default initialization"
+                )
 
     # Compile after any checkpoint/HF weight loading so state dict keys stay consistent.
     if args.compile:
@@ -1765,13 +1797,15 @@ def cli_main() -> None:
     # Resumable training arguments
     parser.add_argument(
         "--resume",
-        help="Whether to resume training from a checkpoint",
+        help="Whether to resume training from a checkpoint. Full resume requires checkpoints "
+        "created by v0.1.5+ (data_state); legacy checkpoints will only initialize weights.",
         action="store_true",
         default=False,
     )
     parser.add_argument(
         "--resume-checkpoint",
-        help="Path to the checkpoint to resume from. If not provided, will use best_checkpoint.pt",
+        help="Path to the checkpoint to resume from. If not provided, will use best_checkpoint.pt. "
+        "Legacy checkpoints will only initialize weights.",
         type=str,
         default=None,
     )
@@ -1783,7 +1817,7 @@ def cli_main() -> None:
     )
     parser.add_argument(
         "--save-optimizer-state",
-        help="Whether to save optimizer state for resumable training",
+        help="Whether to save optimizer state for resumable training (required for full resume).",
         action="store_true",
         default=False,
     )
