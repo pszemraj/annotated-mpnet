@@ -899,12 +899,20 @@ def main(args: Namespace) -> None:
     elif resume_data_state["mode"] != resume_mode:
         LOGGER.warning(
             "Resume checkpoint data_state mode (%s) does not match current dataset (%s). "
-            "Proceeding with %s settings.",
+            "Resetting resume offsets to avoid cross-mode skips.",
             resume_data_state["mode"],
             resume_mode,
-            resume_mode,
         )
-        resume_data_state["mode"] = resume_mode
+        resume_data_state = _normalize_data_state(
+            {
+                "mode": resume_mode,
+                "cycle": 0,
+                "batch_index": 0,
+                "samples_in_cycle": 0,
+                "legacy": False,
+            },
+            mode_hint=resume_mode,
+        )
     resume_cycle_batch_index = int(resume_data_state.get("batch_index", 0) or 0)
     resume_cycle_samples = int(resume_data_state.get("samples_in_cycle", 0) or 0)
     # Legacy checkpoints (no data_state) are not resumable; we only use them to initialize weights.
