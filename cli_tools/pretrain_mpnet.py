@@ -436,6 +436,24 @@ def _apply_checkpoint_architecture_args(args: Namespace, checkpoint_args: Namesp
         args.max_positions = args.max_tokens
 
 
+def _validate_tokenizer_vocab_size(tokenizer: Any, args: Namespace, source: str) -> None:
+    """Validate tokenizer vocabulary size matches model checkpoint/config.
+
+    :param Any tokenizer: Tokenizer instance used for training.
+    :param Namespace args: Parsed CLI args with vocab sizing.
+    :param str source: Source label for error messaging.
+    :raises ValueError: If tokenizer vocab size does not match the checkpoint/config size.
+    """
+    tokenizer_vocab_size = len(tokenizer)
+    expected_vocab_size = args.original_vocab_size
+    if tokenizer_vocab_size != expected_vocab_size:
+        raise ValueError(
+            f"Tokenizer vocab size ({tokenizer_vocab_size}) does not match {source} vocab size "
+            f"({expected_vocab_size}). Use the same tokenizer as the {source} or regenerate the "
+            "checkpoint/config."
+        )
+
+
 def _select_architecture_source(args: Namespace) -> str:
     """Select the architecture source based on CLI arguments.
 
@@ -754,10 +772,25 @@ def main(args: Namespace) -> None:
         # Restore architecture args from checkpoint
         if "args" in resume_checkpoint:
             checkpoint_args = resume_checkpoint["args"]
+            checkpoint_args_dict = (
+                vars(checkpoint_args) if isinstance(checkpoint_args, Namespace) else checkpoint_args
+            )
             _apply_checkpoint_architecture_args(args, checkpoint_args)
             # Update tokenizer length immediately after restoring checkpoint args.
             tokenizer.model_max_length = args.max_tokens
             _warn_if_max_positions_mismatch(args)
+            _validate_tokenizer_vocab_size(tokenizer, args, "checkpoint")
+            checkpoint_tokenizer_name = checkpoint_args_dict.get("tokenizer_name")
+            if (
+                checkpoint_tokenizer_name is not None
+                and checkpoint_tokenizer_name != args.tokenizer_name
+            ):
+                LOGGER.warning(
+                    "Checkpoint tokenizer (%s) does not match current --tokenizer-name (%s). "
+                    "If vocab sizes differ, resume will fail.",
+                    checkpoint_tokenizer_name,
+                    args.tokenizer_name,
+                )
 
             LOGGER.info(
                 f"Restored model architecture from checkpoint: {args.encoder_layers} layers, "
@@ -794,6 +827,7 @@ def main(args: Namespace) -> None:
         )
         args.original_vocab_size = hf_config.vocab_size
         args.padded_vocab_size = hf_config.vocab_size
+        _validate_tokenizer_vocab_size(tokenizer, args, "HuggingFace model")
 
         LOGGER.info(
             f"Using HF model architecture: {args.encoder_layers} layers, "
@@ -935,6 +969,16 @@ def main(args: Namespace) -> None:
         LOGGER.warning(
             "Validation dataloader is empty; skipping validation and best-checkpoint tracking."
         )
+        if args.checkpoint_interval <= 0:
+            LOGGER.warning(
+                "No interval checkpoints will be written with --checkpoint-interval <= 0; "
+                "resume checkpoints will not be available."
+            )
+        elif args.keep_checkpoints == 0:
+            LOGGER.warning(
+                "Interval checkpoints will be pruned immediately with --keep-checkpoints=0; "
+                "no resume checkpoints will remain."
+            )
     if not has_test:
         LOGGER.warning("Test dataloader is empty; skipping final test evaluation.")
 
@@ -2120,6 +2164,9 @@ def cli_main() -> None:
     # Normalize empty dataset-name for backward compatibility with older commands.
     if args.dataset_name == "":
         args.dataset_name = None
+
+    if args.eval_samples < 0:
+        parser.error("--eval-samples must be >= 0.")
 
     has_any_file = any([args.train_dir, args.valid_file, args.test_file])
     has_file_data = all([args.train_dir, args.valid_file, args.test_file])

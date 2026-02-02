@@ -38,6 +38,33 @@ class TestPretrainHelpers(unittest.TestCase):
             pretrain_mpnet.DEFAULT_BEST_LOSS,
         )
 
+    def test_validate_tokenizer_vocab_size_matches(self) -> None:
+        """Ensure tokenizer vocab size matches checkpoint size.
+
+        :return None: This test returns nothing.
+        """
+        args = Namespace(original_vocab_size=10, padded_vocab_size=16)
+
+        class DummyTokenizer:
+            def __len__(self) -> int:
+                return 10
+
+        pretrain_mpnet._validate_tokenizer_vocab_size(DummyTokenizer(), args, "checkpoint")
+
+    def test_validate_tokenizer_vocab_size_mismatch_raises(self) -> None:
+        """Raise when tokenizer vocab size mismatches checkpoint size.
+
+        :return None: This test returns nothing.
+        """
+        args = Namespace(original_vocab_size=10, padded_vocab_size=16)
+
+        class DummyTokenizer:
+            def __len__(self) -> int:
+                return 11
+
+        with self.assertRaises(ValueError):
+            pretrain_mpnet._validate_tokenizer_vocab_size(DummyTokenizer(), args, "checkpoint")
+
     def test_hf_max_positions_to_internal(self) -> None:
         """Ensure HF max positions convert to internal max_positions.
 
