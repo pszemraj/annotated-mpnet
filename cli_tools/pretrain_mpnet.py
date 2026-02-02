@@ -547,11 +547,6 @@ def main(args: Namespace) -> None:
     # Load the model up to the device
     model.to(device)
 
-    # Compile the model
-    if args.compile:
-        LOGGER.info("Compiling the model...")
-        model = torch.compile(model)
-
     # Determine whether to use streaming dataset or file-based dataset
     if args.dataset_name:
         LOGGER.info(f"Using HuggingFace dataset: {args.dataset_name}")
@@ -820,6 +815,11 @@ def main(args: Namespace) -> None:
             LOGGER.warning(
                 f"No optimizer state found at {optimizer_state_path}, using default initialization"
             )
+
+    # Compile after any checkpoint/HF weight loading so state dict keys stay consistent.
+    if args.compile:
+        LOGGER.info("Compiling the model...")
+        model = torch.compile(model)
 
     # Create meters for all the relevant logging statistics using the Meters module
     meters = {
