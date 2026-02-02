@@ -1184,9 +1184,7 @@ def main(args: Namespace) -> None:
 
     eval_interval_steps = args.eval_interval_steps
     if eval_interval_steps is None:
-        eval_interval_steps = (
-            args.checkpoint_interval if args.checkpoint_interval > 0 else args.total_updates
-        )
+        eval_interval_steps = args.checkpoint_interval if args.checkpoint_interval > 0 else 5000
     if eval_interval_steps <= 0:
         eval_interval_steps = args.total_updates
 
@@ -1819,7 +1817,7 @@ def cli_main() -> None:
     parser.add_argument(
         "--eval-interval-steps",
         help="How often (in update steps) to run validation. Defaults to --checkpoint-interval if "
-        "set, otherwise --total-updates.",
+        "set, otherwise 5000.",
         default=None,
         type=int,
     )

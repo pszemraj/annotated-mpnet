@@ -150,7 +150,7 @@ pretrain-mpnet \
   - `--tensorboard-log-dir`: Directory for TensorBoard logs. If unset, logs to console.
   - `--checkpoint-interval`: Save a checkpoint every N steps (default: -1, only best and final). Alias: `--save_steps`.
   - `--keep-checkpoints`: Keep the most recent N interval checkpoints (-1 disables pruning; 0 keeps none).
-  - `--eval-interval-steps`: Run validation every N steps (default: `--checkpoint-interval` if set, otherwise `--total-updates`).
+  - `--eval-interval-steps`: Run validation every N steps (default: `--checkpoint-interval` if set, otherwise 5000).
   - `--wandb`: Enable Weights & Biases logging.
   - `--wandb-project`, `--wandb-name`: W\&B project and run name.
 - `--compile`: Use `torch.compile()` for the model (experimental, default: False).
