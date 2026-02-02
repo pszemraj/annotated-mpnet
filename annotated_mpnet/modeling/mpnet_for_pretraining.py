@@ -628,6 +628,11 @@ def make_query_and_content_mask(
     key_padding_mask = key_padding_mask.to(input_ids.device)
 
     def _combine_mask(base_mask: torch.Tensor) -> torch.Tensor:
+        """Combine base attention mask with padding mask for the batch.
+
+        :param torch.Tensor base_mask: Base attention mask (tgt x src).
+        :return torch.Tensor: Combined mask of shape (bsz x tgt x src).
+        """
         expanded_mask = base_mask.unsqueeze(0).expand(bsz, base_mask.size(0), base_mask.size(1))
         expanded_padding = key_padding_mask.unsqueeze(1).expand(
             bsz, base_mask.size(0), base_mask.size(1)

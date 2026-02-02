@@ -314,6 +314,12 @@ class SentenceEncoder(nn.Module):
                 def _layer_forward(
                     layer_input: torch.Tensor, current_layer: nn.Module = layer
                 ) -> torch.Tensor:
+                    """Run a single encoder layer for checkpointed execution.
+
+                    :param torch.Tensor layer_input: Layer input tensor.
+                    :param nn.Module current_layer: Encoder layer module.
+                    :return torch.Tensor: Layer output tensor.
+                    """
                     output, _ = current_layer(
                         layer_input,
                         self_attn_padding_mask=padding_mask,

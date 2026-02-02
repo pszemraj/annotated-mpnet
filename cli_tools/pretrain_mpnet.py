@@ -12,7 +12,7 @@ import os
 import pathlib
 import sys
 from argparse import Namespace
-from typing import Any
+from typing import Any, Iterator
 
 import numpy as np
 from rich.logging import RichHandler
@@ -1073,6 +1073,15 @@ def main(args: Namespace) -> None:
         loss_key: str,
         acc_key: str,
     ) -> tuple[float, float]:
+        """Evaluate a model on a dataloader split.
+
+        :param torch.nn.Module model_to_eval: Model to evaluate.
+        :param torch.utils.data.DataLoader dataloader: Dataloader for the split.
+        :param str split_name: Display name for logging.
+        :param str loss_key: Meter key to store loss values.
+        :param str acc_key: Meter key to store accuracy values.
+        :return tuple[float, float]: Average loss and accuracy for the split.
+        """
         meters[loss_key].reset()
         meters[acc_key].reset()
         model_to_eval.eval()
@@ -1120,7 +1129,11 @@ def main(args: Namespace) -> None:
     initial_outputs_saved = False
     last_eval_step: int | None = None
 
-    def _iter_train_batches():
+    def _iter_train_batches() -> Iterator[tuple[dict[str, Any], int, int]]:
+        """Yield training batches with cycle and batch index.
+
+        :return Iterator[tuple[dict[str, Any], int, int]]: (batch, cycle, batch_index) tuples.
+        """
         if train_streaming:
             cycle = resume_data_state["cycle"]
             skip_samples = resume_cycle_samples if resume_mode == "streaming" else 0
