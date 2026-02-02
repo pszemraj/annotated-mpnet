@@ -330,6 +330,22 @@ def _checkpoint_step_from_path(path: pathlib.Path) -> int:
     return -1
 
 
+def _find_latest_checkpoint(checkpoint_dir: pathlib.Path) -> pathlib.Path | None:
+    """Return the latest interval checkpoint in a directory.
+
+    :param pathlib.Path checkpoint_dir: Directory containing checkpoint files.
+    :return pathlib.Path | None: Latest checkpoint path or None if not found.
+    """
+    checkpoints = [
+        checkpoint
+        for checkpoint in checkpoint_dir.glob("checkpoint*.pt")
+        if _checkpoint_step_from_path(checkpoint) >= 0
+    ]
+    if not checkpoints:
+        return None
+    return max(checkpoints, key=_checkpoint_step_from_path)
+
+
 def _prune_checkpoints(
     checkpoint_dir: pathlib.Path,
     keep_checkpoints: int,
@@ -441,10 +457,33 @@ def _select_resume_checkpoint_path(
     :param pathlib.Path checkpoint_dir: Base checkpoint directory.
     :param str resume_checkpoint: Explicit checkpoint path or None.
     :return pathlib.Path: Checkpoint path to resume from.
+    :raises FileNotFoundError: If no resume checkpoint can be found.
+    :raises IsADirectoryError: If resume checkpoint points to a directory.
     """
     if resume_checkpoint is None:
-        return checkpoint_dir / "best_checkpoint.pt"
-    return pathlib.Path(resume_checkpoint)
+        best_checkpoint_path = checkpoint_dir / "best_checkpoint.pt"
+        if best_checkpoint_path.exists():
+            return best_checkpoint_path
+        latest_checkpoint = _find_latest_checkpoint(checkpoint_dir)
+        if latest_checkpoint is not None:
+            LOGGER.warning(
+                "Best checkpoint not found at %s; falling back to latest interval checkpoint %s.",
+                best_checkpoint_path,
+                latest_checkpoint,
+            )
+            return latest_checkpoint
+        raise FileNotFoundError(
+            f"No resume checkpoint found. Expected {best_checkpoint_path} or interval checkpoints "
+            f"in {checkpoint_dir}."
+        )
+    resume_checkpoint_path = pathlib.Path(resume_checkpoint)
+    if resume_checkpoint_path.is_dir():
+        raise IsADirectoryError(
+            f"Resume checkpoint path {resume_checkpoint_path} is a directory; expected a .pt file."
+        )
+    if not resume_checkpoint_path.exists():
+        raise FileNotFoundError(f"Resume checkpoint {resume_checkpoint_path} not found.")
+    return resume_checkpoint_path
 
 
 def _select_optimizer_state_path(
@@ -889,6 +928,15 @@ def main(args: Namespace) -> None:
         # Get each of the files in the training directory
         train_dir = pathlib.Path(args.train_dir)
         train_files = sorted(str(path) for path in train_dir.iterdir() if path.is_file())
+
+    has_validation = len(valid_dataloader) > 0
+    has_test = len(test_dataloader) > 0
+    if not has_validation:
+        LOGGER.warning(
+            "Validation dataloader is empty; skipping validation and best-checkpoint tracking."
+        )
+    if not has_test:
+        LOGGER.warning("Test dataloader is empty; skipping final test evaluation.")
 
     # Note: checkpoint_dir is already created above when handling resume logic
 
@@ -1489,7 +1537,7 @@ def main(args: Namespace) -> None:
                         optimizer_dir if args.save_optimizer_state else None,
                     )
 
-                if eval_interval_steps > 0 and steps % eval_interval_steps == 0:
+                if has_validation and eval_interval_steps > 0 and steps % eval_interval_steps == 0:
                     final_valid_loss, final_valid_accuracy = _evaluate_split(
                         model, valid_dataloader, "Validation", "valid_loss", "valid_acc"
                     )
@@ -1553,7 +1601,7 @@ def main(args: Namespace) -> None:
     finally:
         # Ensure streaming/file dataloaders release resources on exit.
         train_iter.close()
-    if last_eval_step != steps and len(valid_dataloader) > 0:
+    if has_validation and last_eval_step != steps:
         final_valid_loss, final_valid_accuracy = _evaluate_split(
             model, valid_dataloader, "Validation", "valid_loss", "valid_acc"
         )
@@ -1608,54 +1656,78 @@ def main(args: Namespace) -> None:
             log_to_wandb(logging_dict, steps, "valid")
 
     # If we've reached the end of the training cycle, i.e., hit total number of update steps, we can
-    # use the test dataloader we built above to get a final test metric using the best checkpoint
+    # use the test dataloader we built above to get a final test metric using the best checkpoint.
+    if has_test:
+        # Begin by loading the model states and args from the best checkpoint.
+        # Prefer local best checkpoint; fall back to resume root if none was written.
+        # If no best checkpoint exists, use the in-memory model from the final step.
+        best_checkpoint_path = _select_best_checkpoint_path(checkpoint_dir, resume_checkpoint_path)
+        test_model: torch.nn.Module | None = None
+        if best_checkpoint_path.exists():
+            try:
+                dicts = _safe_torch_load(
+                    best_checkpoint_path,
+                    map_location="cpu",
+                    trust_checkpoint=args.trust_checkpoint,
+                )
 
-    # Begin by loading the model states and args from the best checkpoint
-    # Prefer local best checkpoint; fall back to resume root if none was written.
-    best_checkpoint_path = _select_best_checkpoint_path(checkpoint_dir, resume_checkpoint_path)
-    dicts = _safe_torch_load(
-        best_checkpoint_path, map_location="cpu", trust_checkpoint=args.trust_checkpoint
-    )
+                # Handle args that might be dict or Namespace
+                loaded_args = dicts["args"]
+                if isinstance(loaded_args, dict):
+                    loaded_args = Namespace(**loaded_args)
 
-    # Handle args that might be dict or Namespace
-    loaded_args = dicts["args"]
-    if isinstance(loaded_args, dict):
-        loaded_args = Namespace(**loaded_args)
+                # Handle potential _orig_mod prefix in state dict from compiled models
+                model_states = _strip_compile_prefix(dicts["model_states"])
 
-    # Handle potential _orig_mod prefix in state dict from compiled models
-    model_states = _strip_compile_prefix(dicts["model_states"])
+                # Load an empty shell of the model architecture using those args
+                test_model = MPNetForPretraining(loaded_args, tokenizer)
 
-    # Load an empty shell of the model architecture using those args
-    test_model = MPNetForPretraining(loaded_args, tokenizer)
+                # Now apply the model states to this newly instantiated model
+                test_model.load_state_dict(model_states)
 
-    # Now apply the model states to this newly instantiated model
-    test_model.load_state_dict(model_states)
+                # Finally make sure the model is in eval mode and is sent to the proper device
+                test_model.to(device)
+            except (OSError, RuntimeError, KeyError, ValueError) as exc:
+                LOGGER.warning(
+                    "Could not load best checkpoint %s for test evaluation: %s. "
+                    "Using in-memory model instead.",
+                    best_checkpoint_path,
+                    exc,
+                )
+        else:
+            LOGGER.warning(
+                "Best checkpoint not found at %s; using in-memory model for test evaluation.",
+                best_checkpoint_path,
+            )
 
-    # Finally make sure the model is in eval mode and is sent to the proper device
-    test_model.to(device)
-    test_model.eval()
+        if test_model is None:
+            test_model = model
 
-    # Reuse the shared evaluation helper to keep test/valid logic consistent.
-    final_test_loss, final_test_accuracy = _evaluate_split(
-        test_model, test_dataloader, "Test", "test_loss", "test_acc"
-    )
+        test_model.eval()
 
-    # Load these into a logging dict and pass it on to be written in tensorboard
-    logging_dict = {
-        "loss": final_test_loss,
-        "acc": final_test_accuracy,
-    }
+        # Reuse the shared evaluation helper to keep test/valid logic consistent.
+        final_test_loss, final_test_accuracy = _evaluate_split(
+            test_model, test_dataloader, "Test", "test_loss", "test_acc"
+        )
 
-    # Log to tensorboard or print out the dict
-    if args.tensorboard_log_dir:
-        write_to_tensorboard(writers["test"], logging_dict, steps)
+        # Load these into a logging dict and pass it on to be written in tensorboard
+        logging_dict = {
+            "loss": final_test_loss,
+            "acc": final_test_accuracy,
+        }
+
+        # Log to tensorboard or print out the dict
+        if args.tensorboard_log_dir:
+            write_to_tensorboard(writers["test"], logging_dict, steps)
+        else:
+            LOGGER.info("Test stats:")
+            LOGGER.info(logging_dict)
+
+        # Log to wandb if enabled
+        if args.wandb:
+            log_to_wandb(logging_dict, steps, "test")
     else:
-        LOGGER.info("Test stats:")
-        LOGGER.info(logging_dict)
-
-    # Log to wandb if enabled
-    if args.wandb:
-        log_to_wandb(logging_dict, steps, "test")
+        LOGGER.warning("Skipping final test evaluation because test dataloader is empty.")
 
     LOGGER.info(
         f"Training is finished! See output in {args.checkpoint_dir} and "
@@ -1987,6 +2059,7 @@ def cli_main() -> None:
     parser.add_argument(
         "--resume-checkpoint",
         help="Path to the checkpoint to resume from. If not provided, will use best_checkpoint.pt. "
+        "If best_checkpoint.pt is missing, the latest interval checkpoint will be used. "
         "Legacy checkpoints will only initialize weights.",
         type=str,
         default=None,

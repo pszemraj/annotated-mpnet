@@ -223,6 +223,32 @@ class TestPretrainHelpers(unittest.TestCase):
 
         self.assertEqual(best_loss, 2.34)
 
+    def test_select_resume_checkpoint_path_falls_back_to_latest(self) -> None:
+        """Fallback to latest interval checkpoint when best is missing.
+
+        :return None: This test returns nothing.
+        """
+        with TemporaryDirectory() as tmpdir:
+            checkpoint_dir = pathlib.Path(tmpdir)
+            (checkpoint_dir / "checkpoint1.pt").write_bytes(b"")
+            latest = checkpoint_dir / "checkpoint3.pt"
+            latest.write_bytes(b"")
+
+            selected = pretrain_mpnet._select_resume_checkpoint_path(checkpoint_dir, None)
+
+            self.assertEqual(selected, latest)
+
+    def test_select_resume_checkpoint_path_errors_on_missing(self) -> None:
+        """Raise when no resume checkpoint exists.
+
+        :return None: This test returns nothing.
+        """
+        with TemporaryDirectory() as tmpdir:
+            checkpoint_dir = pathlib.Path(tmpdir)
+
+            with self.assertRaises(FileNotFoundError):
+                pretrain_mpnet._select_resume_checkpoint_path(checkpoint_dir, None)
+
     def test_model_summary_avoids_double_counting(self) -> None:
         """Ensure model_summary reports parent params without child double-counting.
 
@@ -379,17 +405,22 @@ class TestPretrainHelpers(unittest.TestCase):
 
         :return None: This test returns nothing.
         """
-        checkpoint_dir = pathlib.Path("/tmp/checkpoints")
-        self.assertEqual(
-            pretrain_mpnet._select_resume_checkpoint_path(checkpoint_dir, None),
-            checkpoint_dir / "best_checkpoint.pt",
-        )
-        self.assertEqual(
-            pretrain_mpnet._select_resume_checkpoint_path(
-                checkpoint_dir, "/tmp/checkpoints/checkpoint123.pt"
-            ),
-            pathlib.Path("/tmp/checkpoints/checkpoint123.pt"),
-        )
+        with TemporaryDirectory() as tmpdir:
+            checkpoint_dir = pathlib.Path(tmpdir)
+            best_checkpoint = checkpoint_dir / "best_checkpoint.pt"
+            best_checkpoint.write_bytes(b"")
+            self.assertEqual(
+                pretrain_mpnet._select_resume_checkpoint_path(checkpoint_dir, None),
+                best_checkpoint,
+            )
+            explicit_checkpoint = checkpoint_dir / "checkpoint123.pt"
+            explicit_checkpoint.write_bytes(b"")
+            self.assertEqual(
+                pretrain_mpnet._select_resume_checkpoint_path(
+                    checkpoint_dir, str(explicit_checkpoint)
+                ),
+                explicit_checkpoint,
+            )
 
     def test_select_optimizer_state_path(self) -> None:
         """Confirm optimizer state path matches resume checkpoint type.

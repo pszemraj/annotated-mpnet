@@ -201,6 +201,8 @@ Notes:
 - If you pass `--resume` with a legacy checkpoint (pre-v0.1.5), the script will **only load weights** and start fresh from step 0.
 - To initialize from a legacy checkpoint, you can also convert it to Hugging Face format and pass `--hf-model-path`.
 - Checkpoints are loaded with safe `weights_only` by default. Use `--trust-checkpoint` to load legacy or external `.pt` files.
+- If `--resume` is set without `--resume-checkpoint` and `best_checkpoint.pt` is missing, the latest interval checkpoint is used when available.
+- If validation/test datasets are empty or disabled, validation/test evaluation is skipped and the final test eval falls back to the in-memory model.
 
 ### Porting Checkpoint to Hugging Face
 
