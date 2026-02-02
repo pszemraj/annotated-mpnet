@@ -111,12 +111,32 @@ class TestPretrainHelpers(unittest.TestCase):
         :return None: This test returns nothing.
         """
         checkpoint = {"steps": 1, "epoch": 0}
-        samples_processed, epoch_batches, epoch_complete = pretrain_mpnet._get_resume_metadata(
-            checkpoint, None
-        )
+        samples_processed, data_state = pretrain_mpnet._get_resume_metadata(checkpoint, None)
         self.assertEqual(samples_processed, 0)
-        self.assertEqual(epoch_batches, 0)
-        self.assertFalse(epoch_complete)
+        self.assertEqual(data_state["cycle"], 0)
+        self.assertEqual(data_state["batch_index"], 0)
+        self.assertEqual(data_state["samples_in_cycle"], 0)
+
+    def test_get_resume_metadata_prefers_data_state(self) -> None:
+        """Ensure resume metadata uses explicit data_state when present.
+
+        :return None: This test returns nothing.
+        """
+        checkpoint = {
+            "samples_processed": 10,
+            "data_state": {
+                "mode": "streaming",
+                "cycle": 2,
+                "batch_index": 5,
+                "samples_in_cycle": 128,
+            },
+        }
+        samples_processed, data_state = pretrain_mpnet._get_resume_metadata(checkpoint, None)
+        self.assertEqual(samples_processed, 10)
+        self.assertEqual(data_state["mode"], "streaming")
+        self.assertEqual(data_state["cycle"], 2)
+        self.assertEqual(data_state["batch_index"], 5)
+        self.assertEqual(data_state["samples_in_cycle"], 128)
 
     def test_resolve_best_loss_prefers_resume_checkpoint_dir(self) -> None:
         """Prefer best checkpoint in resume checkpoint directory when external.
@@ -267,17 +287,6 @@ class TestPretrainHelpers(unittest.TestCase):
         self.assertFalse(pretrain_mpnet._should_save_checkpoint(999, 1000))
         self.assertTrue(pretrain_mpnet._should_save_checkpoint(1000, 1000))
         self.assertFalse(pretrain_mpnet._should_save_checkpoint(1000, 0))
-
-    def test_should_skip_resume_batch(self) -> None:
-        """Ensure resume batch skipping only applies to file-based resumes.
-
-        :return None: This test returns nothing.
-        """
-        self.assertFalse(pretrain_mpnet._should_skip_resume_batch(True, 0, 0, 0, 10))
-        self.assertFalse(pretrain_mpnet._should_skip_resume_batch(False, None, 0, 0, 10))
-        self.assertTrue(pretrain_mpnet._should_skip_resume_batch(False, 2, 2, 3, 5))
-        self.assertFalse(pretrain_mpnet._should_skip_resume_batch(False, 2, 3, 0, 5))
-        self.assertFalse(pretrain_mpnet._should_skip_resume_batch(False, 2, 2, 5, 5))
 
     def test_strip_compile_prefix(self) -> None:
         """Ensure compile prefixes are removed from state dict keys.

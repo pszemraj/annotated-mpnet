@@ -165,33 +165,73 @@ def _resolve_best_loss(
     return _get_initial_best_loss(checkpoint)
 
 
+def _normalize_data_state(
+    data_state: dict | None, mode_hint: str | None = None
+) -> dict[str, int | str]:
+    """Normalize data_state values for resume logic.
+
+    :param dict data_state: Raw data_state dictionary.
+    :param str mode_hint: Optional mode hint ("streaming" or "files"), defaults to None.
+    :return dict[str, int | str]: Normalized data_state.
+    """
+    data_state = data_state if isinstance(data_state, dict) else {}
+    return {
+        "mode": data_state.get("mode", mode_hint or "unknown"),
+        "cycle": int(data_state.get("cycle", 0) or 0),
+        "batch_index": int(data_state.get("batch_index", 0) or 0),
+        "samples_in_cycle": int(data_state.get("samples_in_cycle", 0) or 0),
+    }
+
+
 def _get_resume_metadata(
     checkpoint: dict, resume_checkpoint_path: pathlib.Path | None
-) -> tuple[int, int, bool]:
+) -> tuple[int, dict[str, int | str]]:
     """Return resume metadata with legacy checkpoint fallback.
 
     :param dict checkpoint: Loaded checkpoint data.
     :param pathlib.Path resume_checkpoint_path: Checkpoint path, defaults to None.
-    :return tuple[int, int, bool]: samples_processed, epoch_batches_processed, epoch_complete.
+    :return tuple[int, dict[str, int | str]]: samples_processed and normalized data_state.
     """
-    missing_fields = [
-        field
-        for field in ("samples_processed", "epoch_batches_processed", "epoch_complete")
-        if field not in checkpoint
-    ]
-    if missing_fields:
-        label = str(resume_checkpoint_path) if resume_checkpoint_path is not None else "checkpoint"
-        LOGGER.warning(
-            "Legacy checkpoint format detected for %s (missing %s). "
-            "Legacy resume support will be removed in a future release.",
-            label,
-            ", ".join(missing_fields),
+    data_state = checkpoint.get("data_state")
+    if isinstance(data_state, dict):
+        normalized = _normalize_data_state(data_state)
+    else:
+        missing_fields = [
+            field
+            for field in ("samples_processed", "epoch_batches_processed", "epoch_complete")
+            if field not in checkpoint
+        ]
+        if missing_fields:
+            label = (
+                str(resume_checkpoint_path) if resume_checkpoint_path is not None else "checkpoint"
+            )
+            LOGGER.warning(
+                "Legacy checkpoint format detected for %s (missing %s). "
+                "Legacy resume support will be removed in a future release.",
+                label,
+                ", ".join(missing_fields),
+            )
+        legacy_cycle = int(checkpoint.get("epoch", 0) or 0)
+        legacy_batches = int(checkpoint.get("epoch_batches_processed", 0) or 0)
+        legacy_complete = bool(checkpoint.get("epoch_complete", False))
+        if legacy_complete:
+            legacy_cycle += 1
+            legacy_batches = 0
+        normalized = _normalize_data_state(
+            {
+                "cycle": legacy_cycle,
+                "batch_index": legacy_batches,
+                "samples_in_cycle": 0,
+                "mode": "unknown",
+            }
         )
-    return (
-        int(checkpoint.get("samples_processed", 0) or 0),
-        int(checkpoint.get("epoch_batches_processed", 0) or 0),
-        bool(checkpoint.get("epoch_complete", False)),
-    )
+        if legacy_batches:
+            LOGGER.warning(
+                "Legacy resume metadata does not include per-cycle sample counts; "
+                "streaming resumes may skip from the start of the cycle."
+            )
+
+    return int(checkpoint.get("samples_processed", 0) or 0), normalized
 
 
 def _should_save_checkpoint(steps: int, checkpoint_interval: int) -> bool:
@@ -202,30 +242,6 @@ def _should_save_checkpoint(steps: int, checkpoint_interval: int) -> bool:
     :return bool: True if a checkpoint should be written.
     """
     return checkpoint_interval > 0 and steps > 0 and steps % checkpoint_interval == 0
-
-
-def _should_skip_resume_batch(
-    train_streaming: bool,
-    resume_epoch: int | None,
-    current_epoch: int,
-    batch_index: int,
-    resume_epoch_batches: int,
-) -> bool:
-    """Return whether to skip a batch when resuming file-based training.
-
-    :param bool train_streaming: Whether streaming datasets are in use.
-    :param int | None resume_epoch: Epoch to resume within, or None.
-    :param int current_epoch: Current epoch index.
-    :param int batch_index: Current batch index (0-based).
-    :param int resume_epoch_batches: Number of already-processed batches in resume epoch.
-    :return bool: True if the batch should be skipped.
-    """
-    return (
-        not train_streaming
-        and resume_epoch is not None
-        and current_epoch == resume_epoch
-        and batch_index < resume_epoch_batches
-    )
 
 
 def _warn_if_max_positions_mismatch(args: Namespace) -> None:
@@ -545,8 +561,7 @@ def main(args: Namespace) -> None:
     resume_checkpoint_path: pathlib.Path | None = None
     resume_checkpoint: dict | None = None
     resume_samples_processed = 0
-    resume_epoch_batches = 0
-    resume_epoch_complete = False
+    resume_data_state: dict[str, int | str] = _normalize_data_state(None)
 
     if arch_source == "resume":
         # Load checkpoint to get architecture before creating model
@@ -560,11 +575,9 @@ def main(args: Namespace) -> None:
                 resume_checkpoint_path, map_location="cpu", weights_only=False
             )
 
-        (
-            resume_samples_processed,
-            resume_epoch_batches,
-            resume_epoch_complete,
-        ) = _get_resume_metadata(resume_checkpoint, resume_checkpoint_path)
+        resume_samples_processed, resume_data_state = _get_resume_metadata(
+            resume_checkpoint, resume_checkpoint_path
+        )
 
         # Restore architecture args from checkpoint
         if "args" in resume_checkpoint:
@@ -742,12 +755,25 @@ def main(args: Namespace) -> None:
 
         # Get each of the files in the training directory
         train_dir = pathlib.Path(args.train_dir)
-        train_files = [str(path) for path in train_dir.iterdir() if path.is_file()]
+        train_files = sorted(str(path) for path in train_dir.iterdir() if path.is_file())
 
     # Note: checkpoint_dir is already created above when handling resume logic
 
-    # For streaming resumes, skip already-processed samples after shuffling in the first epoch.
-    stream_resume_skip_samples = resume_samples_processed if train_streaming else 0
+    resume_mode = "streaming" if train_streaming else "files"
+    resume_data_state = _normalize_data_state(resume_data_state, mode_hint=resume_mode)
+    if resume_data_state["mode"] == "unknown":
+        resume_data_state["mode"] = resume_mode
+    elif resume_data_state["mode"] != resume_mode:
+        LOGGER.warning(
+            "Resume checkpoint data_state mode (%s) does not match current dataset (%s). "
+            "Proceeding with %s settings.",
+            resume_data_state["mode"],
+            resume_mode,
+            resume_mode,
+        )
+        resume_data_state["mode"] = resume_mode
+    resume_cycle_batch_index = int(resume_data_state.get("batch_index", 0) or 0)
+    resume_cycle_samples = int(resume_data_state.get("samples_in_cycle", 0) or 0)
 
     # Create optimizer state directory if saving optimizer states
     if args.save_optimizer_state:
@@ -772,12 +798,10 @@ def main(args: Namespace) -> None:
     )
     scheduler = PolynomialDecayLRScheduler(args, optimizer)
 
-    # Initialize step and epoch counters
+    # Initialize step counters
     steps = 0
-    epoch = 0
     best_loss = DEFAULT_BEST_LOSS  # Will be overridden if resuming from checkpoint
     samples_processed = 0
-    resume_epoch: int | None = None
 
     # Determine whether to load from HuggingFace model or resume from a checkpoint
     # HuggingFace model loading takes precedence if both are specified
@@ -846,25 +870,7 @@ def main(args: Namespace) -> None:
             steps = checkpoint["steps"]
             LOGGER.info(f"Resuming from step {steps}")
 
-        if "epoch" in checkpoint:
-            epoch = checkpoint["epoch"]
-            LOGGER.info(f"Resuming from epoch {epoch}")
-
         samples_processed = resume_samples_processed
-        if (
-            not resume_epoch_complete
-            and resume_checkpoint_path is not None
-            and resume_checkpoint_path.name == "best_checkpoint.pt"
-        ):
-            resume_epoch_complete = True
-        resume_epoch = epoch
-        if resume_epoch_complete:
-            LOGGER.info(
-                "Resume checkpoint captured after epoch completion; advancing to next epoch."
-            )
-            epoch += 1
-            resume_epoch = None
-            resume_epoch_batches = 0
 
         best_loss = _resolve_best_loss(checkpoint, checkpoint_dir, resume_checkpoint_path)
         if best_loss != DEFAULT_BEST_LOSS:
@@ -953,257 +959,319 @@ def main(args: Namespace) -> None:
         "token_throughput": AverageMeter(),
     }
 
-    # best_loss is already initialized above (possibly from a checkpoint)
-    # Flag to track if non-trainable model repo files were saved at first checkpoint.
-    initial_outputs_saved = False
-
-    # In streaming mode, epochs are logical boundaries; total_updates stops the loop.
-    while steps <= args.total_updates:
-        # Handle either streaming or file-based training
-        if train_streaming:
-            LOGGER.info(f"Starting streaming training epoch {epoch}")
-
-            # Create a single dataloader from our stream - no need to reload the dataset
-            # Just shuffle with a different seed each epoch
-            current_stream = train_stream.shuffle(
-                buffer_size=args.buffer_size, seed=args.seed + epoch
-            )
-
-            resume_skip = 0
-            if stream_resume_skip_samples > 0:
-                resume_skip = stream_resume_skip_samples
-                stream_resume_skip_samples = 0
-                LOGGER.info(
-                    "Resuming streaming dataset: skipping "
-                    f"{resume_skip} already-processed samples after shuffle."
-                )
-                # Note: skip_samples applies per worker in HFStreamingDataset, so resume skips are
-                # best-effort when num_workers > 0.
-
-            train_dataloader = HFStreamingDataset(
-                tokenizer=tokenizer,
-                dataset_stream=current_stream,  # Use the already loaded stream
-                block_size=args.max_tokens,
-                buffer_size=args.buffer_size,
-                seed=args.seed + epoch,  # Change seed each epoch for better variety
-                text_field=args.text_field,
-                skip_samples=resume_skip,
-            )
-
-            train_dataloader = torch.utils.data.DataLoader(
-                train_dataloader,
-                batch_size=args.batch_size,
-                collate_fn=mplm,
-                num_workers=args.num_workers if hasattr(args, "num_workers") else 4,
-            )
-        else:
-            # File-based datasets: Use a different file for each epoch (original code)
-            current_train_file = train_files[epoch % len(train_files)]
-            LOGGER.info(f"Training epoch {epoch} using file: {current_train_file}")
-
-            # Load current file as dataset and set up dataloader
-            epoch_train_dataset = MPNetDataset(
-                tokenizer=tokenizer,
-                file_path=current_train_file,
-                block_size=args.max_tokens,
-            )
-
-            # Use seeded sampler for reproducibility
-            sampler = RandomSamplerWithSeed(epoch_train_dataset, epoch=epoch, random_seed=args.seed)
-
-            train_dataloader = torch.utils.data.DataLoader(
-                epoch_train_dataset,
-                sampler=sampler,
-                collate_fn=mplm,
-                batch_size=args.batch_size,
-            )
-
-        # Zero out the gradients
-        scheduler.optimizer.zero_grad()
-
-        # Set the model in training mode to activate dropouts etc.
-        model.train()
-
-        # Create an accumulation loss and accumulation accuracy counter
-        accumulation_loss = 0
-        accumulation_acc = 0  # Count of correct predictions; normalize by predicted tokens later.
-        accumulation_input_tokens = 0
-        accumulation_pred_tokens = 0
-        epoch_batch_index = 0
-
-        # Always reset the meters before beginning the next training epoch (except token throughput)
-        for stat in ["train_loss", "train_acc", "valid_loss", "valid_acc"]:
-            meters[stat].reset()
-
-        # Now we do our training steps
-        # We enumerate the dataloader because we need to keep track of gradient accumulation steps
-        for i, batch in track(
-            enumerate(train_dataloader),
-            description=f"Training epoch {epoch}",
-            total=len(train_dataloader) if not train_streaming else None,
+    def _evaluate_split(
+        model_to_eval: torch.nn.Module,
+        dataloader: torch.utils.data.DataLoader,
+        split_name: str,
+        loss_key: str,
+        acc_key: str,
+    ) -> tuple[float, float]:
+        meters[loss_key].reset()
+        meters[acc_key].reset()
+        model_to_eval.eval()
+        for _, batch in track(
+            enumerate(dataloader),
+            description=f"{split_name} evaluation",
+            total=len(dataloader),
         ):
-            # Always check to make sure we haven't overstepped the total number of updates
-            if steps > args.total_updates:
-                break
-
-            if _should_skip_resume_batch(
-                train_streaming, resume_epoch, epoch, i, resume_epoch_batches
-            ):
-                # Resume for file-based training: skip batches already processed in this epoch.
-                continue
-
-            # Load the tensors onto the appropriate device
             device_batch = {
                 data_type: (t.to(device) if isinstance(t, torch.Tensor) else t)
                 for data_type, t in batch.items()
                 if data_type != "attention_mask"
             }
-            epoch_batch_index = i + 1
-            samples_processed += int(device_batch["input_ids"].shape[0])
-
-            # Extract the targets since we'll use them a bunch below
             targets = device_batch["targets"]
-
-            # Track batch statistics for metrics
-            input_token_count = int(device_batch["ntokens"])
-            pred_token_count = _count_pred_tokens(targets, tokenizer.pad_token_id)
-
-            # Add to accumulation counters for later metric calculations
-            accumulation_input_tokens += input_token_count
-            accumulation_pred_tokens += pred_token_count
-
-            # Now let's process these through the model with autocast for mixed precision using bf16
-            with _get_autocast_context(device):
-                outs = model(**device_batch)
-
-            # Process these out logits through cross entropy loss
-            # Note: we do this outside of autocast to maintain precision for the loss calculation
-            loss = F.nll_loss(
-                F.log_softmax(outs.view(-1, outs.size(-1)), dim=-1, dtype=torch.float32),
-                targets.view(-1),
-                reduction="sum",
-                ignore_index=tokenizer.pad_token_id,
-            )
-
-            # Calculate accuracy
-            acc = accuracy(outs, targets, ignore_index=tokenizer.pad_token_id)
-
-            # Accumulate loss and accuracy stats
-            accumulation_acc += acc
-            accumulation_loss += loss.item()
-
-            # Accumulate raw gradients; normalize at the accumulation boundary
-            loss.backward()
-
-            # Check if we've reached a gradient accumulation step
-            if (i + 1) % args.update_freq == 0:
-                # Scale by total predicted tokens to match per-token mean loss across microbatches.
-                _scale_gradients_by_tokens(model, accumulation_pred_tokens)
-
-                # Apply gradient clipping on the accumulated gradients
-                if args.clip_grad_norm > 0.0:
-                    gnorm = torch.nn.utils.clip_grad_norm_(
-                        model.parameters(), args.clip_grad_norm
-                    ).item()
-                else:
-                    gnorm = math.sqrt(
-                        sum(
-                            p.grad.data.norm() ** 2
-                            for p in model.parameters()
-                            if p.grad is not None
-                        )
-                    )  # record gradient norm for logging
-
-                # Now we step the scheduler (and return the LR so that we can store it)
-                lr = scheduler.step(steps)
-
-                # Reset gradients now
-                scheduler.optimizer.zero_grad()
-
-                # Calculate metrics - since we're now tracking per-token loss, our normalization is simpler
-                # We just need to average across the accumulated steps
-                # For accuracy, normalize by the total number of predicted tokens
-                normal_acc = _normalize_training_accuracy(
-                    accumulation_acc, accumulation_pred_tokens
+            with torch.no_grad():
+                with _get_autocast_context(device):
+                    outs = model_to_eval(**device_batch)
+                loss = F.nll_loss(
+                    F.log_softmax(outs.view(-1, outs.size(-1)), dim=-1, dtype=torch.float32),
+                    targets.view(-1),
+                    reduction="sum",
+                    ignore_index=tokenizer.pad_token_id,
                 )
-                # Convert to bits per token using true token normalization
-                if accumulation_pred_tokens > 0:
-                    normal_loss = accumulation_loss / accumulation_pred_tokens / math.log(2)
-                else:
-                    normal_loss = 0.0
+                pred_tokens = _count_pred_tokens(targets, tokenizer.pad_token_id)
+                if pred_tokens > 0:
+                    normal_loss = loss.item() / pred_tokens / math.log(2)
+                    normal_acc = (
+                        accuracy(outs, targets, ignore_index=tokenizer.pad_token_id) / pred_tokens
+                    )
+                    meters[loss_key].update(normal_loss, pred_tokens)
+                    meters[acc_key].update(normal_acc, pred_tokens)
 
-                # Log some debugging values here
-                LOGGER.debug("Accumulated batch information is below:")
-                LOGGER.debug(accumulation_pred_tokens)
-                LOGGER.debug(accumulation_loss)
-                LOGGER.debug(accumulation_input_tokens)
+        return meters[loss_key].avg, meters[acc_key].avg
 
-                # Update the meters below
-                if accumulation_pred_tokens > 0:
-                    meters["train_acc"].update(normal_acc, accumulation_pred_tokens)
-                    meters["train_loss"].update(normal_loss, accumulation_pred_tokens)
-                meters["token_throughput"].update(accumulation_input_tokens)
+    eval_interval_steps = args.eval_interval_steps
+    if eval_interval_steps is None:
+        eval_interval_steps = (
+            args.checkpoint_interval if args.checkpoint_interval > 0 else args.total_updates
+        )
+    if eval_interval_steps <= 0:
+        eval_interval_steps = args.total_updates
 
-                # Create a logging dict that will be passed to a tensorboard writer
-                #
-                # Quick rundown of the stats:
-                # acc:
-                #   model prediction accuracy, meter reset for each epoch
-                # loss:
-                #   loss output of the simulated batch (i.e. bsz times update_freq)
-                # sbal:
-                #   simulated batch averaged loss, keeping a running average of loss by simulated
-                #   batch over the epoch (i.e. the meter is reset at the start of each epoch)
-                # lr:
-                #   keeping track of the learning rate
-                # gnorm:
-                #   keeping track of the norm of the gradient vector for the batch
-                # ttp:
-                #   total tokens processed, keeping a running count of the amount of training
-                #   tokens the model has seen
-                # tpb:
-                #   tokens per batch, averaging out the tokens processed per batch
+    # best_loss is already initialized above (possibly from a checkpoint)
+    # Flag to track if non-trainable model repo files were saved at first checkpoint.
+    initial_outputs_saved = False
+    last_eval_step: int | None = None
 
-                logging_dict = {
-                    "acc": meters["train_acc"].avg,
-                    "loss": normal_loss,
-                    "sbal": meters["train_loss"].avg,
-                    "lr": lr,
-                    "gnorm": gnorm,
-                    "ttp": meters["token_throughput"].sum,
-                    "tpb": meters["token_throughput"].avg,
+    def _iter_train_batches():
+        if train_streaming:
+            cycle = resume_data_state["cycle"]
+            skip_samples = resume_cycle_samples if resume_mode == "streaming" else 0
+            while True:
+                LOGGER.info("Starting streaming shuffle cycle %s", cycle)
+                current_stream = train_stream.shuffle(
+                    buffer_size=args.buffer_size, seed=args.seed + cycle
+                )
+                if hasattr(current_stream, "set_epoch"):
+                    current_stream.set_epoch(cycle)
+
+                if skip_samples > 0:
+                    LOGGER.info(
+                        "Resuming streaming dataset: skipping %s already-processed samples.",
+                        skip_samples,
+                    )
+                    # Note: skip_samples applies per worker in HFStreamingDataset, so resume skips are
+                    # best-effort when num_workers > 0.
+
+                train_dataset = HFStreamingDataset(
+                    tokenizer=tokenizer,
+                    dataset_stream=current_stream,
+                    block_size=args.max_tokens,
+                    buffer_size=args.buffer_size,
+                    seed=args.seed + cycle,
+                    text_field=args.text_field,
+                    skip_samples=skip_samples,
+                )
+                train_dataloader = torch.utils.data.DataLoader(
+                    train_dataset,
+                    batch_size=args.batch_size,
+                    collate_fn=mplm,
+                    num_workers=args.num_workers if hasattr(args, "num_workers") else 4,
+                )
+                skip_samples = 0
+                batch_index = 0
+                for batch in train_dataloader:
+                    batch_index += 1
+                    yield batch, cycle, batch_index
+                cycle += 1
+                del train_dataloader
+                gc.collect()
+        else:
+            cycle = resume_data_state["cycle"]
+            skip_batches = resume_cycle_batch_index if resume_mode == "files" else 0
+            while True:
+                current_train_file = train_files[cycle % len(train_files)]
+                LOGGER.info("Starting file cycle %s using file: %s", cycle, current_train_file)
+
+                epoch_train_dataset = MPNetDataset(
+                    tokenizer=tokenizer,
+                    file_path=current_train_file,
+                    block_size=args.max_tokens,
+                )
+
+                sampler = RandomSamplerWithSeed(
+                    epoch_train_dataset, epoch=cycle, random_seed=args.seed
+                )
+
+                train_dataloader = torch.utils.data.DataLoader(
+                    epoch_train_dataset,
+                    sampler=sampler,
+                    collate_fn=mplm,
+                    batch_size=args.batch_size,
+                )
+
+                if skip_batches > 0:
+                    LOGGER.info(
+                        "Resuming file-based dataset: skipping %s already-processed batches.",
+                        skip_batches,
+                    )
+
+                batch_index = 0
+                for batch in train_dataloader:
+                    batch_index += 1
+                    if skip_batches > 0:
+                        skip_batches -= 1
+                        continue
+                    yield batch, cycle, batch_index
+
+                cycle += 1
+                skip_batches = 0
+                del train_dataloader
+                del epoch_train_dataset
+                gc.collect()
+
+    train_iter = _iter_train_batches()
+    scheduler.optimizer.zero_grad()
+    model.train()
+
+    accumulation_loss = 0
+    accumulation_acc = 0  # Count of correct predictions; normalize by predicted tokens later.
+    accumulation_input_tokens = 0
+    accumulation_pred_tokens = 0
+    micro_steps = 0
+    current_cycle = resume_data_state["cycle"]
+    cycle_samples_processed = resume_cycle_samples
+    cycle_batch_index = resume_cycle_batch_index
+
+    while steps < args.total_updates:
+        batch, batch_cycle, batch_index = next(train_iter)
+        if batch_cycle != current_cycle:
+            current_cycle = batch_cycle
+            cycle_samples_processed = 0
+
+        device_batch = {
+            data_type: (t.to(device) if isinstance(t, torch.Tensor) else t)
+            for data_type, t in batch.items()
+            if data_type != "attention_mask"
+        }
+
+        batch_size = int(device_batch["input_ids"].shape[0])
+        samples_processed += batch_size
+        cycle_samples_processed += batch_size
+        cycle_batch_index = batch_index
+
+        targets = device_batch["targets"]
+        input_token_count = int(device_batch["ntokens"])
+        pred_token_count = _count_pred_tokens(targets, tokenizer.pad_token_id)
+
+        accumulation_input_tokens += input_token_count
+        accumulation_pred_tokens += pred_token_count
+
+        with _get_autocast_context(device):
+            outs = model(**device_batch)
+
+        loss = F.nll_loss(
+            F.log_softmax(outs.view(-1, outs.size(-1)), dim=-1, dtype=torch.float32),
+            targets.view(-1),
+            reduction="sum",
+            ignore_index=tokenizer.pad_token_id,
+        )
+
+        acc = accuracy(outs, targets, ignore_index=tokenizer.pad_token_id)
+        accumulation_acc += acc
+        accumulation_loss += loss.item()
+        loss.backward()
+        micro_steps += 1
+
+        if micro_steps % args.update_freq == 0:
+            _scale_gradients_by_tokens(model, accumulation_pred_tokens)
+
+            if args.clip_grad_norm > 0.0:
+                gnorm = torch.nn.utils.clip_grad_norm_(
+                    model.parameters(), args.clip_grad_norm
+                ).item()
+            else:
+                gnorm = math.sqrt(
+                    sum(p.grad.data.norm() ** 2 for p in model.parameters() if p.grad is not None)
+                )
+
+            lr = scheduler.step(steps)
+            scheduler.optimizer.zero_grad()
+
+            normal_acc = _normalize_training_accuracy(accumulation_acc, accumulation_pred_tokens)
+            if accumulation_pred_tokens > 0:
+                normal_loss = accumulation_loss / accumulation_pred_tokens / math.log(2)
+            else:
+                normal_loss = 0.0
+
+            LOGGER.debug("Accumulated batch information is below:")
+            LOGGER.debug(accumulation_pred_tokens)
+            LOGGER.debug(accumulation_loss)
+            LOGGER.debug(accumulation_input_tokens)
+
+            if accumulation_pred_tokens > 0:
+                meters["train_acc"].update(normal_acc, accumulation_pred_tokens)
+                meters["train_loss"].update(normal_loss, accumulation_pred_tokens)
+            meters["token_throughput"].update(accumulation_input_tokens)
+
+            logging_dict = {
+                "acc": meters["train_acc"].avg,
+                "loss": normal_loss,
+                "sbal": meters["train_loss"].avg,
+                "lr": lr,
+                "gnorm": gnorm,
+                "ttp": meters["token_throughput"].sum,
+                "tpb": meters["token_throughput"].avg,
+            }
+
+            if args.tensorboard_log_dir is not None:
+                write_to_tensorboard(writers["train"], logging_dict, steps)
+            else:
+                LOGGER.info(logging_dict)
+
+            if args.wandb:
+                log_to_wandb(logging_dict, steps, "train")
+
+            accumulation_acc = 0
+            accumulation_loss = 0
+            accumulation_input_tokens = 0
+            accumulation_pred_tokens = 0
+
+            steps += 1
+
+            data_state = {
+                "mode": resume_mode,
+                "cycle": current_cycle,
+                "batch_index": cycle_batch_index,
+                "samples_in_cycle": cycle_samples_processed,
+            }
+
+            if _should_save_checkpoint(steps, args.checkpoint_interval):
+                checkpoint = {
+                    "args": vars(args),
+                    "model_states": model.state_dict(),
+                    "steps": steps,
+                    "best_loss": best_loss,
+                    "samples_processed": samples_processed,
+                    "data_state": data_state,
+                    "rng_state": {
+                        "torch": torch.get_rng_state(),
+                        "cuda": (
+                            torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
+                        ),
+                        "numpy": (np.random.get_state() if "numpy.random" in sys.modules else None),
+                    },
                 }
 
-                # Now write to tensorboard
-                if args.tensorboard_log_dir is not None:
-                    write_to_tensorboard(writers["train"], logging_dict, steps)
-                else:
-                    LOGGER.info(logging_dict)
+                checkpoint_path = checkpoint_dir / f"checkpoint{steps}.pt"
+                torch.save(checkpoint, checkpoint_path)
 
-                # Log to wandb if enabled
-                if args.wandb:
-                    log_to_wandb(logging_dict, steps, "train")
+                if args.save_optimizer_state:
+                    optimizer_state = {
+                        "optimizer": optimizer.state_dict(),
+                        "scheduler": scheduler.state_dict(),
+                        "steps": steps,
+                        "data_state": data_state,
+                    }
+                    optimizer_state_path = (
+                        optimizer_dir / f"{checkpoint_path.stem}_optimizer_state.pt"
+                    )
+                    torch.save(optimizer_state, optimizer_state_path)
 
-                # Reset accumulation counters here for the next set of accumulation steps
-                accumulation_acc = 0
-                accumulation_loss = 0
-                accumulation_input_tokens = 0
-                accumulation_pred_tokens = 0
+                if not initial_outputs_saved:
+                    args_dict = vars(args) if not isinstance(args, dict) else args
+                    args_path = checkpoint_dir / "training_args.json"
+                    with open(args_path, "w") as f:
+                        json.dump(args_dict, f, indent=4)
 
-                # Increment the step counter
-                steps += 1
+                    tokenizer_dir = checkpoint_dir / "tokenizer"
+                    tokenizer.save_pretrained(tokenizer_dir)
+                    initial_outputs_saved = True
 
-                if _should_save_checkpoint(steps, args.checkpoint_interval):
-                    # Create checkpoint object with model state and args
-                    checkpoint = {
+            if eval_interval_steps > 0 and steps % eval_interval_steps == 0:
+                final_valid_loss, final_valid_accuracy = _evaluate_split(
+                    model, valid_dataloader, "Validation", "valid_loss", "valid_acc"
+                )
+                last_eval_step = steps
+                if final_valid_loss < best_loss:
+                    best_loss = final_valid_loss
+                    best_checkpoint = {
                         "args": vars(args),
                         "model_states": model.state_dict(),
                         "steps": steps,
-                        "epoch": epoch,
                         "best_loss": best_loss,
                         "samples_processed": samples_processed,
-                        "epoch_batches_processed": epoch_batch_index,
-                        "epoch_complete": False,
+                        "data_state": data_state,
                         "rng_state": {
                             "torch": torch.get_rng_state(),
                             "cuda": (
@@ -1217,148 +1285,89 @@ def main(args: Namespace) -> None:
                         },
                     }
 
-                    # Save the checkpoint
-                    checkpoint_path = checkpoint_dir / f"checkpoint{steps}.pt"
-                    torch.save(checkpoint, checkpoint_path)
+                    best_checkpoint_path = checkpoint_dir / "best_checkpoint.pt"
+                    torch.save(best_checkpoint, best_checkpoint_path)
 
-                    # If optimizer state saving is enabled, save the optimizer state to the optimizer directory
                     if args.save_optimizer_state:
-                        optimizer_state = {
+                        best_optimizer_state = {
                             "optimizer": optimizer.state_dict(),
                             "scheduler": scheduler.state_dict(),
                             "steps": steps,
-                            "epoch": epoch,
+                            "best_loss": best_loss,
+                            "data_state": data_state,
                         }
-                        optimizer_state_path = (
-                            optimizer_dir / f"{checkpoint_path.stem}_optimizer_state.pt"
-                        )
-                        torch.save(optimizer_state, optimizer_state_path)
+                        best_optimizer_state_path = optimizer_dir / "best_optimizer_state.pt"
+                        torch.save(best_optimizer_state, best_optimizer_state_path)
 
-                    # Save the args & tokenizer if this is the first checkpoint
-                    if not initial_outputs_saved:
-                        args_dict = vars(args) if not isinstance(args, dict) else args
-                        args_path = checkpoint_dir / "training_args.json"
-                        with open(args_path, "w") as f:
-                            json.dump(args_dict, f, indent=4)
+                logging_dict = {
+                    "loss": final_valid_loss,
+                    "acc": final_valid_accuracy,
+                    "best_loss": best_loss,
+                }
 
-                        tokenizer_dir = checkpoint_dir / "tokenizer"
-                        tokenizer.save_pretrained(tokenizer_dir)
-                        initial_outputs_saved = True
+                if args.tensorboard_log_dir:
+                    write_to_tensorboard(writers["valid"], logging_dict, steps)
+                else:
+                    LOGGER.info("Validation stats:")
+                    LOGGER.info(logging_dict)
 
-        # Set the model for validation
-        model.eval()
+                if args.wandb:
+                    log_to_wandb(logging_dict, steps, "valid")
 
-        # Once the training loop is done, we begin the validation loop
-        for i, batch in track(
-            enumerate(valid_dataloader),
-            description=f"Validation epoch {epoch}",
-            total=len(valid_dataloader),
-        ):
-            # Load the tensors onto the appropriate device
-            device_batch = {
-                data_type: (t.to(device) if isinstance(t, torch.Tensor) else t)
-                for data_type, t in batch.items()
-                if data_type != "attention_mask"
-            }
+                for stat in ["train_loss", "train_acc"]:
+                    meters[stat].reset()
+                model.train()
 
-            # Extract the targets since we'll use them a bunch below
-            targets = device_batch["targets"]
-
-            # Now we move to no_grad since we don't have to calculate weights
-            with torch.no_grad():
-                with _get_autocast_context(device):
-                    outs = model(**device_batch)
-
-                # Calculate loss here (outside autocast for precision)
-                loss = F.nll_loss(
-                    F.log_softmax(outs.view(-1, outs.size(-1)), dim=-1, dtype=torch.float32),
-                    targets.view(-1),
-                    reduction="sum",
-                    ignore_index=tokenizer.pad_token_id,
-                )
-
-                pred_tokens = _count_pred_tokens(targets, tokenizer.pad_token_id)
-                if pred_tokens > 0:
-                    normal_loss = loss.item() / pred_tokens / math.log(2)
-                    normal_acc = (
-                        accuracy(outs, targets, ignore_index=tokenizer.pad_token_id) / pred_tokens
-                    )
-                    # Update the meters appropriately
-                    meters["valid_loss"].update(normal_loss, pred_tokens)
-                    meters["valid_acc"].update(normal_acc, pred_tokens)
-
-        # Now we calculate post validation stats
-        final_valid_loss = meters["valid_loss"].avg
-        final_valid_accuracy = meters["valid_acc"].avg
-
-        # Now let's save a best_val_checkpoint model
+    if last_eval_step != steps and len(valid_dataloader) > 0:
+        final_valid_loss, final_valid_accuracy = _evaluate_split(
+            model, valid_dataloader, "Validation", "valid_loss", "valid_acc"
+        )
         if final_valid_loss < best_loss:
-            # Reset the best loss to the new best loss for this epoch
             best_loss = final_valid_loss
-
-            # Create best checkpoint object with model state and args
+            final_data_state = {
+                "mode": resume_mode,
+                "cycle": current_cycle,
+                "batch_index": cycle_batch_index,
+                "samples_in_cycle": cycle_samples_processed,
+            }
             best_checkpoint = {
                 "args": vars(args),
                 "model_states": model.state_dict(),
                 "steps": steps,
-                "epoch": epoch,
                 "best_loss": best_loss,
                 "samples_processed": samples_processed,
-                "epoch_batches_processed": epoch_batch_index,
-                "epoch_complete": True,
+                "data_state": final_data_state,
                 "rng_state": {
                     "torch": torch.get_rng_state(),
                     "cuda": (torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None),
                     "numpy": (np.random.get_state() if "numpy.random" in sys.modules else None),
                 },
             }
-
-            # Save the best checkpoint
             best_checkpoint_path = checkpoint_dir / "best_checkpoint.pt"
             torch.save(best_checkpoint, best_checkpoint_path)
-
-            # If optimizer state saving is enabled, save the optimizer state to the optimizer directory
             if args.save_optimizer_state:
                 best_optimizer_state = {
                     "optimizer": optimizer.state_dict(),
                     "scheduler": scheduler.state_dict(),
                     "steps": steps,
-                    "epoch": epoch,
                     "best_loss": best_loss,
+                    "data_state": final_data_state,
                 }
                 best_optimizer_state_path = optimizer_dir / "best_optimizer_state.pt"
                 torch.save(best_optimizer_state, best_optimizer_state_path)
 
-        # Load these into a logging dict and pass it on to be written in tensorboard
         logging_dict = {
             "loss": final_valid_loss,
             "acc": final_valid_accuracy,
             "best_loss": best_loss,
         }
-
-        # Log to tensorboard or print out the dict
         if args.tensorboard_log_dir:
             write_to_tensorboard(writers["valid"], logging_dict, steps)
         else:
             LOGGER.info("Validation stats:")
             LOGGER.info(logging_dict)
-
-        # Log to wandb if enabled
         if args.wandb:
             log_to_wandb(logging_dict, steps, "valid")
-
-        # Now, before looping back, we increment the epoch counter and we delete the train data
-        # loader and garbage collect it
-        epoch += 1
-
-        # Clean up datasets if using file-based approach
-        if not train_streaming:
-            del train_dataloader
-            del epoch_train_dataset
-            gc.collect()
-        else:
-            del train_dataloader
-            gc.collect()
 
     # If we've reached the end of the training cycle, i.e., hit total number of update steps, we can
     # use the test dataloader we built above to get a final test metric using the best checkpoint
@@ -1390,7 +1399,7 @@ def main(args: Namespace) -> None:
     # Now we iterate through the test dataloader
     for i, batch in track(
         enumerate(test_dataloader),
-        description="Test epoch",
+        description="Test evaluation",
         total=len(test_dataloader),
     ):
         # Load the tensors onto the appropriate device
@@ -1612,6 +1621,13 @@ def cli_main() -> None:
         help="Number of samples to use for validation and test sets if they are not available in the "
         "dataset.",
         default=500,
+        type=int,
+    )
+    parser.add_argument(
+        "--eval-interval-steps",
+        help="How often (in update steps) to run validation. Defaults to --checkpoint-interval if "
+        "set, otherwise --total-updates.",
+        default=None,
         type=int,
     )
     parser.add_argument(
