@@ -12,6 +12,7 @@
     - [Requirements](#requirements)
   - [Usage](#usage)
     - [Pretraining MPNet](#pretraining-mpnet)
+    - [Resuming Training](#resuming-training)
     - [Porting Checkpoint to Hugging Face](#porting-checkpoint-to-hugging-face)
   - [Model Architecture](#model-architecture)
   - [Project Structure](#project-structure)
@@ -19,7 +20,6 @@
   - [Contributing](#contributing)
   - [License](#license)
   - [Acknowledgements](#acknowledgements)
-
 
 ## About the Project
 
@@ -29,7 +29,8 @@ MPNet (Masked and Permuted Pre-training for Language Understanding) is a powerfu
 - Offering extensive annotations and comments throughout the codebase to improve understanding.
 - Enabling pretraining without the full `fairseq` dependency, facilitating use on various hardware setups.
 
-**This repo** is a fork/update of the [original by yext](https://github.com/yext/annotated-mpnet).
+> [!NOTE]
+> **This repo** is a fork/update of the [original by yext](https://github.com/yext/annotated-mpnet).
 
 ## Key Features
 
@@ -41,15 +42,19 @@ MPNet (Masked and Permuted Pre-training for Language Understanding) is a powerfu
 
 ## Installation
 
+pip install directly from the GitHub repository:
+
+```bash
+pip install "git+https://github.com/pszemraj/annotated-mpnet.git"
+```
+
+Or, clone the repository and install in editable mode:
+
 ```bash
 git clone https://github.com/pszemraj/annotated-mpnet.git
 cd annotated-mpnet
 pip install -e .
 ```
-
-> [!TIP]
-> Installing the package pulls in runtime deps like `rich` and `datasets` used by logging and the
-> streaming data pipeline. If you run from source with `PYTHONPATH`, install those explicitly.
 
 > [!NOTE]
 > Pretraining MPNet is computationally intensive and requires a CUDA-enabled GPU. The training script will exit if CUDA is not available.
@@ -157,6 +162,7 @@ pretrain-mpnet \
 - `--seed`: Random seed for reproducibility (default: 12345).
 
 Data source selection:
+
 - If `--dataset-name` is omitted, the script defaults to the streaming dataset `HuggingFaceFW/fineweb-edu`.
 - If you provide `--train-dir`, `--valid-file`, and `--test-file`, the file-based path is used automatically (no need to pass `--dataset-name ""`).
 
@@ -191,6 +197,7 @@ pretrain-mpnet \
 ```
 
 Notes:
+
 - If you pass `--resume` with a legacy checkpoint (pre-v0.1.5), the script will **only load weights** and start fresh from step 0.
 - To initialize from a legacy checkpoint, you can also convert it to Hugging Face format and pass `--hf-model-path`.
 - Checkpoints are loaded with safe `weights_only` by default. Use `--trust-checkpoint` to load legacy or external `.pt` files.
