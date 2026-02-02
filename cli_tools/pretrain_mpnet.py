@@ -21,6 +21,8 @@ LOG_FORMAT = "%(message)s"
 logging.basicConfig(level="INFO", format=LOG_FORMAT, datefmt="[%X] ", handlers=[RichHandler()])
 LOGGER = logging.getLogger(__name__)
 
+DEFAULT_STREAMING_DATASET = "gair-prox/DCLM-pro"
+
 
 import torch
 import torch.nn.functional as F
@@ -1790,9 +1792,10 @@ def cli_main() -> None:
     parser.add_argument(
         "--dataset-name",
         help="The name of the HuggingFace dataset to use (e.g., 'HuggingFaceFW/fineweb-edu'). If specified, this "
-        "will override --train-dir, --valid-file, and --test-file.",
+        "will override --train-dir, --valid-file, and --test-file. Defaults to "
+        f"'{DEFAULT_STREAMING_DATASET}' when no file-based paths are provided.",
         type=str,
-        default="gair-prox/DCLM-pro",
+        default=None,
     )
     parser.add_argument(
         "--text-field",
@@ -2033,13 +2036,20 @@ def cli_main() -> None:
 
     args = parser.parse_args()
 
-    # Check for validity of arguments
-    if args.dataset_name is None and (
-        args.train_dir is None or args.valid_file is None or args.test_file is None
-    ):
-        parser.error(
-            "Either --dataset-name or (--train-dir, --valid-file, and --test-file) must be provided."
-        )
+    # Normalize empty dataset-name for backward compatibility with older commands.
+    if args.dataset_name == "":
+        args.dataset_name = None
+
+    has_any_file = any([args.train_dir, args.valid_file, args.test_file])
+    has_file_data = all([args.train_dir, args.valid_file, args.test_file])
+
+    if args.dataset_name is None:
+        if has_any_file and not has_file_data:
+            parser.error("File-based data requires --train-dir, --valid-file, and --test-file.")
+        if not has_file_data:
+            args.dataset_name = DEFAULT_STREAMING_DATASET
+    elif has_any_file:
+        LOGGER.warning("--dataset-name provided; ignoring --train-dir/--valid-file/--test-file.")
 
     # Check for validity of resumable training arguments
     if args.resume and args.hf_model_path:
