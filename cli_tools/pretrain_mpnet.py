@@ -712,18 +712,10 @@ def main(args: Namespace) -> None:
                 collate_fn=mplm,
             )
 
-            # Skip validation/test samples plus any already-processed training samples on resume.
+            # Skip validation/test samples from the raw stream so we never train on them.
             stream_skip_samples = args.eval_samples * 2
-            if resume_samples_processed > 0:
-                stream_skip_samples += resume_samples_processed
-                LOGGER.info(
-                    "Resuming streaming dataset: skipping "
-                    f"{stream_skip_samples} samples "
-                    f"({args.eval_samples * 2} eval/test + {resume_samples_processed} processed)."
-                )
-            # Note: skip_samples applies per worker in HFStreamingDataset, so resume skips are
-            # best-effort when num_workers > 0.
-            train_stream = train_stream.skip(stream_skip_samples)
+            if stream_skip_samples > 0:
+                train_stream = train_stream.skip(stream_skip_samples)
             train_streaming = True
 
         except Exception as e:
@@ -753,6 +745,9 @@ def main(args: Namespace) -> None:
         train_files = [str(path) for path in train_dir.iterdir() if path.is_file()]
 
     # Note: checkpoint_dir is already created above when handling resume logic
+
+    # For streaming resumes, skip already-processed samples after shuffling in the first epoch.
+    stream_resume_skip_samples = resume_samples_processed if train_streaming else 0
 
     # Create optimizer state directory if saving optimizer states
     if args.save_optimizer_state:
@@ -974,6 +969,17 @@ def main(args: Namespace) -> None:
                 buffer_size=args.buffer_size, seed=args.seed + epoch
             )
 
+            resume_skip = 0
+            if stream_resume_skip_samples > 0:
+                resume_skip = stream_resume_skip_samples
+                stream_resume_skip_samples = 0
+                LOGGER.info(
+                    "Resuming streaming dataset: skipping "
+                    f"{resume_skip} already-processed samples after shuffle."
+                )
+                # Note: skip_samples applies per worker in HFStreamingDataset, so resume skips are
+                # best-effort when num_workers > 0.
+
             train_dataloader = HFStreamingDataset(
                 tokenizer=tokenizer,
                 dataset_stream=current_stream,  # Use the already loaded stream
@@ -981,6 +987,7 @@ def main(args: Namespace) -> None:
                 buffer_size=args.buffer_size,
                 seed=args.seed + epoch,  # Change seed each epoch for better variety
                 text_field=args.text_field,
+                skip_samples=resume_skip,
             )
 
             train_dataloader = torch.utils.data.DataLoader(
