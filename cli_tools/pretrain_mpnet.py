@@ -10,6 +10,7 @@ import logging
 import math
 import os
 import pathlib
+import random
 import sys
 from argparse import Namespace
 from typing import Any, Iterator, TYPE_CHECKING
@@ -75,6 +76,31 @@ def accuracy(output: torch.Tensor, target: torch.Tensor, ignore_index: int | Non
             target = target[mask]
         correct = pred.eq(target)
     return correct.sum().item()
+
+
+def _seed_everything(seed: int) -> None:
+    """Seed Python, NumPy, and Torch RNGs.
+
+    :param int seed: Seed value to apply.
+    :return None: This function returns nothing.
+    """
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
+def _atomic_torch_save(payload: Any, path: pathlib.Path) -> None:
+    """Write a torch checkpoint atomically to avoid partial files.
+
+    :param Any payload: Object to serialize.
+    :param pathlib.Path path: Destination path.
+    :return None: This function returns nothing.
+    """
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    torch.save(payload, tmp_path)
+    os.replace(tmp_path, path)
 
 
 def write_to_tensorboard(writer: "SummaryWriter", logging_dict: dict, step: int) -> None:
@@ -724,6 +750,9 @@ def main(args: Namespace) -> None:
     _ensure_bf16_supported(device)
     check_and_activate_tf32()  # Check if the GPU supports NVIDIA Ampere or later and enable TF32
 
+    # Seed all RNGs early for reproducible initialization and data ordering.
+    _seed_everything(args.seed)
+
     # First test to see if max_positions and max_tokens are set differently. If they are, raise a
     # warning to the user to let them know this is very experimental and will most likely lead to
     # unexpect behavior
@@ -899,7 +928,13 @@ def main(args: Namespace) -> None:
 
     # Next, we instantiate the model and the data collator
     model = MPNetForPretraining(args, tokenizer)
-    mplm = DataCollatorForMaskedPermutedLanguageModeling(tokenizer=tokenizer, random_seed=args.seed)
+    train_collator = DataCollatorForMaskedPermutedLanguageModeling(
+        tokenizer=tokenizer, random_seed=args.seed
+    )
+    eval_collator = DataCollatorForMaskedPermutedLanguageModeling(
+        tokenizer=tokenizer, random_seed=args.seed + 1
+    )
+    eval_collator_state = eval_collator.get_rng_state()
 
     # Initialize wandb if enabled (after model creation)
     if args.wandb:
@@ -994,13 +1029,13 @@ def main(args: Namespace) -> None:
             valid_dataloader = torch.utils.data.DataLoader(
                 valid_dataset,
                 batch_size=args.batch_size,
-                collate_fn=mplm,
+                collate_fn=eval_collator,
             )
 
             test_dataloader = torch.utils.data.DataLoader(
                 test_dataset,
                 batch_size=args.batch_size,
-                collate_fn=mplm,
+                collate_fn=eval_collator,
             )
 
             # Skip validation/test samples from the raw stream so we never train on them.
@@ -1025,10 +1060,10 @@ def main(args: Namespace) -> None:
         )
 
         valid_dataloader = torch.utils.data.DataLoader(
-            valid_dataset, collate_fn=mplm, batch_size=args.batch_size
+            valid_dataset, collate_fn=eval_collator, batch_size=args.batch_size
         )
         test_dataloader = torch.utils.data.DataLoader(
-            test_dataset, collate_fn=mplm, batch_size=args.batch_size
+            test_dataset, collate_fn=eval_collator, batch_size=args.batch_size
         )
 
         # Get each of the files in the training directory
@@ -1290,7 +1325,7 @@ def main(args: Namespace) -> None:
                     )
                 else:
                     try:
-                        mplm.set_rng_state(checkpoint["collator_rng_state"])
+                        train_collator.set_rng_state(checkpoint["collator_rng_state"])
                         LOGGER.info("Restored collator RNG state")
                     except (TypeError, ValueError, AttributeError) as e:
                         LOGGER.warning(f"Could not restore collator RNG state: {e}")
@@ -1355,12 +1390,29 @@ def main(args: Namespace) -> None:
         "token_throughput": AverageMeter(),
     }
 
+    def _select_model_inputs(batch: dict[str, Any]) -> dict[str, Any]:
+        """Select only the inputs required by the pretraining model.
+
+        :param dict[str, Any] batch: Full batch dictionary from the collator.
+        :return dict[str, Any]: Filtered model inputs.
+        """
+        model_inputs = {
+            "input_ids": batch["input_ids"],
+            "positions": batch["positions"],
+            "pred_size": batch["pred_size"],
+        }
+        if "attention_mask" in batch:
+            model_inputs["attention_mask"] = batch["attention_mask"]
+        return model_inputs
+
     def _evaluate_split(
         model_to_eval: torch.nn.Module,
         dataloader: torch.utils.data.DataLoader,
         split_name: str,
         loss_key: str,
         acc_key: str,
+        collator: DataCollatorForMaskedPermutedLanguageModeling | None = None,
+        collator_state: dict[str, Any] | None = None,
     ) -> tuple[float, float]:
         """Evaluate a model on a dataloader split.
 
@@ -1369,10 +1421,14 @@ def main(args: Namespace) -> None:
         :param str split_name: Display name for logging.
         :param str loss_key: Meter key to store loss values.
         :param str acc_key: Meter key to store accuracy values.
+        :param DataCollatorForMaskedPermutedLanguageModeling collator: Optional eval collator.
+        :param dict[str, Any] collator_state: Optional collator RNG state for deterministic eval.
         :return tuple[float, float]: Average loss and accuracy for the split.
         """
         meters[loss_key].reset()
         meters[acc_key].reset()
+        if collator is not None and collator_state is not None:
+            collator.set_rng_state(collator_state)
         model_to_eval.eval()
         for _, batch in track(
             enumerate(dataloader),
@@ -1386,9 +1442,10 @@ def main(args: Namespace) -> None:
             targets = device_batch["targets"]
             with torch.no_grad():
                 with _get_autocast_context(device):
-                    outs = model_to_eval(**device_batch)
-                loss = F.nll_loss(
-                    F.log_softmax(outs.view(-1, outs.size(-1)), dim=-1, dtype=torch.float32),
+                    outs = model_to_eval(**_select_model_inputs(device_batch))
+                logits = outs.float().view(-1, outs.size(-1))
+                loss = F.cross_entropy(
+                    logits,
                     targets.view(-1),
                     reduction="sum",
                     ignore_index=tokenizer.pad_token_id,
@@ -1472,7 +1529,7 @@ def main(args: Namespace) -> None:
                 train_dataloader = torch.utils.data.DataLoader(
                     train_dataset,
                     batch_size=args.batch_size,
-                    collate_fn=mplm,
+                    collate_fn=train_collator,
                     num_workers=args.num_workers if hasattr(args, "num_workers") else 4,
                 )
                 skip_samples = 0
@@ -1505,7 +1562,7 @@ def main(args: Namespace) -> None:
                 train_dataloader = torch.utils.data.DataLoader(
                     epoch_train_dataset,
                     sampler=sampler,
-                    collate_fn=mplm,
+                    collate_fn=train_collator,
                     batch_size=args.batch_size,
                 )
 
@@ -1569,11 +1626,12 @@ def main(args: Namespace) -> None:
             accumulation_pred_tokens += pred_token_count
 
             with _get_autocast_context(device):
-                outs = model(**device_batch)
+                outs = model(**_select_model_inputs(device_batch))
 
             # Compute loss in fp32 outside autocast for numerical stability.
-            loss = F.nll_loss(
-                F.log_softmax(outs.view(-1, outs.size(-1)), dim=-1, dtype=torch.float32),
+            logits = outs.float().view(-1, outs.size(-1))
+            loss = F.cross_entropy(
+                logits,
                 targets.view(-1),
                 reduction="sum",
                 ignore_index=tokenizer.pad_token_id,
@@ -1673,12 +1731,12 @@ def main(args: Namespace) -> None:
                                 np.random.get_state() if "numpy.random" in sys.modules else None
                             ),
                         },
-                        "collator_rng_state": mplm.get_rng_state(),
+                        "collator_rng_state": train_collator.get_rng_state(),
                         "streaming_rng_state": None,
                     }
 
                     checkpoint_path = checkpoint_dir / f"checkpoint{steps}.pt"
-                    torch.save(checkpoint, checkpoint_path)
+                    _atomic_torch_save(checkpoint, checkpoint_path)
 
                     if args.save_optimizer_state:
                         optimizer_state = {
@@ -1690,7 +1748,7 @@ def main(args: Namespace) -> None:
                         optimizer_state_path = (
                             optimizer_dir / f"{checkpoint_path.stem}_optimizer_state.pt"
                         )
-                        torch.save(optimizer_state, optimizer_state_path)
+                        _atomic_torch_save(optimizer_state, optimizer_state_path)
 
                     if not initial_outputs_saved:
                         args_dict = vars(args) if not isinstance(args, dict) else args
@@ -1710,7 +1768,13 @@ def main(args: Namespace) -> None:
 
                 if has_validation and eval_interval_steps > 0 and steps % eval_interval_steps == 0:
                     final_valid_loss, final_valid_accuracy = _evaluate_split(
-                        model, valid_dataloader, "Validation", "valid_loss", "valid_acc"
+                        model,
+                        valid_dataloader,
+                        "Validation",
+                        "valid_loss",
+                        "valid_acc",
+                        collator=eval_collator,
+                        collator_state=eval_collator_state,
                     )
                     last_eval_step = steps
                     if final_valid_loss < best_loss:
@@ -1733,12 +1797,12 @@ def main(args: Namespace) -> None:
                                     np.random.get_state() if "numpy.random" in sys.modules else None
                                 ),
                             },
-                            "collator_rng_state": mplm.get_rng_state(),
+                            "collator_rng_state": train_collator.get_rng_state(),
                             "streaming_rng_state": None,
                         }
 
                         best_checkpoint_path = checkpoint_dir / "best_checkpoint.pt"
-                        torch.save(best_checkpoint, best_checkpoint_path)
+                        _atomic_torch_save(best_checkpoint, best_checkpoint_path)
 
                         if args.save_optimizer_state:
                             best_optimizer_state = {
@@ -1749,7 +1813,7 @@ def main(args: Namespace) -> None:
                                 "data_state": data_state,
                             }
                             best_optimizer_state_path = optimizer_dir / "best_optimizer_state.pt"
-                            torch.save(best_optimizer_state, best_optimizer_state_path)
+                            _atomic_torch_save(best_optimizer_state, best_optimizer_state_path)
 
                     logging_dict = {
                         "loss": final_valid_loss,
@@ -1775,7 +1839,13 @@ def main(args: Namespace) -> None:
         train_iter.close()
     if has_validation and last_eval_step != steps:
         final_valid_loss, final_valid_accuracy = _evaluate_split(
-            model, valid_dataloader, "Validation", "valid_loss", "valid_acc"
+            model,
+            valid_dataloader,
+            "Validation",
+            "valid_loss",
+            "valid_acc",
+            collator=eval_collator,
+            collator_state=eval_collator_state,
         )
         if final_valid_loss < best_loss:
             best_loss = final_valid_loss
@@ -1799,11 +1869,11 @@ def main(args: Namespace) -> None:
                         np.random.get_state() if "numpy.random" in sys.modules else None
                     ),
                 },
-                "collator_rng_state": mplm.get_rng_state(),
+                "collator_rng_state": train_collator.get_rng_state(),
                 "streaming_rng_state": None,
             }
             best_checkpoint_path = checkpoint_dir / "best_checkpoint.pt"
-            torch.save(best_checkpoint, best_checkpoint_path)
+            _atomic_torch_save(best_checkpoint, best_checkpoint_path)
             if args.save_optimizer_state:
                 best_optimizer_state = {
                     "optimizer": optimizer.state_dict(),
@@ -1813,7 +1883,7 @@ def main(args: Namespace) -> None:
                     "data_state": final_data_state,
                 }
                 best_optimizer_state_path = optimizer_dir / "best_optimizer_state.pt"
-                torch.save(best_optimizer_state, best_optimizer_state_path)
+                _atomic_torch_save(best_optimizer_state, best_optimizer_state_path)
 
         logging_dict = {
             "loss": final_valid_loss,
@@ -1880,7 +1950,13 @@ def main(args: Namespace) -> None:
 
         # Reuse the shared evaluation helper to keep test/valid logic consistent.
         final_test_loss, final_test_accuracy = _evaluate_split(
-            test_model, test_dataloader, "Test", "test_loss", "test_acc"
+            test_model,
+            test_dataloader,
+            "Test",
+            "test_loss",
+            "test_acc",
+            collator=eval_collator,
+            collator_state=eval_collator_state,
         )
 
         # Load these into a logging dict and pass it on to be written in tensorboard
@@ -2025,8 +2101,8 @@ def cli_main() -> None:
     )
     parser.add_argument(
         "--train-dir",
-        help="The directory containing training files. This should generally be a directory since "
-        "there are usually too many train files to fit in memory.",
+        help="The directory containing training files. Each file is fully loaded into memory per "
+        "cycle; for large corpora prefer --dataset-name streaming.",
         type=str,
         default=None,
     )

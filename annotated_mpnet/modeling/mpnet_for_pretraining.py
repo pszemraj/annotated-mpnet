@@ -134,9 +134,13 @@ class MPNetForPretraining(nn.Module):
         :param int pred_size: Number of tokens to predict.
         :param torch.Tensor attention_mask: Optional attention mask (1 for real tokens), defaults to None.
         :param bool return_mlm: Whether to return an additional MLM head output, defaults to False.
-        :param dict kwargs: Additional unused keyword arguments.
+        :param dict kwargs: Additional keyword arguments (must be empty).
         :return torch.Tensor: Vocabulary logits (or logits tuple when ``return_mlm`` is True).
         """
+        if kwargs:
+            raise ValueError(
+                f"Unexpected keyword arguments to MPNetForPretraining.forward: {kwargs}"
+            )
 
         # Calculate initial embeddings
         emb = self.sentence_encoder.encode_emb(input_ids, positions)
@@ -153,6 +157,17 @@ class MPNetForPretraining(nn.Module):
             positions[:, :-pred_size]
         )
         query_position_bias = content_position_bias[:, -pred_size:].contiguous()
+
+        # Cast position bias once to match the attention dtype/device.
+        def _cast_bias(bias: Optional[torch.Tensor], ref: torch.Tensor) -> Optional[torch.Tensor]:
+            if bias is None:
+                return None
+            if bias.device != ref.device or bias.dtype != ref.dtype:
+                return bias.to(device=ref.device, dtype=ref.dtype)
+            return bias
+
+        content_position_bias = _cast_bias(content_position_bias, emb)
+        query_position_bias = _cast_bias(query_position_bias, emb)
 
         # Get the sz of the inital src_length without the tokens to be predicted
         sz = c.size(0) - pred_size
@@ -495,9 +510,9 @@ def two_stream_self_attention(
         attn_bias_from_positions = False
 
         if bias is not None:
-            attn_bias = bias.to(device=device, dtype=dtype).view(
-                bsz, self.num_heads, target_len, source_len
-            )
+            if bias.device != device or bias.dtype != dtype:
+                bias = bias.to(device=device, dtype=dtype)
+            attn_bias = bias.view(bsz, self.num_heads, target_len, source_len)
             attn_bias_from_positions = True
 
         if attn_bias is None and (attn_mask is not None or padding_mask is not None):

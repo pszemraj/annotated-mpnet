@@ -85,6 +85,8 @@ class MPNetDataset(torch.utils.data.Dataset):
         :param object dataset: Pre-loaded HuggingFace dataset or list of examples, defaults to None.
         :param int block_size: Maximum number of tokens per block, defaults to 512.
         :param str field_name: Field containing text in the dataset, defaults to "text".
+        :note: File-based datasets are fully loaded into memory and tokenized line-by-line without
+            sequence packing.
         :raises ValueError: If neither ``file_path`` nor ``dataset`` is provided.
         :raises ValueError: If ``file_path`` does not exist.
         """
@@ -435,6 +437,31 @@ class DataCollatorForMaskedPermutedLanguageModeling:
         self.weights = weights / weights.sum()
         self._special_ids = list(tokenizer.all_special_ids)
 
+    def reseed(self, random_seed: int) -> None:
+        """Reset the collator RNGs to a new seed.
+
+        :param int random_seed: Seed to initialize RNGs.
+        :return None: This method returns nothing.
+        """
+        self.random_seed = random_seed
+        self._np_rng = np.random.default_rng(random_seed)
+        self._torch_generator = torch.Generator()
+        self._torch_generator.manual_seed(random_seed)
+
+    def _maybe_seed_worker(self) -> None:
+        """Seed RNGs for DataLoader worker processes.
+
+        :return None: This method returns nothing.
+        """
+        worker_info = torch.utils.data.get_worker_info()
+        if worker_info is None:
+            return
+        worker_id = worker_info.id
+        if getattr(self, "_worker_seeded_id", None) != worker_id:
+            # Use the worker seed derived from the main process to avoid identical streams.
+            self.reseed(worker_info.seed)
+            self._worker_seeded_id = worker_id
+
     def __call__(self, examples: Sequence[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
         return self.collate_fn(examples)
 
@@ -467,6 +494,7 @@ class DataCollatorForMaskedPermutedLanguageModeling:
         :param Sequence[Dict[str, torch.Tensor]] examples: Tokenized examples.
         :return Dict[str, torch.Tensor]: Batch dictionary with masked inputs and targets.
         """
+        self._maybe_seed_worker()
 
         # Start by creating a batch
         batch = self.tokenizer.pad(examples, return_tensors="pt")
