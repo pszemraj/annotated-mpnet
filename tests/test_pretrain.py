@@ -10,8 +10,12 @@ import torch
 import torch.nn.functional as F
 from transformers import AutoTokenizer
 
+from annotated_mpnet.modeling.mpnet_for_pretraining import (
+    make_query_and_content_mask,
+    two_stream_self_attention,
+)
 from annotated_mpnet.scheduler import PolynomialDecayLRScheduler
-from annotated_mpnet.transformer_modules import SentenceEncoder
+from annotated_mpnet.transformer_modules import RelativeMultiHeadAttention, SentenceEncoder
 from annotated_mpnet.utils import utils
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -160,6 +164,83 @@ class TestPretrainHelpers(unittest.TestCase):
         last_only, _ = model(tokens, last_state_only=True)
         self.assertEqual(all_states[-1].shape, last_only[0].shape)
         self.assertEqual(all_states[-1].shape[:2], tokens.shape)
+
+    def test_two_stream_attention_padding_mask(self) -> None:
+        """Ensure padding masks stay 2D and SDPA matches non-SDPA behavior.
+
+        :return None: This test returns nothing.
+        """
+        torch.manual_seed(0)
+        bsz = 2
+        base_seq_len = 4
+        pred_size = 2
+        input_len = base_seq_len + 2 * pred_size
+        key_len = base_seq_len + pred_size
+
+        input_ids = torch.randint(1, 10, (bsz, input_len))
+        input_ids[0, 1] = 0
+        input_ids[1, 2] = 0
+
+        query_mask, content_mask, key_padding_mask = make_query_and_content_mask(
+            input_ids, base_seq_len, pred_size, pad_token_id=0
+        )
+        self.assertEqual(query_mask.dim(), 2)
+        self.assertEqual(content_mask.dim(), 2)
+        self.assertIsNotNone(key_padding_mask)
+        self.assertEqual(key_padding_mask.dim(), 2)
+        self.assertEqual(key_padding_mask.shape, (bsz, key_len))
+        self.assertTrue(key_padding_mask.any())
+
+        embed_dim = 8
+        num_heads = 2
+        attn = RelativeMultiHeadAttention(
+            embed_dim=embed_dim,
+            num_heads=num_heads,
+            dropout=0.0,
+            self_attention=True,
+        )
+        attn.eval()
+
+        c = torch.randn(key_len, bsz, embed_dim)
+        q = torch.randn(pred_size, bsz, embed_dim)
+
+        attn.onnx_trace = False
+        c_sdpa, q_sdpa = two_stream_self_attention(
+            attn,
+            query=[c, q],
+            key=c,
+            value=c,
+            query_mask=query_mask,
+            content_mask=content_mask,
+            key_padding_mask=key_padding_mask,
+        )
+
+        attn.onnx_trace = True
+        c_nosdpa, q_nosdpa = two_stream_self_attention(
+            attn,
+            query=[c, q],
+            key=c,
+            value=c,
+            query_mask=query_mask,
+            content_mask=content_mask,
+            key_padding_mask=key_padding_mask,
+        )
+
+        torch.testing.assert_close(c_sdpa, c_nosdpa, atol=1e-5, rtol=1e-4)
+        torch.testing.assert_close(q_sdpa, q_nosdpa, atol=1e-5, rtol=1e-4)
+
+        attn.onnx_trace = False
+        c_nomask, q_nomask = two_stream_self_attention(
+            attn,
+            query=[c, q],
+            key=c,
+            value=c,
+            query_mask=query_mask,
+            content_mask=content_mask,
+            key_padding_mask=None,
+        )
+        self.assertFalse(torch.allclose(c_sdpa, c_nomask))
+        self.assertFalse(torch.allclose(q_sdpa, q_nomask))
 
     def test_resolve_best_loss_falls_back_to_best_checkpoint(self) -> None:
         """Fallback to best checkpoint best_loss when missing in resume checkpoint.

@@ -143,7 +143,7 @@ class MPNetForPretraining(nn.Module):
         sz = c.size(0) - pred_size
 
         # Get the query and content masks using the helper function below
-        query_mask, content_mask = make_query_and_content_mask(
+        query_mask, content_mask, key_padding_mask = make_query_and_content_mask(
             input_ids, sz, pred_size, self.sentence_encoder.padding_idx
         )
 
@@ -175,6 +175,7 @@ class MPNetForPretraining(nn.Module):
                         query_mask,
                         content_position_bias,
                         query_position_bias,
+                        key_padding_mask,
                     )
 
                 c, q = checkpoint(_layer_forward, c, q, use_reentrant=False)
@@ -187,6 +188,7 @@ class MPNetForPretraining(nn.Module):
                     query_mask,
                     content_position_bias,
                     query_position_bias,
+                    key_padding_mask,
                 )
 
         # Process the final layer norm
@@ -311,6 +313,7 @@ def encode_two_stream_attention(
     query_mask: Optional[torch.Tensor] = None,
     content_position_bias: Optional[torch.Tensor] = None,
     query_position_bias: Optional[torch.Tensor] = None,
+    key_padding_mask: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Compute two-stream attention for a single encoder layer.
 
@@ -321,6 +324,7 @@ def encode_two_stream_attention(
     :param torch.Tensor query_mask: Query attention mask, defaults to None.
     :param torch.Tensor content_position_bias: Content position bias, defaults to None.
     :param torch.Tensor query_position_bias: Query position bias, defaults to None.
+    :param torch.Tensor key_padding_mask: Padding mask for keys, defaults to None.
     :return Tuple[torch.Tensor, torch.Tensor]: Updated content and query tensors.
     """
 
@@ -380,6 +384,7 @@ def encode_two_stream_attention(
         content_mask=content_mask,
         query_position_bias=query_position_bias,
         content_position_bias=content_position_bias,
+        key_padding_mask=key_padding_mask,
     )
 
     # Calculate skip connection, inner layer norms, and feed forward after attention calculation
@@ -400,6 +405,7 @@ def two_stream_self_attention(
     content_mask: Optional[torch.Tensor] = None,
     query_position_bias: Optional[torch.Tensor] = None,
     content_position_bias: Optional[torch.Tensor] = None,
+    key_padding_mask: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Compute two-stream self-attention using encoder attention weights.
 
@@ -411,6 +417,7 @@ def two_stream_self_attention(
     :param torch.Tensor content_mask: Content attention mask, defaults to None.
     :param torch.Tensor query_position_bias: Query position bias, defaults to None.
     :param torch.Tensor content_position_bias: Content position bias, defaults to None.
+    :param torch.Tensor key_padding_mask: Padding mask for keys, defaults to None.
     :return Tuple[torch.Tensor, torch.Tensor]: Updated content and query tensors.
     """
 
@@ -448,6 +455,7 @@ def two_stream_self_attention(
     def build_attn_bias(
         attn_mask: Optional[torch.Tensor],
         bias: Optional[torch.Tensor],
+        padding_mask: Optional[torch.Tensor],
         target_len: int,
         source_len: int,
         device: torch.device,
@@ -457,6 +465,7 @@ def two_stream_self_attention(
 
         :param torch.Tensor attn_mask: Attention mask tensor, defaults to None.
         :param torch.Tensor bias: Position bias tensor, defaults to None.
+        :param torch.Tensor padding_mask: Padding mask for keys, defaults to None.
         :param int target_len: Target sequence length.
         :param int source_len: Source sequence length.
         :param torch.device device: Device for the bias tensor.
@@ -482,6 +491,16 @@ def two_stream_self_attention(
         if bias is not None:
             bias = bias.to(device=device, dtype=dtype)
             attn_bias = bias if attn_bias is None else attn_bias + bias
+
+        if padding_mask is not None:
+            key_mask = padding_mask.to(torch.bool)
+            key_mask = key_mask.unsqueeze(1).expand(bsz, target_len, source_len)
+            key_mask = key_mask.unsqueeze(1).expand(bsz, self.num_heads, target_len, source_len)
+            key_mask = key_mask.reshape(bsz * self.num_heads, target_len, source_len)
+            key_bias = torch.zeros(key_mask.shape, device=device, dtype=dtype).masked_fill(
+                key_mask, float("-inf")
+            )
+            attn_bias = key_bias if attn_bias is None else attn_bias + key_bias
 
         return attn_bias
 
@@ -514,6 +533,7 @@ def two_stream_self_attention(
             attn_bias = build_attn_bias(
                 mask,
                 bias,
+                key_padding_mask,
                 _q.size(1),
                 k.size(1),
                 device=_q.device,
@@ -537,6 +557,19 @@ def two_stream_self_attention(
             # Process attention masking
             if mask is not None:
                 attn_weights = fill_mask(attn_weights, mask)
+
+            if key_padding_mask is not None:
+                key_mask = key_padding_mask.to(torch.bool)
+                key_mask = key_mask.unsqueeze(1).expand(
+                    bsz, attn_weights.size(1), attn_weights.size(2)
+                )
+                key_mask = key_mask.unsqueeze(1).expand(
+                    bsz, self.num_heads, attn_weights.size(1), attn_weights.size(2)
+                )
+                key_mask = key_mask.reshape(
+                    bsz * self.num_heads, attn_weights.size(1), attn_weights.size(2)
+                )
+                attn_weights = attn_weights.masked_fill(key_mask, float("-inf"))
 
             # Softmax the energy to get the final attention weights
             # Upcast to float32 before softmax to avoid bf16/fp16 overflow, matching standard attention
@@ -569,14 +602,15 @@ def two_stream_self_attention(
 
 def make_query_and_content_mask(
     input_ids: torch.Tensor, seq_len: int, pred_size: int, pad_token_id: Optional[int] = None
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
     """Create content and query masks for MPNet two-stream attention.
 
     :param torch.Tensor input_ids: Input IDs for device placement.
     :param int seq_len: Sequence length of the input.
     :param int pred_size: Size of the predicted subsequence.
     :param int pad_token_id: Optional padding token ID for per-batch key masking.
-    :return Tuple[torch.Tensor, torch.Tensor]: Query and content attention masks.
+    :return Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]: Query mask, content mask,
+        and optional key padding mask.
 
     It looks like the below with comparisons to how it's different than XLNet-style PLM:
         Query Mask:
@@ -603,8 +637,8 @@ def make_query_and_content_mask(
     matrix-based and constructs masks based on the provided seq_len and pred_size.
     There's no need to modify this function when changing context length.
 
-    Padding note: When ``pad_token_id`` is provided, key padding is incorporated into the masks
-    on a per-batch basis.
+    Padding note: When ``pad_token_id`` is provided, this returns a separate key padding mask so
+    the caller can apply padding without expanding the structural masks.
     """
 
     device = input_ids.device
@@ -646,26 +680,11 @@ def make_query_and_content_mask(
     content_mask = make_content_mask()
 
     if pad_token_id is None:
-        return query_mask, content_mask
+        return query_mask, content_mask, None
 
     key_len = seq_len + pred_size
     key_padding_mask = input_ids[:, :key_len].eq(pad_token_id)
     if not key_padding_mask.any():
-        return query_mask, content_mask
+        return query_mask, content_mask, None
 
-    bsz = input_ids.size(0)
-    key_padding_mask = key_padding_mask.to(input_ids.device)
-
-    def _combine_mask(base_mask: torch.Tensor) -> torch.Tensor:
-        """Combine base attention mask with padding mask for the batch.
-
-        :param torch.Tensor base_mask: Base attention mask (tgt x src).
-        :return torch.Tensor: Combined mask of shape (bsz x tgt x src).
-        """
-        expanded_mask = base_mask.unsqueeze(0).expand(bsz, base_mask.size(0), base_mask.size(1))
-        expanded_padding = key_padding_mask.unsqueeze(1).expand(
-            bsz, base_mask.size(0), base_mask.size(1)
-        )
-        return expanded_mask | expanded_padding
-
-    return _combine_mask(query_mask), _combine_mask(content_mask)
+    return query_mask, content_mask, key_padding_mask
