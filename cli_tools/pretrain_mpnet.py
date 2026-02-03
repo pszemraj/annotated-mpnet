@@ -602,6 +602,30 @@ def _get_autocast_context(device: torch.device) -> contextlib.AbstractContextMan
     return contextlib.nullcontext()
 
 
+def _ensure_bf16_supported(device: torch.device) -> None:
+    """Fail fast if BF16 is unavailable on the selected CUDA device.
+
+    :param torch.device device: Device used for training/inference.
+    :return None: This function returns nothing.
+    :raises RuntimeError: If BF16 is not supported on the active CUDA device.
+    """
+    if device.type != "cuda":
+        return
+    if torch.cuda.is_bf16_supported():
+        return
+    try:
+        device_index = device.index if device.index is not None else torch.cuda.current_device()
+        device_name = torch.cuda.get_device_name(device_index)
+        major, minor = torch.cuda.get_device_capability(device_index)
+        details = f"{device_name} (compute capability {major}.{minor})"
+    except Exception:
+        details = "the selected CUDA device"
+    raise RuntimeError(
+        "BF16 is required for MPNet pretraining in this repo (legacy GPUs are not supported "
+        f"as of 2026). Detected {details} without BF16 support. Use a BF16-capable GPU (Ampere+)."
+    )
+
+
 def _scale_gradients_by_tokens(model: torch.nn.Module, total_tokens: int) -> None:
     """Scale gradients by the total number of tokens.
 
@@ -667,6 +691,7 @@ def main(args: Namespace) -> None:
             "CUDA is required for training MPNet. Please ensure that you have a CUDA enabled GPU."
         )
 
+    _ensure_bf16_supported(device)
     check_and_activate_tf32()  # Check if the GPU supports NVIDIA Ampere or later and enable TF32
 
     # First test to see if max_positions and max_tokens are set differently. If they are, raise a
@@ -2074,8 +2099,10 @@ def cli_main() -> None:
         type=float,
     )
     parser.add_argument(
-        "-save_steps",
+        "--save_steps",
+        "--save-steps",
         "--checkpoint-interval",
+        dest="checkpoint_interval",
         help="The number of steps to be taken before saving the model",
         default=-1,
         type=int,
