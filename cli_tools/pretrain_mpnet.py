@@ -2289,7 +2289,7 @@ def cli_main() -> None:
     parser.add_argument(
         "--num-workers",
         help="Number of worker processes for data loading.",
-        default=min(4, os.cpu_count()),
+        default=0,
         type=int,
     )
     parser.add_argument(
