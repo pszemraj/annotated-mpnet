@@ -203,11 +203,15 @@ class SentenceEncoder(nn.Module):
             ]
         )
 
-        # Set up the layer norm
-        if encoder_normalize_before:
-            self.emb_layer_norm = LayerNorm(self.embedding_dim, export=export)
-        else:
-            self.emb_layer_norm = None
+        # Embedding layer norm is independent from pre/post-norm transformer blocks.
+        self.emb_layer_norm = (
+            LayerNorm(self.embedding_dim, export=export) if encoder_normalize_before else None
+        )
+
+        # Final layer norm is only used in pre-norm (normalize_before) configurations.
+        self.final_layer_norm = (
+            LayerNorm(self.embedding_dim, export=export) if normalize_before else None
+        )
 
         self.normalize_before = normalize_before
 
@@ -269,17 +273,19 @@ class SentenceEncoder(nn.Module):
         raise ValueError("Unsupported positional embedding module for precomputed positions.")
 
     def encode_emb(
-        self, input_ids: torch.Tensor, positions: Optional[torch.Tensor] = None
+        self,
+        input_ids: torch.Tensor,
+        positions: Optional[torch.Tensor] = None,
+        segment_labels: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Embed input tokens using the encoder's embedding layers.
 
         :param torch.Tensor input_ids: Input token IDs for the batch.
         :param torch.Tensor positions: Optional precomputed positions for permuted inputs.
+        :param torch.Tensor segment_labels: Optional segment labels for token type embeddings.
         :return torch.Tensor: Embedded token representations.
         """
         padding_mask = input_ids.eq(self.padding_idx)
-        if not padding_mask.any():
-            padding_mask = None
 
         x = self.embed_tokens(input_ids)
         if self.embed_scale is not None:
@@ -291,12 +297,14 @@ class SentenceEncoder(nn.Module):
             else:
                 x += self.embed_positions(input_ids)
 
-        if self.emb_layer_norm is not None and not self.normalize_before:
+        if self.segment_embeddings is not None and segment_labels is not None:
+            x += self.segment_embeddings(segment_labels)
+
+        if self.emb_layer_norm is not None:
             x = self.emb_layer_norm(x)
 
         x = F.dropout(x, p=self.dropout, training=self.training)
-        if padding_mask is not None:
-            x *= 1 - padding_mask.unsqueeze(-1).type_as(x)
+        x *= 1 - padding_mask.unsqueeze(-1).type_as(x)
         return x
 
     def maybe_final_norm(self, x: torch.Tensor) -> torch.Tensor:
@@ -305,8 +313,8 @@ class SentenceEncoder(nn.Module):
         :param torch.Tensor x: Tensor to normalize.
         :return torch.Tensor: Normalized tensor.
         """
-        if self.emb_layer_norm is not None and self.normalize_before:
-            return self.emb_layer_norm(x)
+        if self.final_layer_norm is not None:
+            return self.final_layer_norm(x)
         return x
 
     def forward(
@@ -325,10 +333,8 @@ class SentenceEncoder(nn.Module):
         :return Tuple[List[torch.Tensor], torch.Tensor]: Hidden states list and sentence embedding.
         """
 
-        # Compute padding mask. This is needed for multi-head attention
+        # Compute padding mask. This is needed for multi-head attention.
         padding_mask = tokens.eq(self.padding_idx)
-        if not padding_mask.any():
-            padding_mask = None
 
         # Get the embeddings for the token sequence
         x = self.embed_tokens(tokens)
@@ -349,15 +355,14 @@ class SentenceEncoder(nn.Module):
             x += self.segment_embeddings(segment_labels)
 
         # Process the layer norm
-        if self.emb_layer_norm is not None and not self.normalize_before:
+        if self.emb_layer_norm is not None:
             x = self.emb_layer_norm(x)
 
         # Dropout after the layer norm
         x = F.dropout(x, p=self.dropout, training=self.training)
 
         # Account for padding while computing the representation
-        if padding_mask is not None:
-            x *= 1 - padding_mask.unsqueeze(-1).type_as(x)
+        x *= 1 - padding_mask.unsqueeze(-1).type_as(x)
 
         # Transpose the batch for easier attention caluclation later on. This is an artifact of the
         # fairseq codebase, but since it's done like this everywhere, we have to keep it
@@ -368,6 +373,10 @@ class SentenceEncoder(nn.Module):
         positions_bias = self.compute_position_bias(
             x, self.relative_attention_num_buckets, self.relative_attention_max_distance
         )
+        if positions_bias is not None and (
+            positions_bias.device != x.device or positions_bias.dtype != x.dtype
+        ):
+            positions_bias = positions_bias.to(device=x.device, dtype=x.dtype)
 
         # If the user wants ALL hidden states, we keep track of it here
         inner_states = []
@@ -402,8 +411,8 @@ class SentenceEncoder(nn.Module):
                 inner_states.append(x)
 
         # Compute the layer norm if the bools evaluate properly
-        if self.emb_layer_norm is not None and self.normalize_before:
-            x = self.emb_layer_norm(x)
+        if self.final_layer_norm is not None:
+            x = self.final_layer_norm(x)
 
         # Transpose the batch back to the standard format
         # T x B x C -> B x T x C
@@ -430,11 +439,11 @@ class SentenceEncoder(nn.Module):
         :param torch.Tensor x: Input tensor with shape (seq_len, batch_size, embed_dim).
         :param int num_buckets: Number of buckets for relative positions.
         :param int max_distance: Maximum relative distance to consider.
-        :return torch.Tensor: Relative position bias tensor.
+        :return torch.Tensor: Relative position bias tensor with shape (heads, qlen, klen).
         """
 
-        # Get the batch size, q and k len
-        bsz, qlen, klen = x.size(1), x.size(0), x.size(0)
+        # Get q and k len
+        qlen, klen = x.size(0), x.size(0)
         device = x.device
         context_position = torch.arange(qlen, dtype=torch.long, device=device)[:, None]
         memory_position = torch.arange(klen, dtype=torch.long, device=device)[None, :]
@@ -447,14 +456,13 @@ class SentenceEncoder(nn.Module):
             klen,
             num_buckets=num_buckets,
             max_distance=max_distance,
-            batch_size=bsz,
         )
 
     def compute_position_bias_from_positions(self, positions: torch.Tensor) -> torch.Tensor:
         """Compute relative position bias using explicit position indices.
 
         :param torch.Tensor positions: Position indices with shape (bsz, seq_len).
-        :return torch.Tensor: Relative position bias tensor.
+        :return torch.Tensor: Relative position bias tensor with shape (bsz * heads, qlen, klen).
         """
         qlen, klen = positions.size(1), positions.size(1)
         context_position = positions[:, :, None]
@@ -469,7 +477,6 @@ class SentenceEncoder(nn.Module):
         klen: int,
         num_buckets: Optional[int] = None,
         max_distance: Optional[int] = None,
-        batch_size: Optional[int] = None,
     ) -> torch.Tensor:
         """Shared helper to bucket relative positions and return attention bias.
 
@@ -478,8 +485,8 @@ class SentenceEncoder(nn.Module):
         :param int klen: Key length.
         :param int num_buckets: Optional bucket override.
         :param int max_distance: Optional max distance override.
-        :param int batch_size: Optional batch size for broadcasted (qlen x klen) inputs.
-        :return torch.Tensor: Relative position bias tensor.
+        :return torch.Tensor: Relative position bias tensor with shape (heads, qlen, klen)
+            for shared positions or (bsz * heads, qlen, klen) for per-sample positions.
         """
         if num_buckets is None:
             num_buckets = self.relative_attention_num_buckets
@@ -495,13 +502,10 @@ class SentenceEncoder(nn.Module):
         values = self.relative_attention_bias(rp_bucket)
 
         if relative_position.dim() == 2:
-            values = values.permute(2, 0, 1).unsqueeze(0)
-            if batch_size is None:
-                batch_size = 1
-            values = values.expand((batch_size, -1, qlen, klen)).contiguous()
-        else:
-            values = values.permute(0, 3, 1, 2).contiguous()
+            values = values.permute(2, 0, 1).contiguous()
+            return values
 
+        values = values.permute(0, 3, 1, 2).contiguous()
         return values.view(-1, qlen, klen)
 
     @staticmethod

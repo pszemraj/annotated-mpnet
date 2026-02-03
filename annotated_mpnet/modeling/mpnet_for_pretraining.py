@@ -76,6 +76,7 @@ class MPNetForPretraining(nn.Module):
 
         # Let's define the encoder here
         self.args = args
+        num_segments = getattr(args, "num_segments", 0)
         self.sentence_encoder = SentenceEncoder(
             padding_idx=tokenizer.pad_token_id,
             vocab_size=vocab_size,  # Use the padded vocab size
@@ -87,7 +88,7 @@ class MPNetForPretraining(nn.Module):
             attention_dropout=args.attention_dropout,
             activation_dropout=args.activation_dropout,
             max_seq_len=args.max_positions,
-            num_segments=0,
+            num_segments=num_segments,
             encoder_normalize_before=True,
             activation_fn=args.activation_fn,
             normalize_before=args.normalize_before,
@@ -124,6 +125,7 @@ class MPNetForPretraining(nn.Module):
         positions: torch.Tensor,
         pred_size: int,
         attention_mask: Optional[torch.Tensor] = None,
+        segment_labels: Optional[torch.Tensor] = None,
         return_mlm: bool = False,
         **kwargs: Any,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
@@ -133,6 +135,7 @@ class MPNetForPretraining(nn.Module):
         :param torch.Tensor positions: Position indices for the batch.
         :param int pred_size: Number of tokens to predict.
         :param torch.Tensor attention_mask: Optional attention mask (1 for real tokens), defaults to None.
+        :param torch.Tensor segment_labels: Optional segment labels for token type embeddings.
         :param bool return_mlm: Whether to return an additional MLM head output, defaults to False.
         :param dict kwargs: Additional keyword arguments (must be empty).
         :return torch.Tensor: Vocabulary logits (or logits tuple when ``return_mlm`` is True).
@@ -141,9 +144,17 @@ class MPNetForPretraining(nn.Module):
             raise ValueError(
                 f"Unexpected keyword arguments to MPNetForPretraining.forward: {kwargs}"
             )
+        if positions is None:
+            raise ValueError("positions is required for MPNet pretraining forward.")
+        if pred_size <= 0:
+            raise ValueError("pred_size must be > 0 for MPNet pretraining forward.")
+
+        positions = positions.to(torch.long)
 
         # Calculate initial embeddings
-        emb = self.sentence_encoder.encode_emb(input_ids, positions)
+        emb = self.sentence_encoder.encode_emb(
+            input_ids, positions=positions, segment_labels=segment_labels
+        )
 
         # Reverse the tensor for easier extraction
         x = reverse_tensor(emb)
@@ -518,7 +529,27 @@ def two_stream_self_attention(
         if bias is not None:
             if bias.device != device or bias.dtype != dtype:
                 bias = bias.to(device=device, dtype=dtype)
-            attn_bias = bias.view(bsz, self.num_heads, target_len, source_len)
+            if bias.dim() == 3:
+                if bias.size(0) == self.num_heads:
+                    bias = bias.unsqueeze(0)
+                elif bias.size(0) == bsz * self.num_heads:
+                    bias = bias.view(bsz, self.num_heads, target_len, source_len)
+                else:
+                    raise ValueError(
+                        "positions_bias has unexpected shape; expected heads or bsz*heads in dim 0."
+                    )
+            elif bias.dim() == 4:
+                if bias.size(1) != self.num_heads or bias.size(0) not in (1, bsz):
+                    raise ValueError(
+                        "positions_bias has unexpected shape; expected (1|bsz, heads, tgt, src)."
+                    )
+            else:
+                raise ValueError("positions_bias must be 3D or 4D for attention biasing.")
+            if bias.size(0) == 1 and (
+                padding_mask is not None or (attn_mask is not None and attn_mask.dim() == 3)
+            ):
+                bias = bias.expand(bsz, -1, -1, -1).contiguous()
+            attn_bias = bias
             attn_bias_from_positions = True
 
         if attn_bias is None and (attn_mask is not None or padding_mask is not None):
@@ -612,7 +643,22 @@ def two_stream_self_attention(
 
             # Process bias if applicable
             if bias is not None:
-                attn_weights += bias
+                if bias.device != attn_weights.device or bias.dtype != attn_weights.dtype:
+                    bias = bias.to(device=attn_weights.device, dtype=attn_weights.dtype)
+                if bias.dim() == 3 and bias.size(0) == self.num_heads:
+                    tgt_len = attn_weights.size(1)
+                    src_len = attn_weights.size(2)
+                    attn_weights = attn_weights.view(bsz, self.num_heads, tgt_len, src_len)
+                    attn_weights = attn_weights + bias.unsqueeze(0)
+                    attn_weights = attn_weights.view(bsz * self.num_heads, tgt_len, src_len)
+                elif bias.dim() == 4:
+                    tgt_len = attn_weights.size(1)
+                    src_len = attn_weights.size(2)
+                    attn_weights = attn_weights.view(bsz, self.num_heads, tgt_len, src_len)
+                    attn_weights = attn_weights + bias
+                    attn_weights = attn_weights.view(bsz * self.num_heads, tgt_len, src_len)
+                else:
+                    attn_weights += bias
 
             # Process attention masking
             if mask is not None:
@@ -754,8 +800,6 @@ def make_query_and_content_mask(
     elif pad_token_id is not None:
         key_padding_mask = input_ids[:, :key_len].eq(pad_token_id)
     else:
-        return query_mask, content_mask, None
-    if not key_padding_mask.any():
         return query_mask, content_mask, None
 
     return query_mask, content_mask, key_padding_mask

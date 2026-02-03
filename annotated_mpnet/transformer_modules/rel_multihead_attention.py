@@ -161,7 +161,8 @@ class RelativeMultiHeadAttention(nn.Module):
         :param bool need_weights: Whether to return attention weights, defaults to True.
         :param bool static_kv: Whether key/value are static, defaults to False.
         :param torch.Tensor attn_mask: Attention mask, defaults to None.
-        :param torch.Tensor positions_bias: Position bias tensor, defaults to None.
+        :param torch.Tensor positions_bias: Position bias tensor. Accepts shared (heads, tgt, src),
+            per-batch (bsz * heads, tgt, src), or 4D (1/bsz, heads, tgt, src) layouts.
         :return Tuple[torch.Tensor, Optional[torch.Tensor]]: Output and optional attention weights.
         """
         # Unpack the dimensions of the query and assert that they match what we expect
@@ -270,6 +271,59 @@ class RelativeMultiHeadAttention(nn.Module):
                     dim=1,
                 )
 
+        def _reshape_positions_bias(
+            bias: torch.Tensor,
+            bsz: int,
+            tgt_len: int,
+            src_len: int,
+            device: torch.device,
+            dtype: torch.dtype,
+        ) -> torch.Tensor:
+            """Normalize position bias to a 4D (batch, heads, tgt, src) tensor."""
+            if bias.device != device or bias.dtype != dtype:
+                bias = bias.to(device=device, dtype=dtype)
+            if bias.dim() == 3:
+                if bias.size(0) == self.num_heads:
+                    bias = bias.unsqueeze(0)
+                elif bias.size(0) == bsz * self.num_heads:
+                    bias = bias.view(bsz, self.num_heads, tgt_len, src_len)
+                else:
+                    raise ValueError(
+                        "positions_bias has unexpected shape; expected heads or bsz*heads in dim 0."
+                    )
+            elif bias.dim() == 4:
+                if bias.size(1) != self.num_heads:
+                    raise ValueError(
+                        "positions_bias has unexpected head dimension; expected num_heads."
+                    )
+                if bias.size(0) not in (1, bsz):
+                    raise ValueError(
+                        "positions_bias has unexpected batch dimension; expected 1 or bsz."
+                    )
+            else:
+                raise ValueError("positions_bias must be 3D or 4D for attention biasing.")
+            return bias
+
+        def _add_positions_bias(
+            attn_weights: torch.Tensor,
+            bias: torch.Tensor,
+            bsz: int,
+            tgt_len: int,
+            src_len: int,
+        ) -> torch.Tensor:
+            """Add position bias to attention weights with broadcast where possible."""
+            if bias.device != attn_weights.device or bias.dtype != attn_weights.dtype:
+                bias = bias.to(device=attn_weights.device, dtype=attn_weights.dtype)
+            if bias.dim() == 3 and bias.size(0) == self.num_heads:
+                attn_weights = attn_weights.view(bsz, self.num_heads, tgt_len, src_len)
+                attn_weights = attn_weights + bias.unsqueeze(0)
+                return attn_weights.view(bsz * self.num_heads, tgt_len, src_len)
+            if bias.dim() == 4:
+                attn_weights = attn_weights.view(bsz, self.num_heads, tgt_len, src_len)
+                attn_weights = attn_weights + bias
+                return attn_weights.view(bsz * self.num_heads, tgt_len, src_len)
+            return attn_weights + bias
+
         use_sdpa = (
             hasattr(F, "scaled_dot_product_attention")
             and not need_weights
@@ -285,9 +339,18 @@ class RelativeMultiHeadAttention(nn.Module):
             attn_bias = None
             attn_bias_from_positions = False
             if positions_bias is not None:
-                attn_bias = positions_bias.to(device=q.device, dtype=q.dtype).view(
-                    bsz, self.num_heads, tgt_len, src_len
+                attn_bias = _reshape_positions_bias(
+                    positions_bias,
+                    bsz,
+                    tgt_len,
+                    src_len,
+                    device=q.device,
+                    dtype=q.dtype,
                 )
+                if attn_bias.size(0) == 1 and (
+                    key_padding_mask is not None or (attn_mask is not None and attn_mask.dim() == 3)
+                ):
+                    attn_bias = attn_bias.expand(bsz, -1, -1, -1).contiguous()
                 attn_bias_from_positions = True
 
             if attn_bias is None and (attn_mask is not None or key_padding_mask is not None):
@@ -384,7 +447,7 @@ class RelativeMultiHeadAttention(nn.Module):
 
         # Add in the position bias here
         if positions_bias is not None:
-            attn_weights += positions_bias
+            attn_weights = _add_positions_bias(attn_weights, positions_bias, bsz, tgt_len, src_len)
 
         # Softmax on the energy calculation
         attn_weights = F.softmax(attn_weights, dim=-1, dtype=torch.float32).type_as(attn_weights)
