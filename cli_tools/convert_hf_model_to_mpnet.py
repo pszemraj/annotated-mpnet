@@ -39,18 +39,16 @@ def convert_hf_model_to_mpnet(
 
     # Try PyTorch weights first, fallback to TensorFlow if needed
     try:
-        # Note: Some "weights not initialized" warnings are expected and can be ignored
-        hf_model = MPNetForMaskedLM.from_pretrained(hf_model_path, ignore_mismatched_sizes=True)
+        hf_model = MPNetForMaskedLM.from_pretrained(hf_model_path)
     except ValueError as e:
         if "pytorch_model.bin" in str(e) and "TensorFlow weights" in str(e):
             LOGGER.info("PyTorch weights not found, loading from TensorFlow weights")
-            hf_model = MPNetForMaskedLM.from_pretrained(
-                hf_model_path, from_tf=True, ignore_mismatched_sizes=True
-            )
+            hf_model = MPNetForMaskedLM.from_pretrained(hf_model_path, from_tf=True)
         else:
             raise
 
     hf_config = hf_model.config
+    type_vocab_size = getattr(hf_config, "type_vocab_size", 0) or 0
 
     # Log model configuration for debugging
     LOGGER.info(
@@ -61,6 +59,7 @@ def convert_hf_model_to_mpnet(
 
     # Create the base args for our model format
     if model_config is None:
+        num_segments = 0 if type_vocab_size == 1 else type_vocab_size
         args = Namespace(
             encoder_layers=hf_config.num_hidden_layers,
             encoder_embed_dim=hf_config.hidden_size,
@@ -79,12 +78,20 @@ def convert_hf_model_to_mpnet(
             pad_token_id=hf_config.pad_token_id,
             bos_token_id=hf_config.bos_token_id,
             eos_token_id=hf_config.eos_token_id,
+            num_segments=num_segments,
             # Store the HF model's vocab size as padded_vocab_size to prevent re-padding
             original_vocab_size=hf_config.vocab_size,
             padded_vocab_size=hf_config.vocab_size,
         )
     else:
         args = Namespace(**model_config)
+
+    if type_vocab_size > 1 and getattr(args, "num_segments", 0) < type_vocab_size:
+        raise ValueError(
+            "HF model uses token type embeddings (type_vocab_size="
+            f"{type_vocab_size}) but num_segments is {getattr(args, 'num_segments', 0)}. "
+            "Set num_segments to type_vocab_size or omit --model-config to use defaults."
+        )
 
     LOGGER.info("Creating MPNetForPretraining model with matching configuration")
     from annotated_mpnet.modeling import MPNetForPretraining
@@ -118,6 +125,10 @@ def convert_hf_model_to_mpnet(
     )
     mappings["mpnet.embeddings.LayerNorm.weight"] = "sentence_encoder.emb_layer_norm.weight"
     mappings["mpnet.embeddings.LayerNorm.bias"] = "sentence_encoder.emb_layer_norm.bias"
+    if type_vocab_size > 1:
+        mappings["mpnet.embeddings.token_type_embeddings.weight"] = (
+            "sentence_encoder.segment_embeddings.weight"
+        )
 
     # Relative attention bias
     mappings["mpnet.encoder.relative_attention_bias.weight"] = (
@@ -175,11 +186,40 @@ def convert_hf_model_to_mpnet(
         model.state_dict()[f"{our_prefix}self_attn.in_proj_weight"].copy_(combined_weight)
         model.state_dict()[f"{our_prefix}self_attn.in_proj_bias"].copy_(combined_bias)
 
+    # Prepare embeddings for token-type parity if needed.
+    hf_state = hf_model.state_dict()
+    folded_word_embeddings = None
+    if type_vocab_size == 1:
+        token_type_key = "mpnet.embeddings.token_type_embeddings.weight"
+        if token_type_key in hf_state:
+            LOGGER.info(
+                "type_vocab_size=1 detected; folding token_type_embeddings[0] into word embeddings."
+            )
+            token_type = hf_state[token_type_key][0]
+            folded_word_embeddings = (
+                hf_state["mpnet.embeddings.word_embeddings.weight"] + token_type
+            )
+        else:
+            LOGGER.warning(
+                "type_vocab_size=1 but token_type_embeddings missing; proceeding without folding."
+            )
+    elif type_vocab_size > 1:
+        LOGGER.info(
+            "type_vocab_size=%s detected; segment embeddings will be copied. "
+            "Pass segment_labels to MPNetForPretraining.forward to match HF outputs.",
+            type_vocab_size,
+        )
+
     # Now apply all the direct mappings
     for hf_key, our_key in mappings.items():
-        if hf_key in hf_model.state_dict() and our_key in model.state_dict():
-            hf_tensor = hf_model.state_dict()[hf_key]
+        if hf_key in hf_state and our_key in model.state_dict():
+            hf_tensor = hf_state[hf_key]
             our_tensor = model.state_dict()[our_key]
+            if (
+                hf_key == "mpnet.embeddings.word_embeddings.weight"
+                and folded_word_embeddings is not None
+            ):
+                hf_tensor = folded_word_embeddings
 
             # Special handling for position embeddings size mismatch
             if our_key == "sentence_encoder.embed_positions.weight":

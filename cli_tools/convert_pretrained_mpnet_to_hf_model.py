@@ -64,6 +64,14 @@ def convert_mpnet_checkpoint_to_pytorch(
     # Now we use the args (and one componennt of the weight to get the vocab size) to set the
     # MPNetConfig object, which will properly instantiate the MPNetForMaskedLM model to the specs
     # we set when we pretrained the model
+    # Derive segment embedding size (token type vocab) from args or weights.
+    num_segments = getattr(mpnet_args, "num_segments", None)
+    if num_segments is None:
+        segment_weight = mpnet_weight.get("sentence_encoder.segment_embeddings.weight")
+        num_segments = segment_weight.size(0) if segment_weight is not None else 0
+
+    type_vocab_size = num_segments if num_segments and num_segments > 0 else 1
+
     config = MPNetConfig(
         vocab_size=mpnet_weight["sentence_encoder.embed_tokens.weight"].size(0),
         hidden_size=mpnet_args.encoder_embed_dim,
@@ -81,6 +89,7 @@ def convert_mpnet_checkpoint_to_pytorch(
         hidden_dropout_prob=mpnet_args.activation_dropout,
         attention_probs_dropout_prob=mpnet_args.attention_dropout,
         layer_norm_eps=1e-5,
+        type_vocab_size=type_vocab_size,
     )
 
     # if the mpnet_args contain token_ids, ensure model config matches
@@ -120,6 +129,19 @@ def convert_mpnet_checkpoint_to_pytorch(
     model.mpnet.embeddings.LayerNorm.bias.data = mpnet_weight[
         "sentence_encoder.emb_layer_norm.bias"
     ].type_as(tensor)
+    if num_segments and num_segments > 0:
+        segment_key = "sentence_encoder.segment_embeddings.weight"
+        if segment_key not in mpnet_weight:
+            raise KeyError(
+                "Segment embeddings requested but missing from checkpoint: "
+                f"{segment_key} not found."
+            )
+        model.mpnet.embeddings.token_type_embeddings.weight.data = mpnet_weight[
+            segment_key
+        ].type_as(tensor)
+    else:
+        # Match annotated-mpnet defaults (no segment embeddings) by zeroing token_type_embeddings.
+        model.mpnet.embeddings.token_type_embeddings.weight.data.zero_()
 
     # Here, we're setting the weights and biases for the LM head. This is important for loading into
     # the base HF model type (MPNetForMaskedLM), but this will usually be discarded in any sort of
