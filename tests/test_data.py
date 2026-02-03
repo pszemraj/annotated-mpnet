@@ -5,7 +5,6 @@ Tests for the collator function in the mpnet_data module
 import unittest
 
 import torch
-from transformers import AutoTokenizer
 
 from annotated_mpnet.data import mpnet_data
 from annotated_mpnet.data.mpnet_data import (
@@ -13,6 +12,7 @@ from annotated_mpnet.data.mpnet_data import (
     HFStreamingDataset,
     RandomSamplerWithSeed,
 )
+from tests.dummy_tokenizer import DummyTokenizer
 
 
 class TestData(unittest.TestCase):
@@ -36,7 +36,7 @@ class TestData(unittest.TestCase):
             },
         ]
 
-        tokenizer = AutoTokenizer.from_pretrained("microsoft/mpnet-base")
+        tokenizer = DummyTokenizer()
 
         self.collator = DataCollatorForMaskedPermutedLanguageModeling(
             tokenizer=tokenizer, random_seed=12345
@@ -84,7 +84,7 @@ class TestData(unittest.TestCase):
 
         :return None: This test returns nothing.
         """
-        tokenizer = AutoTokenizer.from_pretrained("microsoft/mpnet-base")
+        tokenizer = DummyTokenizer()
         enc_a = tokenizer("hello world", add_special_tokens=True)
         enc_b = tokenizer("short", add_special_tokens=True)
         examples = [
@@ -114,7 +114,7 @@ class TestData(unittest.TestCase):
 
         :return None: This test returns nothing.
         """
-        tokenizer = AutoTokenizer.from_pretrained("microsoft/mpnet-base")
+        tokenizer = DummyTokenizer()
         enc = tokenizer("hello world", add_special_tokens=True)
         examples = [
             {"input_ids": torch.tensor(enc["input_ids"], dtype=torch.long)},
@@ -150,7 +150,7 @@ class TestData(unittest.TestCase):
 
         :return None: This test returns nothing.
         """
-        tokenizer = AutoTokenizer.from_pretrained("microsoft/mpnet-base")
+        tokenizer = DummyTokenizer()
         dataset_stream = [{"text": f"sample {i}"} for i in range(10)]
         dataset = HFStreamingDataset(
             tokenizer=tokenizer,
@@ -171,7 +171,7 @@ class TestData(unittest.TestCase):
 
         :return None: This test returns nothing.
         """
-        tokenizer = AutoTokenizer.from_pretrained("microsoft/mpnet-base")
+        tokenizer = DummyTokenizer()
         dataset_stream = [{"text": "hi"}]
         dataset = HFStreamingDataset(
             tokenizer=tokenizer,
@@ -192,7 +192,7 @@ class TestData(unittest.TestCase):
 
         :return None: This test returns nothing.
         """
-        tokenizer = AutoTokenizer.from_pretrained("microsoft/mpnet-base")
+        tokenizer = DummyTokenizer()
         collator = DataCollatorForMaskedPermutedLanguageModeling(
             tokenizer=tokenizer, random_seed=12345
         )
@@ -206,12 +206,73 @@ class TestData(unittest.TestCase):
         self.assertTrue(torch.equal(batch_a["input_ids"], batch_b["input_ids"]))
         self.assertTrue(torch.equal(batch_a["positions"], batch_b["positions"]))
 
+    def test_file_mode_resume_sampler_offset_preserves_collator_rng(self) -> None:
+        """Ensure sampler offsets preserve collator RNG state on resume.
+
+        :return None: This test returns nothing.
+        """
+        from torch.utils.data import DataLoader
+
+        tokenizer = DummyTokenizer()
+        enc = tokenizer("hello world", add_special_tokens=True)
+        dataset = [
+            {"input_ids": torch.tensor(enc["input_ids"], dtype=torch.long)} for _ in range(20)
+        ]
+
+        batch_size = 2
+        epoch = 0
+        sampler_seed = 999
+
+        collator_a = DataCollatorForMaskedPermutedLanguageModeling(
+            tokenizer=tokenizer, random_seed=12345
+        )
+        sampler_a = RandomSamplerWithSeed(dataset, epoch=epoch, random_seed=sampler_seed)
+        dataloader_a = DataLoader(
+            dataset,
+            sampler=sampler_a,
+            batch_size=batch_size,
+            collate_fn=collator_a,
+            num_workers=0,
+        )
+
+        iterator_a = iter(dataloader_a)
+        _ = next(iterator_a)
+        _ = next(iterator_a)
+        _ = next(iterator_a)
+
+        state = collator_a.get_rng_state()
+        expected_next = next(iterator_a)
+
+        collator_b = DataCollatorForMaskedPermutedLanguageModeling(
+            tokenizer=tokenizer, random_seed=12345
+        )
+        collator_b.set_rng_state(state)
+
+        skip_samples = 3 * batch_size
+        sampler_b = RandomSamplerWithSeed(
+            dataset,
+            epoch=epoch,
+            random_seed=sampler_seed,
+            start_index=skip_samples,
+        )
+        dataloader_b = DataLoader(
+            dataset,
+            sampler=sampler_b,
+            batch_size=batch_size,
+            collate_fn=collator_b,
+            num_workers=0,
+        )
+        resumed_next = next(iter(dataloader_b))
+
+        self.assertTrue(torch.equal(expected_next["input_ids"], resumed_next["input_ids"]))
+        self.assertTrue(torch.equal(expected_next["positions"], resumed_next["positions"]))
+
     def test_collator_falls_back_without_fast_perm(self) -> None:
         """Ensure collator disables fast path when extension is missing.
 
         :return None: This test returns nothing.
         """
-        tokenizer = AutoTokenizer.from_pretrained("microsoft/mpnet-base")
+        tokenizer = DummyTokenizer()
         original = mpnet_data.make_span_perm
         try:
             mpnet_data.make_span_perm = None
@@ -227,7 +288,7 @@ class TestData(unittest.TestCase):
 
         :return None: This test returns nothing.
         """
-        tokenizer = AutoTokenizer.from_pretrained("microsoft/mpnet-base")
+        tokenizer = DummyTokenizer()
         mock_stream = [
             {"text": f"This is sample number {i} with enough text for testing."} for i in range(50)
         ]

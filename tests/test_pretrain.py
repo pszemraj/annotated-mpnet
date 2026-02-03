@@ -8,7 +8,6 @@ from tempfile import TemporaryDirectory
 
 import torch
 import torch.nn.functional as F
-from transformers import AutoTokenizer
 
 from annotated_mpnet.modeling.mpnet_for_pretraining import (
     init_final_params,
@@ -24,6 +23,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from cli_tools import pretrain_mpnet
+from tests.dummy_tokenizer import DummyTokenizer
 
 
 class TestPretrainHelpers(unittest.TestCase):
@@ -192,7 +192,7 @@ class TestPretrainHelpers(unittest.TestCase):
             normalize_before=False,
             padded_vocab_size=30528,
         )
-        tokenizer = AutoTokenizer.from_pretrained("microsoft/mpnet-base")
+        tokenizer = DummyTokenizer()
         model = pretrain_mpnet.MPNetForPretraining(args, tokenizer)
 
         state_dict = model.state_dict()
@@ -607,7 +607,7 @@ class TestPretrainHelpers(unittest.TestCase):
             normalize_before=False,
             padded_vocab_size=30528,
         )
-        tokenizer = AutoTokenizer.from_pretrained("microsoft/mpnet-base")
+        tokenizer = DummyTokenizer()
         model = pretrain_mpnet.MPNetForPretraining(args, tokenizer)
         model.eval()
 
@@ -645,7 +645,7 @@ class TestPretrainHelpers(unittest.TestCase):
             padded_vocab_size=30528,
             gradient_checkpointing=True,
         )
-        tokenizer = AutoTokenizer.from_pretrained("microsoft/mpnet-base")
+        tokenizer = DummyTokenizer()
         model = pretrain_mpnet.MPNetForPretraining(args, tokenizer)
         model.train()
 
