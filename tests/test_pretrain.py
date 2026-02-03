@@ -121,6 +121,7 @@ class TestPretrainHelpers(unittest.TestCase):
         optimizer = torch.optim.SGD([torch.nn.Parameter(torch.randn(()))], lr=0.0)
         scheduler = PolynomialDecayLRScheduler(args_no_warmup, optimizer)
         self.assertAlmostEqual(scheduler.step(1), 1.0, places=6)
+        self.assertAlmostEqual(scheduler.step(4), 0.0, places=6)
 
     def test_init_final_params_zeroes_padding_idx(self) -> None:
         """Ensure padding_idx=0 embeddings are zeroed during init.

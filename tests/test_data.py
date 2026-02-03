@@ -51,6 +51,11 @@ class TestData(unittest.TestCase):
         self.assertEqual(permuted_examples["pred_size"], 1)
         self.assertEqual(permuted_examples["input_ids"].shape[0], 2)
         self.assertEqual(permuted_examples["targets"].shape[0], 2)
+        self.assertIn("pred_ntokens", permuted_examples)
+        self.assertEqual(
+            permuted_examples["pred_ntokens"],
+            int(permuted_examples["targets"].ne(self.collator.tokenizer.pad_token_id).sum().item()),
+        )
 
         # Same seed should produce deterministic first batches.
         collator_b = DataCollatorForMaskedPermutedLanguageModeling(

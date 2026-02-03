@@ -69,30 +69,27 @@ class PolynomialDecayLRScheduler(object):
         :return float: Updated learning rate.
         """
 
-        # Treat warmup=0 as "use base LR for step 1" by offsetting decay index.
-        effective_updates = num_updates
-        if self.args.warmup_updates == 0:
-            effective_updates = max(num_updates - 1, 0)
+        warmup = self.args.warmup_updates
 
         # Branch first to the linear increase using the warmup factor
-        if self.args.warmup_updates > 0 and num_updates <= self.args.warmup_updates:
-            self.warmup_factor = num_updates / float(self.args.warmup_updates)
+        if warmup > 0 and num_updates <= warmup:
+            self.warmup_factor = num_updates / float(warmup)
             lr = self.warmup_factor * self.lr
-        # Branch to end learning rate
-        elif effective_updates > self.total_updates:
-            lr = self.end_learning_rate
-        # Branch to polynomial decay
         else:
-            warmup = self.args.warmup_updates
+            # Determine decay step index and total decay steps (avoid divide-by-zero).
+            if warmup == 0:
+                decay_step = max(num_updates - 1, 0)
+                decay_steps = max(self.total_updates - 1, 1)
+            else:
+                decay_step = max(num_updates - warmup, 0)
+                decay_steps = max(self.total_updates - warmup, 1)
 
-            # Create a range from peak LR to end LR
-            lr_range = self.lr - self.end_learning_rate
-
-            # Create a pct_remaining factor that calculates how to move the polynomial factor
-            pct_remaining = 1 - (effective_updates - warmup) / (self.total_updates - warmup)
-
-            # Finally use the power arg to calculate the polynomial factor
-            lr = lr_range * pct_remaining ** (self.power) + self.end_learning_rate
+            if decay_step > decay_steps:
+                lr = self.end_learning_rate
+            else:
+                lr_range = self.lr - self.end_learning_rate
+                pct_remaining = 1 - decay_step / decay_steps
+                lr = lr_range * pct_remaining ** (self.power) + self.end_learning_rate
 
         # Finally set the new LR
         self.set_lr(lr)

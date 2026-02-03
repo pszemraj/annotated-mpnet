@@ -122,6 +122,8 @@ class MPNetDataset(torch.utils.data.Dataset):
             raise ValueError("Either file_path or dataset must be provided")
 
         # Process batch encoding using the tokenizer passed in
+        # NOTE: This dataset intentionally keeps a one-document-per-sample layout with truncation.
+        # For throughput-oriented pretraining, use a packing stream/iterator instead.
         batch_encoding = tokenizer(
             lines, add_special_tokens=True, truncation=True, max_length=block_size
         )
@@ -250,7 +252,7 @@ class HFStreamingDataset(torch.utils.data.IterableDataset):
         """
         text = example[self.text_field]
 
-        # Tokenize the text
+        # Tokenize the text (single-example truncation; no cross-document packing here by design).
         tokenized = self.tokenizer(
             text,
             max_length=self.block_size,
@@ -574,6 +576,7 @@ class DataCollatorForMaskedPermutedLanguageModeling:
         batch["input_ids"] = src_tokens
         batch["positions"] = positions
         batch["pred_size"] = targets.size(1)
+        batch["pred_ntokens"] = int(targets.ne(self.tokenizer.pad_token_id).sum().item())
         batch["ntokens"] = ntokens
         batch["attention_mask"] = attention_mask
 

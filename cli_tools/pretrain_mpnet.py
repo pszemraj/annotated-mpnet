@@ -58,24 +58,24 @@ VOCAB_SIZE_ALIGNMENT = 128  # Align vocab size for efficient GPU kernels.
 wandb = None
 
 
-def accuracy(output: torch.Tensor, target: torch.Tensor, ignore_index: int | None = None) -> int:
+def accuracy(
+    output: torch.Tensor, target: torch.Tensor, ignore_index: int | None = None
+) -> torch.Tensor:
     """Compare output logits to labels and return correct predictions.
 
     :param torch.Tensor output: Output logits of the model.
     :param torch.Tensor target: Labels generated from the collation process.
     :param int ignore_index: Token ID to ignore in accuracy, defaults to None.
-    :return int: Number of correct predictions.
+    :return torch.Tensor: Count of correct predictions on the active device.
     """
     with torch.no_grad():
-        _, pred = output.topk(1, -1)
-        pred = pred.view(-1)
-        target = target.view(-1)
+        pred = output.argmax(dim=-1)
         if ignore_index is not None:
             mask = target.ne(ignore_index)
             pred = pred[mask]
             target = target[mask]
         correct = pred.eq(target)
-    return correct.sum().item()
+    return correct.sum()
 
 
 def _seed_everything(seed: int) -> None:
@@ -1403,6 +1403,8 @@ def main(args: Namespace) -> None:
         }
         if "attention_mask" in batch:
             model_inputs["attention_mask"] = batch["attention_mask"]
+        if "segment_labels" in batch:
+            model_inputs["segment_labels"] = batch["segment_labels"]
         return model_inputs
 
     def _evaluate_split(
@@ -1450,11 +1452,14 @@ def main(args: Namespace) -> None:
                     reduction="sum",
                     ignore_index=tokenizer.pad_token_id,
                 )
-                pred_tokens = _count_pred_tokens(targets, tokenizer.pad_token_id)
+                pred_tokens = device_batch.get(
+                    "pred_ntokens", _count_pred_tokens(targets, tokenizer.pad_token_id)
+                )
                 if pred_tokens > 0:
                     normal_loss = loss.item() / pred_tokens / math.log(2)
                     normal_acc = (
-                        accuracy(outs, targets, ignore_index=tokenizer.pad_token_id) / pred_tokens
+                        accuracy(outs, targets, ignore_index=tokenizer.pad_token_id).item()
+                        / pred_tokens
                     )
                     meters[loss_key].update(normal_loss, pred_tokens)
                     meters[acc_key].update(normal_acc, pred_tokens)
@@ -1593,8 +1598,8 @@ def main(args: Namespace) -> None:
         scheduler.optimizer.zero_grad()
         model.train()
 
-        accumulation_loss = 0
-        accumulation_acc = 0  # Count of correct predictions; normalize by predicted tokens later.
+        accumulation_loss = torch.zeros((), device=device)
+        accumulation_acc = torch.zeros((), device=device)  # Count correct preds on device.
         accumulation_input_tokens = 0
         accumulation_pred_tokens = 0
         micro_steps = 0
@@ -1620,7 +1625,9 @@ def main(args: Namespace) -> None:
 
             targets = device_batch["targets"]
             input_token_count = int(device_batch["ntokens"])
-            pred_token_count = _count_pred_tokens(targets, tokenizer.pad_token_id)
+            pred_token_count = device_batch.get(
+                "pred_ntokens", _count_pred_tokens(targets, tokenizer.pad_token_id)
+            )
 
             accumulation_input_tokens += input_token_count
             accumulation_pred_tokens += pred_token_count
@@ -1638,8 +1645,8 @@ def main(args: Namespace) -> None:
             )
 
             acc = accuracy(outs, targets, ignore_index=tokenizer.pad_token_id)
-            accumulation_acc += acc
-            accumulation_loss += loss.item()
+            accumulation_acc = accumulation_acc + acc
+            accumulation_loss = accumulation_loss + loss.detach()
             loss.backward()
             micro_steps += 1
 
@@ -1662,11 +1669,13 @@ def main(args: Namespace) -> None:
                 scheduler.optimizer.step()
                 scheduler.optimizer.zero_grad()
 
+                accumulation_acc_value = float(accumulation_acc.item())
+                accumulation_loss_value = float(accumulation_loss.item())
                 normal_acc = _normalize_training_accuracy(
-                    accumulation_acc, accumulation_pred_tokens
+                    accumulation_acc_value, accumulation_pred_tokens
                 )
                 if accumulation_pred_tokens > 0:
-                    normal_loss = accumulation_loss / accumulation_pred_tokens / math.log(2)
+                    normal_loss = accumulation_loss_value / accumulation_pred_tokens / math.log(2)
                 else:
                     normal_loss = 0.0
 
@@ -1698,8 +1707,8 @@ def main(args: Namespace) -> None:
                 if args.wandb:
                     log_to_wandb(logging_dict, steps, "train")
 
-                accumulation_acc = 0
-                accumulation_loss = 0
+                accumulation_acc = torch.zeros((), device=device)
+                accumulation_loss = torch.zeros((), device=device)
                 accumulation_input_tokens = 0
                 accumulation_pred_tokens = 0
 
