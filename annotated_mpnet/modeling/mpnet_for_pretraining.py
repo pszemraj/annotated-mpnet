@@ -160,6 +160,12 @@ class MPNetForPretraining(nn.Module):
 
         # Cast position bias once to match the attention dtype/device.
         def _cast_bias(bias: Optional[torch.Tensor], ref: torch.Tensor) -> Optional[torch.Tensor]:
+            """Cast attention bias to match a reference tensor.
+
+            :param Optional[torch.Tensor] bias: Bias tensor to cast.
+            :param torch.Tensor ref: Reference tensor for dtype/device.
+            :return Optional[torch.Tensor]: Casted bias tensor.
+            """
             if bias is None:
                 return None
             if bias.device != ref.device or bias.dtype != ref.dtype:
