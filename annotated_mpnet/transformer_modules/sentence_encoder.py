@@ -369,10 +369,15 @@ class SentenceEncoder(nn.Module):
         # B x T x C -> T x B x C
         x = x.transpose(0, 1)
 
-        # Compute the relative attention bias
-        positions_bias = self.compute_position_bias(
-            x, self.relative_attention_num_buckets, self.relative_attention_max_distance
-        )
+        # Compute the relative attention bias (explicit positions must drive relative bias too).
+        if positions is not None:
+            if positions.shape != tokens.shape:
+                raise ValueError("positions must match tokens shape (bsz, seq_len) when provided.")
+            positions_bias = self.compute_position_bias_from_positions(positions.to(torch.long))
+        else:
+            positions_bias = self.compute_position_bias(
+                x, self.relative_attention_num_buckets, self.relative_attention_max_distance
+            )
         if positions_bias is not None and (
             positions_bias.device != x.device or positions_bias.dtype != x.dtype
         ):
@@ -503,6 +508,7 @@ class SentenceEncoder(nn.Module):
 
         if relative_position.dim() == 2:
             values = values.permute(2, 0, 1).contiguous()
+            # Shared across batch; avoid expanding to (bsz * heads) for sequential positions.
             return values
 
         values = values.permute(0, 3, 1, 2).contiguous()

@@ -4,6 +4,7 @@ code
 """
 
 import logging
+from functools import lru_cache
 from typing import Any, Optional, Sequence, Tuple, Union
 
 LOGGER = logging.getLogger(__name__)
@@ -710,6 +711,47 @@ def two_stream_self_attention(
     return c, q
 
 
+@lru_cache(maxsize=32)
+def _cached_two_stream_masks(
+    seq_len: int, pred_size: int, device_type: str, device_index: int
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Return cached boolean query/content masks for two-stream attention.
+
+    :param int seq_len: Content sequence length (without pred_size).
+    :param int pred_size: Prediction length.
+    :param str device_type: Device type (cpu/cuda).
+    :param int device_index: Device index or -1 for CPU/default.
+    :return Tuple[torch.Tensor, torch.Tensor]: Query and content masks.
+    """
+    if device_type == "cpu":
+        device = torch.device("cpu")
+    elif device_index < 0:
+        device = torch.device(device_type)
+    else:
+        device = torch.device(device_type, device_index)
+
+    seq_left = seq_len - pred_size
+
+    # Query mask (bool) - True means masked.
+    tri_upper = torch.triu(
+        torch.ones(pred_size, pred_size, device=device, dtype=torch.bool), diagonal=0
+    )
+    left_block = torch.zeros(pred_size, seq_left, device=device, dtype=torch.bool)
+    query_mask = torch.cat((left_block, tri_upper, ~tri_upper), dim=-1)
+
+    # Content mask (bool) - True means masked.
+    top = torch.zeros(seq_left, pred_size, device=device, dtype=torch.bool)
+    tri_lower = torch.tril(
+        torch.ones(pred_size, pred_size, device=device, dtype=torch.bool), diagonal=0
+    )
+    bottom = torch.zeros(pred_size, pred_size, device=device, dtype=torch.bool)
+    base = torch.cat((top, tri_lower, bottom), dim=0)
+    left_block = torch.zeros(seq_len + pred_size, seq_left, device=device, dtype=torch.bool)
+    content_mask = torch.cat((left_block, ~base, base), dim=-1)
+
+    return query_mask, content_mask
+
+
 def make_query_and_content_mask(
     input_ids: torch.Tensor,
     seq_len: int,
@@ -756,43 +798,16 @@ def make_query_and_content_mask(
     is used to derive the key padding mask.
     """
 
+    if pred_size <= 0 or pred_size > seq_len:
+        raise ValueError("pred_size must be in the range [1, seq_len] for mask construction.")
+
     device = input_ids.device
+    device_index = device.index if device.index is not None else -1
 
-    # Define helper function to keep things organized
-    def make_query_mask() -> torch.Tensor:
-        """Build the query attention mask.
-
-        :return torch.Tensor: Query mask tensor.
-        """
-        # Create the mask portion (i.e. ones)
-        mask = torch.triu(torch.ones(pred_size, pred_size, device=device), 0)
-
-        mask = (torch.ones(pred_size, seq_len - pred_size, device=device), 1 - mask, mask)
-
-        return torch.cat(mask, dim=-1).eq(0)
-
-    def make_content_mask() -> torch.Tensor:
-        """Build the content attention mask.
-
-        :return torch.Tensor: Content mask tensor.
-        """
-        mask = [
-            torch.zeros(seq_len - pred_size, pred_size, device=device),
-            torch.tril(torch.ones(pred_size, pred_size, device=device), 0),
-        ]
-
-        mask.append(torch.zeros(pred_size, pred_size, device=device))
-        mask = torch.cat(mask, dim=0)
-        mask = (
-            torch.ones(seq_len + pred_size, seq_len - pred_size, device=device),
-            mask,
-            1 - mask,
-        )
-
-        return torch.cat(mask, dim=-1).eq(0)
-
-    query_mask = make_query_mask()
-    content_mask = make_content_mask()
+    # Masks are cached by shape/device and must not be modified in-place.
+    query_mask, content_mask = _cached_two_stream_masks(
+        seq_len, pred_size, device.type, device_index
+    )
 
     key_len = seq_len + pred_size
     if attention_mask is not None:

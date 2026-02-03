@@ -291,6 +291,40 @@ class TestPretrainHelpers(unittest.TestCase):
             explicit_states, _ = model(tokens, last_state_only=True, positions=positions)
         self.assertTrue(torch.allclose(default_states[0], explicit_states[0]))
 
+    def test_sentence_encoder_positions_affect_relative_bias(self) -> None:
+        """Ensure explicit positions influence relative position bias.
+
+        :return None: This test returns nothing.
+        """
+        torch.manual_seed(0)
+        model = SentenceEncoder(
+            padding_idx=0,
+            vocab_size=64,
+            num_encoder_layers=1,
+            embedding_dim=16,
+            ffn_embedding_dim=32,
+            num_attention_heads=2,
+            dropout=0.0,
+            attention_dropout=0.0,
+            activation_dropout=0.0,
+            max_seq_len=8,
+            num_segments=0,
+            use_position_embeddings=False,
+            encoder_normalize_before=True,
+            activation_fn="gelu",
+            normalize_before=False,
+            relative_attention_num_buckets=8,
+            relative_attention_max_distance=16,
+        )
+        model.eval()
+        tokens = torch.randint(1, 63, (1, 6))
+        positions_a = torch.arange(tokens.size(1)).unsqueeze(0)
+        positions_b = positions_a.flip(dims=[1])
+        with torch.no_grad():
+            states_a, _ = model(tokens, last_state_only=True, positions=positions_a)
+            states_b, _ = model(tokens, last_state_only=True, positions=positions_b)
+        self.assertFalse(torch.allclose(states_a[0], states_b[0]))
+
     def test_two_stream_attention_padding_mask(self) -> None:
         """Ensure padding masks stay 2D and SDPA matches non-SDPA behavior.
 
