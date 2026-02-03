@@ -402,6 +402,51 @@ class TestPretrainHelpers(unittest.TestCase):
         self.assertFalse(torch.allclose(c_sdpa, c_nomask))
         self.assertFalse(torch.allclose(q_sdpa, q_nomask))
 
+    def test_two_stream_mask_layout_matches_reference(self) -> None:
+        """Ensure boolean mask layout matches the legacy float construction.
+
+        :return None: This test returns nothing.
+        """
+        seq_len = 6
+        pred_size = 2
+        input_ids = torch.zeros(1, seq_len + pred_size, dtype=torch.long)
+        query_mask, content_mask, key_padding_mask = make_query_and_content_mask(
+            input_ids, seq_len, pred_size, pad_token_id=None, attention_mask=None
+        )
+        self.assertIsNone(key_padding_mask)
+        self.assertEqual(query_mask.dtype, torch.bool)
+        self.assertEqual(content_mask.dtype, torch.bool)
+
+        device = input_ids.device
+        mask = torch.triu(torch.ones(pred_size, pred_size, device=device), 0)
+        ref_query = torch.cat(
+            (
+                torch.ones(pred_size, seq_len - pred_size, device=device),
+                1 - mask,
+                mask,
+            ),
+            dim=-1,
+        ).eq(0)
+        mask = torch.cat(
+            [
+                torch.zeros(seq_len - pred_size, pred_size, device=device),
+                torch.tril(torch.ones(pred_size, pred_size, device=device), 0),
+                torch.zeros(pred_size, pred_size, device=device),
+            ],
+            dim=0,
+        )
+        ref_content = torch.cat(
+            (
+                torch.ones(seq_len + pred_size, seq_len - pred_size, device=device),
+                mask,
+                1 - mask,
+            ),
+            dim=-1,
+        ).eq(0)
+
+        self.assertTrue(torch.equal(query_mask, ref_query))
+        self.assertTrue(torch.equal(content_mask, ref_content))
+
     def test_resolve_best_loss_falls_back_to_best_checkpoint(self) -> None:
         """Fallback to best checkpoint best_loss when missing in resume checkpoint.
 
