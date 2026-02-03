@@ -801,31 +801,52 @@ class DataCollatorForMaskedPermutedLanguageModeling:
 
 
 class RandomSamplerWithSeed(Sampler[int]):
-    """
-    Random sampler based on the base Sampler class that allows for seeded random sampling such that
-    epochs are reproducible. If a seed isn't provided, training will be truly random.
-    """
+    """Random sampler that produces a deterministic epoch-specific permutation."""
 
-    def __init__(self, data_source: Sized, epoch: int, random_seed: Optional[int] = None) -> None:
-        """Initialize the sampler with an optional seed.
+    def __init__(
+        self,
+        data_source: Sized,
+        epoch: int,
+        random_seed: Optional[int] = None,
+        start_index: int = 0,
+    ) -> None:
+        """Initialize the sampler with a deterministic seed and optional offset.
 
         :param Sized data_source: Data source to sample from.
         :param int epoch: Current epoch number.
-        :param int random_seed: Optional random seed for reproducibility, defaults to None.
+        :param Optional[int] random_seed: Optional random seed for reproducibility, defaults to None.
+        :param int start_index: Number of already-consumed samples to skip, defaults to 0.
+        :raises ValueError: If start_index is negative or exceeds dataset length.
         """
         self.data_source = data_source
-        self.epoch = epoch
+        self.epoch = int(epoch)
 
         if random_seed is None:
             self.random_seed = int(torch.empty((), dtype=torch.int64).random_().item())
         else:
-            self.random_seed = random_seed
+            self.random_seed = int(random_seed)
+
+        self.start_index = int(start_index) if start_index is not None else 0
+        if self.start_index < 0:
+            raise ValueError(f"start_index must be >= 0, got {self.start_index}")
+
+        dataset_len = len(self.data_source)
+        if self.start_index > dataset_len:
+            raise ValueError(
+                f"start_index ({self.start_index}) exceeds dataset length ({dataset_len}). "
+                "This usually means the dataset changed between runs."
+            )
+
+        self._remaining = dataset_len - self.start_index
 
     def __iter__(self) -> Iterator[int]:
         with utils.numpy_seed(self.epoch + self.random_seed):
-            shuffle = np.random.permutation(len(self.data_source))
+            perm = np.random.permutation(len(self.data_source))
 
-        return iter(shuffle)
+        if self.start_index:
+            perm = perm[self.start_index :]
+
+        return iter(perm.tolist())
 
     def __len__(self) -> int:
-        return len(self.data_source)
+        return self._remaining

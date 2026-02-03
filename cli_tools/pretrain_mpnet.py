@@ -1541,7 +1541,7 @@ def main(args: Namespace) -> None:
                     train_dataset,
                     batch_size=args.batch_size,
                     collate_fn=train_collator,
-                    num_workers=args.num_workers if hasattr(args, "num_workers") else 4,
+                    num_workers=num_workers,
                 )
                 skip_samples = 0
                 batch_index = 0
@@ -1554,8 +1554,11 @@ def main(args: Namespace) -> None:
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
         else:
+            # File-mode resume must skip via sampler offsets, not by iterating DataLoader,
+            # to avoid advancing the collator RNG after restore.
             cycle = resume_data_state["cycle"]
-            skip_batches = resume_cycle_batch_index if resume_mode == "files" else 0
+            skip_samples = resume_cycle_samples if resume_mode == "files" else 0
+            batch_index_offset = resume_cycle_batch_index if resume_mode == "files" else 0
             while True:
                 current_train_file = train_files[cycle % len(train_files)]
                 LOGGER.info("Starting file cycle %s using file: %s", cycle, current_train_file)
@@ -1566,8 +1569,36 @@ def main(args: Namespace) -> None:
                     block_size=args.max_tokens,
                 )
 
+                if skip_samples:
+                    dataset_len = len(epoch_train_dataset)
+                    if skip_samples > dataset_len:
+                        raise ValueError(
+                            f"Resume requested skip_samples={skip_samples}, but dataset has only "
+                            f"{dataset_len} examples. This usually means the training file changed "
+                            "between runs."
+                        )
+                    if skip_samples == dataset_len:
+                        LOGGER.info(
+                            "Resume skip_samples==dataset_len (%s); advancing past cycle %s.",
+                            dataset_len,
+                            cycle,
+                        )
+                        cycle += 1
+                        skip_samples = 0
+                        batch_index_offset = 0
+                        continue
+                    LOGGER.info(
+                        "Resuming file-based dataset: skipping %s already-processed samples "
+                        "(last completed batch_index=%s).",
+                        skip_samples,
+                        batch_index_offset,
+                    )
+
                 sampler = RandomSamplerWithSeed(
-                    epoch_train_dataset, epoch=cycle, random_seed=args.seed
+                    epoch_train_dataset,
+                    epoch=cycle,
+                    random_seed=args.seed,
+                    start_index=skip_samples,
                 )
 
                 train_dataloader = torch.utils.data.DataLoader(
@@ -1575,24 +1606,17 @@ def main(args: Namespace) -> None:
                     sampler=sampler,
                     collate_fn=train_collator,
                     batch_size=args.batch_size,
+                    num_workers=args.num_workers if hasattr(args, "num_workers") else 0,
                 )
 
-                if skip_batches > 0:
-                    LOGGER.info(
-                        "Resuming file-based dataset: skipping %s already-processed batches.",
-                        skip_batches,
-                    )
-
-                batch_index = 0
+                batch_index = batch_index_offset
                 for batch in train_dataloader:
                     batch_index += 1
-                    if skip_batches > 0:
-                        skip_batches -= 1
-                        continue
                     yield batch, cycle, batch_index
 
                 cycle += 1
-                skip_batches = 0
+                skip_samples = 0
+                batch_index_offset = 0
                 del train_dataloader
                 del epoch_train_dataset
                 gc.collect()
@@ -1671,7 +1695,8 @@ def main(args: Namespace) -> None:
                     gnorm = grad_norm_sq.sqrt().item()
 
                 # Step the LR for the upcoming update. steps tracks completed updates.
-                lr = scheduler.step(steps + 1)
+                step_id = steps + 1
+                lr = scheduler.step(step_id)
                 scheduler.optimizer.step()
                 scheduler.optimizer.zero_grad()
 
@@ -1706,19 +1731,19 @@ def main(args: Namespace) -> None:
                 }
 
                 if args.tensorboard_log_dir is not None:
-                    write_to_tensorboard(writers["train"], logging_dict, steps)
+                    write_to_tensorboard(writers["train"], logging_dict, step_id)
                 else:
                     LOGGER.info(logging_dict)
 
                 if args.wandb:
-                    log_to_wandb(logging_dict, steps, "train")
+                    log_to_wandb(logging_dict, step_id, "train")
 
                 accumulation_acc = torch.zeros((), device=device)
                 accumulation_loss = torch.zeros((), device=device)
                 accumulation_input_tokens = 0
                 accumulation_pred_tokens = 0
 
-                steps += 1
+                steps = step_id
 
                 data_state = {
                     "mode": resume_mode,
