@@ -92,7 +92,7 @@ setup(
         "transformers",
         "wandb",
     ],
-    packages=find_packages(exclude=["cli_tools", "tests"]),
+    packages=find_packages(exclude=["tests"]),
     ext_modules=extensions,
     test_suite="tests",
     entry_points={
