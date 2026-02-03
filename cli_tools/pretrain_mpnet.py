@@ -985,6 +985,12 @@ def main(args: Namespace) -> None:
     # Note: checkpoint_dir is already created above when handling resume logic
 
     resume_mode = "streaming" if train_streaming else "files"
+    if train_streaming and args.resume and args.num_workers > 0:
+        LOGGER.warning(
+            "Resuming streaming training with num_workers=%s is best-effort; "
+            "use --num-workers 0 for deterministic resume.",
+            args.num_workers,
+        )
     resume_data_state = _normalize_data_state(resume_data_state, mode_hint=resume_mode)
     reset_collator_rng = False  # Flag to skip loading RNG states from checkpoint
     if resume_data_state["mode"] == "unknown":
