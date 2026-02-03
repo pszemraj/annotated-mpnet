@@ -192,6 +192,7 @@ class HFStreamingDataset(torch.utils.data.IterableDataset):
 
         # Initialize numpy Generator for reproducible buffer shuffling
         self._rng = np.random.default_rng(seed)
+        self._rng_state_restored = False
 
         # Either use provided stream or load a new one
         if dataset_stream is not None:
@@ -222,9 +223,10 @@ class HFStreamingDataset(torch.utils.data.IterableDataset):
         worker_info = torch.utils.data.get_worker_info()
 
         if worker_info is not None:
-            # Use different seed for each worker
-            worker_seed = worker_info.id + self.seed
-            self._rng = np.random.default_rng(worker_seed)
+            # Use different seed for each worker unless an explicit RNG state was restored.
+            if not self._rng_state_restored:
+                worker_seed = worker_info.id + self.seed
+                self._rng = np.random.default_rng(worker_seed)
 
             # Shard the dataset based on worker id
             dataset_iter = iter(
@@ -310,6 +312,7 @@ class HFStreamingDataset(torch.utils.data.IterableDataset):
             self._rng.bit_generator.state = _deserialize_np_generator_state(
                 state["numpy_generator"]
             )
+            self._rng_state_restored = True
 
 
 def create_hf_dataloader(
