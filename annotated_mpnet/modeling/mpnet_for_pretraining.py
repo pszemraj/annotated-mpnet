@@ -127,6 +127,7 @@ class MPNetForPretraining(nn.Module):
         pred_size: int,
         attention_mask: Optional[torch.Tensor] = None,
         segment_labels: Optional[torch.Tensor] = None,
+        has_padding: Optional[bool] = None,
         return_mlm: bool = False,
         **kwargs: Any,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
@@ -137,6 +138,7 @@ class MPNetForPretraining(nn.Module):
         :param int pred_size: Number of tokens to predict.
         :param torch.Tensor attention_mask: Optional attention mask (1 for real tokens), defaults to None.
         :param torch.Tensor segment_labels: Optional segment labels for token type embeddings.
+        :param bool has_padding: Optional CPU-known padding flag to skip key padding masks.
         :param bool return_mlm: Whether to return an additional MLM head output, defaults to False.
         :param dict kwargs: Additional keyword arguments (must be empty).
         :return torch.Tensor: Vocabulary logits (or logits tuple when ``return_mlm`` is True).
@@ -154,7 +156,10 @@ class MPNetForPretraining(nn.Module):
 
         # Calculate initial embeddings
         emb = self.sentence_encoder.encode_emb(
-            input_ids, positions=positions, segment_labels=segment_labels
+            input_ids,
+            positions=positions,
+            segment_labels=segment_labels,
+            has_padding=has_padding,
         )
 
         # Reverse the tensor for easier extraction
@@ -191,11 +196,17 @@ class MPNetForPretraining(nn.Module):
         sz = c.size(0) - pred_size
 
         # Get the query and content masks using the helper function below
+        if has_padding is False:
+            attention_mask = None
+            pad_token_id = None
+        else:
+            pad_token_id = self.sentence_encoder.padding_idx
+
         query_mask, content_mask, key_padding_mask = make_query_and_content_mask(
             input_ids,
             sz,
             pred_size,
-            pad_token_id=self.sentence_encoder.padding_idx,
+            pad_token_id=pad_token_id,
             attention_mask=attention_mask,
         )
 

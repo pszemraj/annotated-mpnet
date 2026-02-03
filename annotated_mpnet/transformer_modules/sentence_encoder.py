@@ -204,6 +204,8 @@ class SentenceEncoder(nn.Module):
         )
 
         # Embedding layer norm is independent from pre/post-norm transformer blocks.
+        # Embedding vs final norms are distinct by design; checkpoint compatibility is not a
+        # requirement for this in-development repo.
         self.emb_layer_norm = (
             LayerNorm(self.embedding_dim, export=export) if encoder_normalize_before else None
         )
@@ -277,15 +279,19 @@ class SentenceEncoder(nn.Module):
         input_ids: torch.Tensor,
         positions: Optional[torch.Tensor] = None,
         segment_labels: Optional[torch.Tensor] = None,
+        has_padding: Optional[bool] = None,
     ) -> torch.Tensor:
         """Embed input tokens using the encoder's embedding layers.
 
         :param torch.Tensor input_ids: Input token IDs for the batch.
         :param torch.Tensor positions: Optional precomputed positions for permuted inputs.
         :param torch.Tensor segment_labels: Optional segment labels for token type embeddings.
+        :param bool has_padding: Optional CPU-known padding flag to skip padding masks.
         :return torch.Tensor: Embedded token representations.
         """
-        padding_mask = input_ids.eq(self.padding_idx)
+        padding_mask = None
+        if has_padding is not False:
+            padding_mask = input_ids.eq(self.padding_idx)
 
         x = self.embed_tokens(input_ids)
         if self.embed_scale is not None:
@@ -304,7 +310,8 @@ class SentenceEncoder(nn.Module):
             x = self.emb_layer_norm(x)
 
         x = F.dropout(x, p=self.dropout, training=self.training)
-        x *= 1 - padding_mask.unsqueeze(-1).type_as(x)
+        if padding_mask is not None:
+            x *= 1 - padding_mask.unsqueeze(-1).type_as(x)
         return x
 
     def maybe_final_norm(self, x: torch.Tensor) -> torch.Tensor:
@@ -323,6 +330,7 @@ class SentenceEncoder(nn.Module):
         segment_labels: torch.Tensor = None,
         last_state_only: bool = False,
         positions: Optional[torch.Tensor] = None,
+        has_padding: Optional[bool] = None,
     ) -> Tuple[List[torch.Tensor], torch.Tensor]:
         """Run the encoder forward pass.
 
@@ -330,11 +338,14 @@ class SentenceEncoder(nn.Module):
         :param torch.Tensor segment_labels: Segment labels, defaults to None.
         :param bool last_state_only: Whether to return only the final state, defaults to False.
         :param torch.Tensor positions: Precomputed positions, defaults to None.
+        :param bool has_padding: Optional CPU-known padding flag to skip padding masks.
         :return Tuple[List[torch.Tensor], torch.Tensor]: Hidden states list and sentence embedding.
         """
 
         # Compute padding mask. This is needed for multi-head attention.
-        padding_mask = tokens.eq(self.padding_idx)
+        padding_mask = None
+        if has_padding is not False:
+            padding_mask = tokens.eq(self.padding_idx)
 
         # Get the embeddings for the token sequence
         x = self.embed_tokens(tokens)
@@ -362,7 +373,8 @@ class SentenceEncoder(nn.Module):
         x = F.dropout(x, p=self.dropout, training=self.training)
 
         # Account for padding while computing the representation
-        x *= 1 - padding_mask.unsqueeze(-1).type_as(x)
+        if padding_mask is not None:
+            x *= 1 - padding_mask.unsqueeze(-1).type_as(x)
 
         # Transpose the batch for easier attention caluclation later on. This is an artifact of the
         # fairseq codebase, but since it's done like this everywhere, we have to keep it

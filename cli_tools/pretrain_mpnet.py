@@ -1403,7 +1403,11 @@ def main(args: Namespace) -> None:
             "positions": batch["positions"],
             "pred_size": batch["pred_size"],
         }
-        if "attention_mask" in batch:
+        # has_padding avoids device-side .any() and keeps attention bias broadcastable when no pads.
+        has_padding = batch.get("has_padding")
+        if has_padding is not None:
+            model_inputs["has_padding"] = bool(has_padding)
+        if "attention_mask" in batch and has_padding is not False:
             model_inputs["attention_mask"] = batch["attention_mask"]
         if "segment_labels" in batch:
             model_inputs["segment_labels"] = batch["segment_labels"]
@@ -2299,7 +2303,7 @@ def cli_main() -> None:
     )
     parser.add_argument(
         "--num-workers",
-        help="Number of worker processes for data loading.",
+        help="Number of worker processes for data loading. Defaults to 0 for deterministic resume.",
         default=0,
         type=int,
     )

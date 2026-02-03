@@ -569,6 +569,7 @@ class DataCollatorForMaskedPermutedLanguageModeling:
 
         # Refresh attention_mask after permutation/append and drop unused fields.
         attention_mask = src_tokens.ne(self.tokenizer.pad_token_id).long()
+        has_padding = bool(attention_mask.eq(0).any().item())
         batch.pop("token_type_ids", None)
 
         # Now load these up into collated form
@@ -579,6 +580,7 @@ class DataCollatorForMaskedPermutedLanguageModeling:
         batch["pred_ntokens"] = int(targets.ne(self.tokenizer.pad_token_id).sum().item())
         batch["ntokens"] = ntokens
         batch["attention_mask"] = attention_mask
+        batch["has_padding"] = has_padding
 
         return batch
 

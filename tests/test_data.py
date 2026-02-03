@@ -52,6 +52,7 @@ class TestData(unittest.TestCase):
         self.assertEqual(permuted_examples["input_ids"].shape[0], 2)
         self.assertEqual(permuted_examples["targets"].shape[0], 2)
         self.assertIn("pred_ntokens", permuted_examples)
+        self.assertTrue(permuted_examples["has_padding"])
         self.assertEqual(
             permuted_examples["pred_ntokens"],
             int(permuted_examples["targets"].ne(self.collator.tokenizer.pad_token_id).sum().item()),
@@ -106,6 +107,24 @@ class TestData(unittest.TestCase):
         self.assertEqual(attention_mask.shape, input_ids.shape)
         pad_mask = input_ids.eq(tokenizer.pad_token_id)
         self.assertTrue(torch.equal(attention_mask.eq(0), pad_mask))
+        self.assertTrue(batch["has_padding"])
+
+    def test_collator_has_padding_false_for_equal_lengths(self) -> None:
+        """Ensure has_padding is False when all sequences are the same length.
+
+        :return None: This test returns nothing.
+        """
+        tokenizer = AutoTokenizer.from_pretrained("microsoft/mpnet-base")
+        enc = tokenizer("hello world", add_special_tokens=True)
+        examples = [
+            {"input_ids": torch.tensor(enc["input_ids"], dtype=torch.long)},
+            {"input_ids": torch.tensor(enc["input_ids"], dtype=torch.long)},
+        ]
+        collator = DataCollatorForMaskedPermutedLanguageModeling(
+            tokenizer=tokenizer, random_seed=123
+        )
+        batch = collator.collate_fn(examples)
+        self.assertFalse(batch["has_padding"])
 
     def test_training_seeded_sampling(self) -> None:
         """Verify deterministic sampling across epochs with a seed.
