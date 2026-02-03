@@ -190,10 +190,6 @@ class HFStreamingDataset(torch.utils.data.IterableDataset):
         self.skip_samples = skip_samples
         self.max_samples = max_samples
 
-        # Initialize numpy Generator for reproducible buffer shuffling
-        self._rng = np.random.default_rng(seed)
-        self._rng_state_restored = False
-
         # Either use provided stream or load a new one
         if dataset_stream is not None:
             LOGGER.info("Using provided dataset stream")
@@ -210,6 +206,9 @@ class HFStreamingDataset(torch.utils.data.IterableDataset):
                     lambda example: len(example[text_field]) >= min_text_length
                 )
 
+            # Shuffle once for deterministic streaming order.
+            self.dataset = self.dataset.shuffle(buffer_size=self.buffer_size, seed=self.seed)
+
             LOGGER.info(f"Dataset {dataset_name} loaded and filtered")
         else:
             raise ValueError("Either dataset_name or dataset_stream must be provided")
@@ -223,11 +222,6 @@ class HFStreamingDataset(torch.utils.data.IterableDataset):
         worker_info = torch.utils.data.get_worker_info()
 
         if worker_info is not None:
-            # Use different seed for each worker unless an explicit RNG state was restored.
-            if not self._rng_state_restored:
-                worker_seed = worker_info.id + self.seed
-                self._rng = np.random.default_rng(worker_seed)
-
             # Shard the dataset based on worker id
             dataset_iter = iter(
                 self.dataset.shard(num_shards=worker_info.num_workers, index=worker_info.id)
@@ -239,41 +233,15 @@ class HFStreamingDataset(torch.utils.data.IterableDataset):
         skip_samples = self.skip_samples
         max_samples = self.max_samples
 
-        # Initialize buffer
-        buffer = []
-
-        # Fill the buffer initially
-        for _ in range(self.buffer_size):
-            try:
-                example = next(dataset_iter)
-                buffer.append(example)
-            except StopIteration:
-                break
-
-        # Continue as long as there are items in buffer
         skipped = 0
         yielded = 0
-        while buffer:
-            # Randomly select an example from the buffer
-            idx = self._rng.integers(0, len(buffer))
-            example = buffer[idx]
-
-            # Process the example
-            processed = self._process_example(example)
-
-            # Replace the used example with a new one if available
-            try:
-                buffer[idx] = next(dataset_iter)
-            except StopIteration:
-                # Remove the used example if no more examples
-                buffer.pop(idx)
-
+        for example in dataset_iter:
             if skipped < skip_samples:
                 skipped += 1
                 continue
             if max_samples is not None and yielded >= max_samples:
                 break
-
+            processed = self._process_example(example)
             yielded += 1
             yield processed
 
@@ -295,12 +263,14 @@ class HFStreamingDataset(torch.utils.data.IterableDataset):
         # Leave padding to the collator to avoid redundant max_length padding here.
         return {"input_ids": torch.tensor(tokenized["input_ids"], dtype=torch.long)}
 
-    def get_rng_state(self) -> Dict[str, Any]:
+    def get_rng_state(self) -> Optional[Dict[str, Any]]:
         """Return streaming dataset RNG state for deterministic resume.
 
-        :return Dict[str, Any]: RNG state payload with numpy_generator key.
+        Streaming order is managed by HuggingFace's shuffle; this dataset does not own RNG state.
+
+        :return Optional[Dict[str, Any]]: Always None for streaming datasets.
         """
-        return {"numpy_generator": _serialize_np_generator_state(self._rng.bit_generator.state)}
+        return None
 
     def set_rng_state(self, state: Optional[Dict[str, Any]]) -> None:
         """Restore streaming dataset RNG state from a checkpoint.
@@ -308,11 +278,7 @@ class HFStreamingDataset(torch.utils.data.IterableDataset):
         :param Optional[Dict[str, Any]] state: RNG state payload.
         :return None: This method returns nothing.
         """
-        if state and state.get("numpy_generator") is not None:
-            self._rng.bit_generator.state = _deserialize_np_generator_state(
-                state["numpy_generator"]
-            )
-            self._rng_state_restored = True
+        return None
 
 
 def create_hf_dataloader(

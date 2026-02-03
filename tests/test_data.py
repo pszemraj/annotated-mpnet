@@ -170,7 +170,7 @@ class TestData(unittest.TestCase):
             mpnet_data.make_span_perm = original
 
     def test_streaming_dataset_rng_state_roundtrip(self) -> None:
-        """Ensure streaming dataset RNG state can be saved and restored.
+        """Ensure streaming dataset RNG state is a no-op.
 
         :return None: This test returns nothing.
         """
@@ -189,8 +189,7 @@ class TestData(unittest.TestCase):
         )
 
         state = dataset.get_rng_state()
-        self.assertIsNotNone(state)
-        self.assertIn("numpy_generator", state)
+        self.assertIsNone(state)
 
-        # Verify state can be restored without error
+        # Verify set_rng_state remains a no-op
         dataset.set_rng_state(state)

@@ -229,24 +229,6 @@ class TestPretrainHelpers(unittest.TestCase):
         self.assertEqual(data_state["batch_index"], 5)
         self.assertEqual(data_state["samples_in_cycle"], 128)
 
-    def test_resolve_streaming_resume_state(self) -> None:
-        """Ensure streaming resume state resolves skip vs RNG usage.
-
-        :return None: This test returns nothing.
-        """
-        resume_state = {"numpy_generator": {"state": [1, 2, 3]}}
-        skip, rng_state = pretrain_mpnet._resolve_streaming_resume_state(None, 10, 0)
-        self.assertEqual(skip, 10)
-        self.assertIsNone(rng_state)
-
-        skip, rng_state = pretrain_mpnet._resolve_streaming_resume_state(resume_state, 10, 0)
-        self.assertEqual(skip, 0)
-        self.assertEqual(rng_state, resume_state)
-
-        skip, rng_state = pretrain_mpnet._resolve_streaming_resume_state(resume_state, 10, 2)
-        self.assertEqual(skip, 10)
-        self.assertIsNone(rng_state)
-
     def test_resolve_best_loss_prefers_resume_checkpoint_dir(self) -> None:
         """Prefer best checkpoint in resume checkpoint directory when external.
 
