@@ -8,11 +8,6 @@ import pathlib
 import time
 from typing import Any, Callable, Dict, Iterator, Optional, Sequence, Sized
 
-from rich.logging import RichHandler
-
-LOG_FORMAT = "%(message)s"
-# NOTE: basicConfig is a no-op if logging is already configured by the host app.
-logging.basicConfig(level="INFO", format=LOG_FORMAT, datefmt="[%X] ", handlers=[RichHandler()])
 LOGGER = logging.getLogger(__name__)
 
 
@@ -386,13 +381,33 @@ class DataCollatorForMaskedPermutedLanguageModeling:
         self._torch_generator = torch.Generator()
         self._torch_generator.manual_seed(random_seed)
 
+        # Cache vocab access via get_vocab when available (supports fast tokenizers).
+        if hasattr(tokenizer, "get_vocab") and callable(tokenizer.get_vocab):
+            vocab_dict = tokenizer.get_vocab()
+        else:
+            vocab_dict = tokenizer.vocab
+        if not isinstance(vocab_dict, dict):
+            raise ValueError("Tokenizer vocabulary is not a dictionary; cannot build masks.")
+
+        vocab_size = max(vocab_dict.values()) + 1 if vocab_dict else len(tokenizer)
+        vocab_size = max(vocab_size, len(tokenizer))
+        self.vocab_size = vocab_size
+
+        vocab_items_by_id = [None] * vocab_size
+        for token, idx in vocab_dict.items():
+            if 0 <= idx < vocab_size:
+                vocab_items_by_id[idx] = token
+
         # Let's also create a byte tensor that maps words that begin with ##
         # We'll use this later on to do whole word masking
         if whole_word_mask:
-            vocab_items = sorted(tokenizer.vocab.items(), key=lambda x: x[1])
             # Require a reasonable number of ## tokens to avoid false positives for non-WordPiece.
             min_wordpiece_tokens = 100
-            wordpiece_count = sum(1 for token, _ in vocab_items if token.startswith("##"))
+            wordpiece_count = sum(
+                1
+                for token in vocab_dict.keys()
+                if isinstance(token, str) and token.startswith("##")
+            )
             has_wordpiece = wordpiece_count >= min_wordpiece_tokens
             if not has_wordpiece:
                 LOGGER.warning(
@@ -401,18 +416,24 @@ class DataCollatorForMaskedPermutedLanguageModeling:
                 )
                 self.whole_word_mask_map = None
             else:
-                self.whole_word_mask_map = torch.ByteTensor(
-                    [not token.startswith("##") for token, _ in vocab_items]
-                )
+                wordpiece_flags = []
+                for token in vocab_items_by_id:
+                    if token is None or not isinstance(token, str):
+                        wordpiece_flags.append(True)
+                    else:
+                        wordpiece_flags.append(not token.startswith("##"))
+                self.whole_word_mask_map = torch.ByteTensor(wordpiece_flags)
         else:
             self.whole_word_mask_map = None
 
         # Finally, let's create a weight tensor that will make sure no special tokens are selected
         # when we are corrupting values later on
-        weights = torch.ones(len(tokenizer.vocab), dtype=torch.float32)
+        weights = torch.ones(self.vocab_size, dtype=torch.float32)
         for idx in tokenizer.all_special_ids:
-            weights[idx] = 0.0
+            if 0 <= idx < self.vocab_size:
+                weights[idx] = 0.0
         self.weights = weights / weights.sum()
+        self._special_ids = list(tokenizer.all_special_ids)
 
     def __call__(self, examples: Sequence[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
         return self.collate_fn(examples)
@@ -452,6 +473,9 @@ class DataCollatorForMaskedPermutedLanguageModeling:
 
         # Let's get the input IDs for the batch
         src_tokens = batch["input_ids"]
+        attention_mask = batch.get("attention_mask")
+        if attention_mask is None:
+            attention_mask = src_tokens.ne(self.tokenizer.pad_token_id).long()
 
         # Get inline tokens so that we can keep track of the total non-padding tokens in the batch
         inline_tokens = src_tokens.view(-1)
@@ -460,32 +484,45 @@ class DataCollatorForMaskedPermutedLanguageModeling:
         # the batch
         ntokens = inline_tokens[inline_tokens != self.tokenizer.pad_token_id].numel()
 
-        # Let's get the batch dimension
-        sz = src_tokens.size()
+        # Build masks to avoid predicting or corrupting padding/special tokens.
+        special_mask = torch.zeros_like(src_tokens, dtype=torch.bool)
+        for special_id in self._special_ids:
+            special_mask |= src_tokens.eq(special_id)
+        non_pad_mask = attention_mask.to(torch.bool)
+        predictable_mask = non_pad_mask & ~special_mask
 
-        # Calculate the pred_size for this batch, ensuring at least 1 token is masked
-        # This avoids masking the entire sequence for short inputs (which distorts the training objective)
-        pred_size = max(1, round(sz[1] * self.pred_prob))
-
-        # If we DO want to mask whole words, we use the span perm function which will permute whole
-        # spans / words. Otherwise, we simply do a random permutation
-        if self.whole_word_mask_map is not None:
-            positions = torch.stack(
-                [self.span_perm(src_tokens[i], pred_size) for i in range(sz[0])]
+        predictable_counts = predictable_mask.sum(dim=1)
+        if (predictable_counts == 0).any():
+            LOGGER.warning(
+                "Batch contains samples without non-special tokens; falling back to non-pad tokens "
+                "for prediction on those samples."
             )
-        else:
-            if self._torch_generator is not None:
-                positions = torch.stack(
-                    [torch.randperm(sz[1], generator=self._torch_generator) for i in range(sz[0])]
-                )
-            else:
-                positions = torch.stack([torch.randperm(sz[1]) for i in range(sz[0])])
+            zero_rows = (predictable_counts == 0).nonzero(as_tuple=False).view(-1)
+            for row_idx in zero_rows.tolist():
+                predictable_mask[row_idx] = non_pad_mask[row_idx]
+            predictable_counts = predictable_mask.sum(dim=1)
+
+        min_predictable = int(predictable_counts.min().item())
+        if min_predictable <= 0:
+            raise ValueError("No tokens available for prediction after padding/special filtering.")
+
+        # Calculate the pred_size for this batch based on real tokens (not padding).
+        pred_size = max(1, round(min_predictable * self.pred_prob))
+        pred_size = min(pred_size, min_predictable)
+
+        # Generate permutation positions per sample without pulling pads/specials into the target set.
+        positions = torch.stack(
+            [
+                self._build_positions(src_tokens[i], predictable_mask[i], pred_size)
+                for i in range(src_tokens.size(0))
+            ]
+        )
 
         # Now we actually do the permutation of the inputs based on the position outputs from above
         src_tokens, targets = self.permute_inputs(src_tokens, positions), None
 
         # Get the range of indices where mask tokens exist
-        mask_range = range(sz[1] - pred_size, sz[1])
+        mask_range = range(src_tokens.size(1) - pred_size, src_tokens.size(1))
 
         # Extract targets, i.e. masked tokens, using the mask range
         targets = src_tokens[:, mask_range].contiguous()
@@ -500,14 +537,43 @@ class DataCollatorForMaskedPermutedLanguageModeling:
             (positions, positions[:, mask_range], positions[:, mask_range]), dim=1
         )
 
+        # Refresh attention_mask after permutation/append and drop unused fields.
+        attention_mask = src_tokens.ne(self.tokenizer.pad_token_id).long()
+        batch.pop("token_type_ids", None)
+
         # Now load these up into collated form
         batch["targets"] = targets
         batch["input_ids"] = src_tokens
         batch["positions"] = positions
         batch["pred_size"] = targets.size(1)
         batch["ntokens"] = ntokens
+        batch["attention_mask"] = attention_mask
 
         return batch
+
+    def _build_positions(
+        self, input_ids: torch.Tensor, predictable_mask: torch.Tensor, pred_size: int
+    ) -> torch.Tensor:
+        """Construct a permutation that keeps padding/special tokens out of the prediction set.
+
+        :param torch.Tensor input_ids: Input IDs for a single sample.
+        :param torch.Tensor predictable_mask: Boolean mask of tokens eligible for prediction.
+        :param int pred_size: Number of tokens to predict.
+        :return torch.Tensor: Permutation indices for the sample.
+        """
+        predictable_idx = torch.nonzero(predictable_mask, as_tuple=False).view(-1)
+        protected_idx = torch.nonzero(~predictable_mask, as_tuple=False).view(-1)
+
+        if predictable_idx.numel() == 0:
+            return torch.arange(input_ids.size(0))
+
+        if self.whole_word_mask_map is not None:
+            perm = self.span_perm(input_ids[predictable_idx], pred_size)
+        else:
+            generator = self._torch_generator if self._torch_generator is not None else None
+            perm = torch.randperm(predictable_idx.numel(), generator=generator)
+
+        return torch.cat([protected_idx, predictable_idx[perm]], dim=0)
 
     # Let's define helper functions here
     def span_perm(self, x: torch.Tensor, pred_size: Optional[int] = None) -> torch.Tensor:

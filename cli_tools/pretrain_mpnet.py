@@ -12,7 +12,7 @@ import os
 import pathlib
 import sys
 from argparse import Namespace
-from typing import Any, Iterator
+from typing import Any, Iterator, TYPE_CHECKING
 
 import numpy as np
 from rich.logging import RichHandler
@@ -26,10 +26,8 @@ DEFAULT_STREAMING_DATASET = "HuggingFaceFW/fineweb-edu"
 
 import torch
 import torch.nn.functional as F
-import wandb
 from datasets import load_dataset
 from rich.progress import track
-from torch.utils.tensorboard import SummaryWriter
 from transformers import AutoTokenizer
 
 from annotated_mpnet.data import (
@@ -48,8 +46,15 @@ from annotated_mpnet.utils.utils import (
     validate_tokenizer,
 )
 
+if TYPE_CHECKING:
+    from torch.utils.tensorboard import SummaryWriter
+
+
 DEFAULT_BEST_LOSS = 10e6
 VOCAB_SIZE_ALIGNMENT = 128  # Align vocab size for efficient GPU kernels.
+
+# Optional dependencies are imported lazily; keep a module-level slot for wandb.
+wandb = None
 
 
 def accuracy(output: torch.Tensor, target: torch.Tensor, ignore_index: int | None = None) -> int:
@@ -72,7 +77,7 @@ def accuracy(output: torch.Tensor, target: torch.Tensor, ignore_index: int | Non
     return correct.sum().item()
 
 
-def write_to_tensorboard(writer: SummaryWriter, logging_dict: dict, step: int) -> None:
+def write_to_tensorboard(writer: "SummaryWriter", logging_dict: dict, step: int) -> None:
     """
     This function takes in a logging dict and sends it to tensorboard
 
@@ -95,11 +100,36 @@ def log_to_wandb(logging_dict: dict, step: int, split: str) -> None:
         step: the current step
         split: the data split (train, valid, test)
     """
-    if wandb.run is not None:
+    if wandb is not None and wandb.run is not None:
         # Prefix metrics with split name for better organization in the dashboard
         wandb_dict = {f"{split}/{k}": v for k, v in logging_dict.items()}
         wandb_dict["step"] = step
         wandb.log(wandb_dict)
+
+
+def _group_parameters_for_weight_decay(
+    model: torch.nn.Module,
+) -> tuple[list[torch.nn.Parameter], list[torch.nn.Parameter]]:
+    """Split parameters into decay and no-decay groups.
+
+    :param torch.nn.Module model: Model whose parameters should be grouped.
+    :return tuple[list[torch.nn.Parameter], list[torch.nn.Parameter]]: (decay, no_decay) params.
+    """
+    decay_params = []
+    no_decay_params = []
+    seen_params = set()
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        param_id = id(param)
+        if param_id in seen_params:
+            continue
+        seen_params.add(param_id)
+        if name.endswith(".bias") or param.ndim == 1:
+            no_decay_params.append(param)
+        else:
+            decay_params.append(param)
+    return decay_params, no_decay_params
 
 
 def _get_initial_best_loss(checkpoint: dict | None) -> float:
@@ -760,6 +790,14 @@ def main(args: Namespace) -> None:
 
     # Instantiate the tensorboard writers
     if args.tensorboard_log_dir is not None:
+        try:
+            from torch.utils.tensorboard import SummaryWriter
+        except ImportError as exc:
+            raise RuntimeError(
+                "Tensorboard logging requested but tensorboard dependencies are missing. "
+                "Install torch[torchvision] extras or tensorboard to enable this feature."
+            ) from exc
+
         log_dir = pathlib.Path(args.tensorboard_log_dir)
         writers = {
             "train": SummaryWriter(str(log_dir / "train")),
@@ -865,6 +903,15 @@ def main(args: Namespace) -> None:
 
     # Initialize wandb if enabled (after model creation)
     if args.wandb:
+        global wandb
+        try:
+            import wandb as _wandb
+        except ImportError as exc:
+            raise RuntimeError(
+                "Weights & Biases logging requested but wandb is not installed. "
+                "Install wandb to enable this feature."
+            ) from exc
+        wandb = _wandb
         wandb.init(
             project=args.wandb_project,
             name=args.wandb_name,
@@ -1010,9 +1057,12 @@ def main(args: Namespace) -> None:
     # Note: checkpoint_dir is already created above when handling resume logic
 
     resume_mode = "streaming" if train_streaming else "files"
-    if train_streaming and args.resume and args.num_workers > 0:
+    # Exact resume is only possible with deterministic sampling (no streaming shuffle, num_workers=0).
+    if args.resume and train_streaming:
+        LOGGER.warning("Streaming shuffle buffers are not restorable; resume will be approximate.")
+    if args.resume and args.num_workers > 0:
         LOGGER.warning(
-            "Resuming streaming training with num_workers=%s is best-effort; "
+            "Collator RNG state is not restorable with num_workers=%s; "
             "use --num-workers 0 for deterministic resume.",
             args.num_workers,
         )
@@ -1064,20 +1114,37 @@ def main(args: Namespace) -> None:
     if args.warmup_updates is None:
         args.warmup_updates = round(0.1 * args.total_updates)
 
-    # Let's define an optimizer with our Polynomial decay scheduler on top of it
-    # We set the optimizer with an arbitrary learning rate since it will be updated by the scheduler
-    # anyway
+    # Let's define an optimizer with our Polynomial decay scheduler on top of it.
+    # We set the optimizer with an arbitrary learning rate since it will be updated by the scheduler.
+    # Use parameter groups to avoid weight decay on biases and norm weights.
+    decay_params = []
+    no_decay_params = []
+    seen_params = set()
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        param_id = id(param)
+        if param_id in seen_params:
+            continue
+        seen_params.add(param_id)
+        if name.endswith(".bias") or param.ndim == 1:
+            no_decay_params.append(param)
+        else:
+            decay_params.append(param)
+
     optimizer = torch.optim.AdamW(
-        filter(lambda p: p.requires_grad, model.parameters()),
+        [
+            {"params": decay_params, "weight_decay": args.weight_decay},
+            {"params": no_decay_params, "weight_decay": 0.0},
+        ],
         betas=(args.beta1, args.beta2),
         lr=6e-9,  # starting learning rate during warmup
         eps=args.adam_eps,
-        weight_decay=args.weight_decay,
         fused=device.type == "cuda",
     )
     scheduler = PolynomialDecayLRScheduler(args, optimizer)
 
-    # Initialize step counters
+    # Initialize step counters (completed optimizer updates).
     steps = 0
     best_loss = DEFAULT_BEST_LOSS  # Will be overridden if resuming from checkpoint
     samples_processed = 0
@@ -1215,11 +1282,18 @@ def main(args: Namespace) -> None:
             # Restore collator RNG state for deterministic masking when resuming.
             # Skip if mode mismatch was detected (reset_collator_rng is True).
             if "collator_rng_state" in checkpoint and not reset_collator_rng:
-                try:
-                    mplm.set_rng_state(checkpoint["collator_rng_state"])
-                    LOGGER.info("Restored collator RNG state")
-                except (TypeError, ValueError, AttributeError) as e:
-                    LOGGER.warning(f"Could not restore collator RNG state: {e}")
+                if args.num_workers > 0:
+                    LOGGER.info(
+                        "Skipping collator RNG restoration with num_workers=%s; "
+                        "worker RNG streams cannot be restored from the main process.",
+                        args.num_workers,
+                    )
+                else:
+                    try:
+                        mplm.set_rng_state(checkpoint["collator_rng_state"])
+                        LOGGER.info("Restored collator RNG state")
+                    except (TypeError, ValueError, AttributeError) as e:
+                        LOGGER.warning(f"Could not restore collator RNG state: {e}")
             elif reset_collator_rng:
                 LOGGER.info("Skipped collator RNG restoration due to mode mismatch")
 
@@ -1308,7 +1382,6 @@ def main(args: Namespace) -> None:
             device_batch = {
                 data_type: (t.to(device) if isinstance(t, torch.Tensor) else t)
                 for data_type, t in batch.items()
-                if data_type != "attention_mask"
             }
             targets = device_batch["targets"]
             with torch.no_grad():
@@ -1481,7 +1554,6 @@ def main(args: Namespace) -> None:
             device_batch = {
                 data_type: (t.to(device) if isinstance(t, torch.Tensor) else t)
                 for data_type, t in batch.items()
-                if data_type != "attention_mask"
             }
 
             batch_size = int(device_batch["input_ids"].shape[0])
@@ -1521,15 +1593,15 @@ def main(args: Namespace) -> None:
                         model.parameters(), args.clip_grad_norm
                     ).item()
                 else:
-                    gnorm = math.sqrt(
-                        sum(
-                            p.grad.data.norm() ** 2
-                            for p in model.parameters()
-                            if p.grad is not None
-                        )
-                    )
+                    grad_norm_sq = torch.zeros((), device=device)
+                    for p in model.parameters():
+                        if p.grad is not None:
+                            grad_norm_sq += p.grad.data.norm() ** 2
+                    gnorm = grad_norm_sq.sqrt().item()
 
-                lr = scheduler.step(steps)
+                # Step the LR for the upcoming update. steps tracks completed updates.
+                lr = scheduler.step(steps + 1)
+                scheduler.optimizer.step()
                 scheduler.optimizer.zero_grad()
 
                 normal_acc = _normalize_training_accuracy(
@@ -1836,7 +1908,7 @@ def main(args: Namespace) -> None:
     )
 
     # Finish wandb run if active
-    if args.wandb and wandb.run is not None:
+    if args.wandb and wandb is not None and wandb.run is not None:
         wandb.finish()
 
 

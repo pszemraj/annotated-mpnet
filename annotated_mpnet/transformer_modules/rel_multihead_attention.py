@@ -5,11 +5,6 @@ Defining relative multihead attention for MPNet
 import logging
 from typing import Any, Dict, Optional, Tuple
 
-from rich.logging import RichHandler
-
-LOG_FORMAT = "%(message)s"
-# NOTE: basicConfig is a no-op if logging is already configured by the host app.
-logging.basicConfig(level="INFO", format=LOG_FORMAT, datefmt="[%X] ", handlers=[RichHandler()])
 LOGGER = logging.getLogger(__name__)
 
 
@@ -283,43 +278,66 @@ class RelativeMultiHeadAttention(nn.Module):
             and v is not None
         )
         if use_sdpa:
+            q_sdpa = q.contiguous().view(bsz, self.num_heads, tgt_len, self.head_dim)
+            k_sdpa = k.contiguous().view(bsz, self.num_heads, src_len, self.head_dim)
+            v_sdpa = v.contiguous().view(bsz, self.num_heads, src_len, self.head_dim)
+
             attn_bias = None
+            attn_bias_from_positions = False
+            if positions_bias is not None:
+                attn_bias = positions_bias.to(device=q.device, dtype=q.dtype).view(
+                    bsz, self.num_heads, tgt_len, src_len
+                )
+                attn_bias_from_positions = True
+
+            if attn_bias is None and (attn_mask is not None or key_padding_mask is not None):
+                attn_bias = torch.zeros(
+                    (bsz, self.num_heads, tgt_len, src_len),
+                    device=q.device,
+                    dtype=q.dtype,
+                )
+                attn_bias_from_positions = False
+
             if attn_mask is not None:
                 if attn_mask.dtype == torch.bool:
-                    attn_bias = torch.zeros(
-                        attn_mask.shape, device=q.device, dtype=q.dtype
-                    ).masked_fill(attn_mask, float("-inf"))
+                    mask = attn_mask
+                    if mask.dim() == 2:
+                        mask = mask.unsqueeze(0).unsqueeze(0)
+                    elif mask.dim() == 3:
+                        mask = mask.unsqueeze(1)
+                    if attn_bias_from_positions:
+                        attn_bias = attn_bias.clone()
+                        attn_bias_from_positions = False
+                    attn_bias.masked_fill_(mask, float("-inf"))
                 else:
-                    attn_bias = attn_mask.to(device=q.device, dtype=q.dtype)
-                if attn_bias.dim() == 2:
-                    attn_bias = attn_bias.unsqueeze(0)
-                if attn_bias.size(0) == 1 and q.size(0) != 1:
-                    attn_bias = attn_bias.expand(q.size(0), -1, -1)
+                    mask = attn_mask.to(device=q.device, dtype=q.dtype)
+                    if mask.dim() == 2:
+                        mask = mask.unsqueeze(0).unsqueeze(0)
+                    elif mask.dim() == 3:
+                        mask = mask.unsqueeze(1)
+                    if attn_bias_from_positions:
+                        attn_bias = attn_bias + mask
+                        attn_bias_from_positions = False
+                    else:
+                        attn_bias += mask
 
             if key_padding_mask is not None:
-                key_mask = key_padding_mask.to(torch.bool)
-                key_mask = key_mask.unsqueeze(1).unsqueeze(2)
-                key_mask = key_mask.expand(bsz, self.num_heads, tgt_len, src_len).reshape(
-                    bsz * self.num_heads, tgt_len, src_len
-                )
-                key_bias = torch.zeros(key_mask.shape, device=q.device, dtype=q.dtype).masked_fill(
-                    key_mask, float("-inf")
-                )
-                attn_bias = key_bias if attn_bias is None else attn_bias + key_bias
-
-            if positions_bias is not None:
-                pos_bias = positions_bias.to(device=q.device, dtype=q.dtype)
-                attn_bias = pos_bias if attn_bias is None else attn_bias + pos_bias
+                key_mask = key_padding_mask.to(torch.bool).unsqueeze(1).unsqueeze(2)
+                if attn_bias_from_positions:
+                    attn_bias = attn_bias.clone()
+                    attn_bias_from_positions = False
+                attn_bias.masked_fill_(key_mask, float("-inf"))
 
             attn = F.scaled_dot_product_attention(
-                q,
-                k,
-                v,
+                q_sdpa,
+                k_sdpa,
+                v_sdpa,
                 attn_mask=attn_bias,
                 dropout_p=self.dropout if self.training else 0.0,
             )
-            assert list(attn.size()) == [bsz * self.num_heads, tgt_len, self.head_dim]
-            attn = attn.transpose(0, 1).contiguous().view(tgt_len, bsz, embed_dim)
+            assert list(attn.size()) == [bsz, self.num_heads, tgt_len, self.head_dim]
+            attn = attn.transpose(1, 2).contiguous().view(bsz, tgt_len, embed_dim)
+            attn = attn.transpose(0, 1)
             attn = self.out_proj(attn)
             return attn, None
 

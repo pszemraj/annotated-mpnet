@@ -6,11 +6,6 @@ something like a sinusoidal distribution
 import logging
 from typing import Any, Dict, Optional
 
-from rich.logging import RichHandler
-
-LOG_FORMAT = "%(message)s"
-# NOTE: basicConfig is a no-op if logging is already configured by the host app.
-logging.basicConfig(level="INFO", format=LOG_FORMAT, datefmt="[%X] ", handlers=[RichHandler()])
 LOGGER = logging.getLogger(__name__)
 
 

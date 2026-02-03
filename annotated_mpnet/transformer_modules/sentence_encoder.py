@@ -5,11 +5,6 @@ Module for defining the Encoder blocks in the transformer
 import logging
 from typing import List, Optional, Tuple
 
-from rich.logging import RichHandler
-
-LOG_FORMAT = "%(message)s"
-# NOTE: basicConfig is a no-op if logging is already configured by the host app.
-logging.basicConfig(level="INFO", format=LOG_FORMAT, datefmt="[%X] ", handlers=[RichHandler()])
 LOGGER = logging.getLogger(__name__)
 
 
@@ -21,7 +16,13 @@ from torch.utils.checkpoint import checkpoint
 from torch import nn
 
 from annotated_mpnet.constants import POSITION_OFFSET
-from annotated_mpnet.transformer_modules import LayerNorm, PositionalEmbedding, SentenceEncoderLayer
+from annotated_mpnet.transformer_modules import (
+    LayerNorm,
+    LearnedPositionalEmbedding,
+    PositionalEmbedding,
+    SentenceEncoderLayer,
+    SinusoidalPositionalEmbedding,
+)
 
 
 class SentenceEncoder(nn.Module):
@@ -241,6 +242,42 @@ class SentenceEncoder(nn.Module):
         """
         self.gradient_checkpointing = enable
 
+    def _position_embeddings_from_positions(self, positions: torch.Tensor) -> torch.Tensor:
+        """Return positional embeddings for precomputed positions.
+
+        :param torch.Tensor positions: Position indices with shape (bsz, seq_len).
+        :return torch.Tensor: Positional embeddings.
+        """
+        if self.embed_positions is None:
+            raise ValueError("Position embeddings are disabled but positions were provided.")
+
+        positions = positions + POSITION_OFFSET
+
+        if isinstance(self.embed_positions, LearnedPositionalEmbedding):
+            return self.embed_positions._forward(positions)
+
+        if isinstance(self.embed_positions, SinusoidalPositionalEmbedding):
+            max_pos = int(positions.max()) + 1
+            if self.embed_positions.weights is None or max_pos > self.embed_positions.weights.size(
+                0
+            ):
+                self.embed_positions.weights = SinusoidalPositionalEmbedding.get_embedding(
+                    max_pos,
+                    self.embed_positions.embedding_dim,
+                    self.embed_positions.padding_idx,
+                )
+            weights = self.embed_positions.weights.to(self.embed_positions._float_tensor)
+            return (
+                weights.index_select(0, positions.view(-1))
+                .view(positions.size(0), positions.size(1), -1)
+                .detach()
+            )
+
+        if hasattr(self.embed_positions, "weight"):
+            return F.embedding(positions, self.embed_positions.weight, self.padding_idx)
+
+        raise ValueError("Unsupported positional embedding module for precomputed positions.")
+
     def encode_emb(
         self, input_ids: torch.Tensor, positions: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
@@ -250,22 +287,26 @@ class SentenceEncoder(nn.Module):
         :param torch.Tensor positions: Optional precomputed positions for permuted inputs.
         :return torch.Tensor: Embedded token representations.
         """
+        padding_mask = input_ids.eq(self.padding_idx)
+        if not padding_mask.any():
+            padding_mask = None
+
         x = self.embed_tokens(input_ids)
         if self.embed_scale is not None:
             x *= self.embed_scale
 
-        if positions is not None:
-            # Use the shared offset so learned positions stay consistent across modules.
-            x += F.embedding(
-                positions + POSITION_OFFSET, self.embed_positions.weight, self.padding_idx
-            )
-        elif self.embed_positions is not None:
-            x += self.embed_positions(input_ids)
+        if self.embed_positions is not None:
+            if positions is not None:
+                x += self._position_embeddings_from_positions(positions)
+            else:
+                x += self.embed_positions(input_ids)
 
         if self.emb_layer_norm is not None and not self.normalize_before:
             x = self.emb_layer_norm(x)
 
         x = F.dropout(x, p=self.dropout, training=self.training)
+        if padding_mask is not None:
+            x *= 1 - padding_mask.unsqueeze(-1).type_as(x)
         return x
 
     def maybe_final_norm(self, x: torch.Tensor) -> torch.Tensor:

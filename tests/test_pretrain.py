@@ -11,6 +11,7 @@ import torch.nn.functional as F
 from transformers import AutoTokenizer
 
 from annotated_mpnet.modeling.mpnet_for_pretraining import (
+    init_final_params,
     make_query_and_content_mask,
     two_stream_self_attention,
 )
@@ -68,6 +69,99 @@ class TestPretrainHelpers(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             pretrain_mpnet._validate_tokenizer_vocab_size(DummyTokenizer(), args, "checkpoint")
+
+    def test_weight_decay_grouping(self) -> None:
+        """Ensure biases and norm weights are excluded from weight decay.
+
+        :return None: This test returns nothing.
+        """
+
+        class DummyModel(torch.nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.linear = torch.nn.Linear(4, 4)
+                self.norm = torch.nn.LayerNorm(4)
+
+        model = DummyModel()
+        decay, no_decay = pretrain_mpnet._group_parameters_for_weight_decay(model)
+
+        self.assertTrue(any(p is model.linear.weight for p in decay))
+        self.assertTrue(any(p is model.linear.bias for p in no_decay))
+        self.assertTrue(any(p is model.norm.weight for p in no_decay))
+        self.assertTrue(any(p is model.norm.bias for p in no_decay))
+
+    def test_polynomial_scheduler_step_indexing(self) -> None:
+        """Ensure scheduler step indexing matches expected warmup/decay behavior.
+
+        :return None: This test returns nothing.
+        """
+        args = Namespace(
+            lr=1.0,
+            warmup_updates=2,
+            total_updates=4,
+            end_learning_rate=0.0,
+            power=1.0,
+        )
+        param = torch.nn.Parameter(torch.randn(()))
+        optimizer = torch.optim.SGD([param], lr=0.0)
+        scheduler = PolynomialDecayLRScheduler(args, optimizer)
+
+        self.assertAlmostEqual(scheduler.get_lr(), 0.5, places=6)
+        self.assertAlmostEqual(scheduler.step(1), 0.5, places=6)
+        self.assertAlmostEqual(scheduler.step(2), 1.0, places=6)
+        self.assertAlmostEqual(scheduler.step(3), 0.5, places=6)
+
+        args_no_warmup = Namespace(
+            lr=1.0,
+            warmup_updates=0,
+            total_updates=4,
+            end_learning_rate=0.0,
+            power=1.0,
+        )
+        optimizer = torch.optim.SGD([torch.nn.Parameter(torch.randn(()))], lr=0.0)
+        scheduler = PolynomialDecayLRScheduler(args_no_warmup, optimizer)
+        self.assertAlmostEqual(scheduler.step(1), 1.0, places=6)
+
+    def test_init_final_params_zeroes_padding_idx(self) -> None:
+        """Ensure padding_idx=0 embeddings are zeroed during init.
+
+        :return None: This test returns nothing.
+        """
+        emb = torch.nn.Embedding(10, 4, padding_idx=0)
+        emb.weight.data.uniform_(-1.0, 1.0)
+        init_final_params(emb)
+        self.assertTrue(torch.allclose(emb.weight.data[0], torch.zeros_like(emb.weight.data[0])))
+
+    def test_encode_emb_handles_sinusoidal_positions(self) -> None:
+        """Ensure encode_emb supports sinusoidal embeddings and masks padding.
+
+        :return None: This test returns nothing.
+        """
+        model = SentenceEncoder(
+            padding_idx=0,
+            vocab_size=32,
+            num_encoder_layers=1,
+            embedding_dim=16,
+            ffn_embedding_dim=32,
+            num_attention_heads=2,
+            dropout=0.0,
+            attention_dropout=0.0,
+            activation_dropout=0.0,
+            max_seq_len=8,
+            num_segments=0,
+            encoder_normalize_before=True,
+            activation_fn="gelu",
+            normalize_before=False,
+            learned_pos_embedding=False,
+            relative_attention_num_buckets=8,
+            relative_attention_max_distance=16,
+        )
+        input_ids = torch.tensor([[0, 5, 6, 0]])
+        positions = torch.tensor([[0, 1, 2, 3]])
+        emb = model.encode_emb(input_ids, positions=positions)
+        self.assertEqual(emb.shape[:2], input_ids.shape)
+        self.assertTrue(torch.allclose(emb[0, 0], torch.zeros_like(emb[0, 0])))
+        self.assertTrue(torch.allclose(emb[0, 3], torch.zeros_like(emb[0, 3])))
 
     def test_hf_max_positions_to_internal(self) -> None:
         """Ensure HF max positions convert to internal max_positions.

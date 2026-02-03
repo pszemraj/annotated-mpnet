@@ -6,11 +6,6 @@ code
 import logging
 from typing import Any, Optional, Sequence, Tuple, Union
 
-from rich.logging import RichHandler
-
-LOG_FORMAT = "%(message)s"
-# NOTE: basicConfig is a no-op if logging is already configured by the host app.
-logging.basicConfig(level="INFO", format=LOG_FORMAT, datefmt="[%X] ", handlers=[RichHandler()])
 LOGGER = logging.getLogger(__name__)
 
 
@@ -41,8 +36,17 @@ def init_final_params(module: nn.Module) -> None:
             module.bias.data.zero_()
     if isinstance(module, nn.Embedding):
         module.weight.data.normal_(mean=0.0, std=0.02)
-        if module.padding_idx:
+        if module.padding_idx is not None:
             module.weight.data[module.padding_idx].zero_()
+    # RelativeMultiHeadAttention uses raw Parameters for QKV; initialize them explicitly.
+    if hasattr(module, "in_proj_weight") and module.in_proj_weight is not None:
+        module.in_proj_weight.data.normal_(mean=0.0, std=0.02)
+        if getattr(module, "in_proj_bias", None) is not None:
+            module.in_proj_bias.data.zero_()
+    for proj_name in ("q_proj_weight", "k_proj_weight", "v_proj_weight"):
+        proj_weight = getattr(module, proj_name, None)
+        if proj_weight is not None:
+            proj_weight.data.normal_(mean=0.0, std=0.02)
 
 
 class MPNetForPretraining(nn.Module):
@@ -58,13 +62,22 @@ class MPNetForPretraining(nn.Module):
         """
         super().__init__()
 
-        # Use padded_vocab_size if available, otherwise use the tokenizer's vocab_size
-        vocab_size = getattr(args, "padded_vocab_size", tokenizer.vocab_size)
+        # Use padded_vocab_size if available, otherwise use the tokenizer length (includes added tokens).
+        base_vocab_size = len(tokenizer)
+        vocab_size = getattr(args, "padded_vocab_size", None) or base_vocab_size
+        if vocab_size < base_vocab_size:
+            LOGGER.warning(
+                "padded_vocab_size (%s) is smaller than tokenizer size (%s); "
+                "using tokenizer size to avoid embedding mismatches.",
+                vocab_size,
+                base_vocab_size,
+            )
+            vocab_size = base_vocab_size
 
         # Let's define the encoder here
         self.args = args
         self.sentence_encoder = SentenceEncoder(
-            padding_idx=tokenizer.vocab[tokenizer.pad_token],
+            padding_idx=tokenizer.pad_token_id,
             vocab_size=vocab_size,  # Use the padded vocab size
             num_encoder_layers=args.encoder_layers,
             embedding_dim=args.encoder_embed_dim,
@@ -110,6 +123,7 @@ class MPNetForPretraining(nn.Module):
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         pred_size: int,
+        attention_mask: Optional[torch.Tensor] = None,
         return_mlm: bool = False,
         **kwargs: Any,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
@@ -118,6 +132,7 @@ class MPNetForPretraining(nn.Module):
         :param torch.Tensor input_ids: Input token IDs.
         :param torch.Tensor positions: Position indices for the batch.
         :param int pred_size: Number of tokens to predict.
+        :param torch.Tensor attention_mask: Optional attention mask (1 for real tokens), defaults to None.
         :param bool return_mlm: Whether to return an additional MLM head output, defaults to False.
         :param dict kwargs: Additional unused keyword arguments.
         :return torch.Tensor: Vocabulary logits (or logits tuple when ``return_mlm`` is True).
@@ -144,7 +159,11 @@ class MPNetForPretraining(nn.Module):
 
         # Get the query and content masks using the helper function below
         query_mask, content_mask, key_padding_mask = make_query_and_content_mask(
-            input_ids, sz, pred_size, self.sentence_encoder.padding_idx
+            input_ids,
+            sz,
+            pred_size,
+            pad_token_id=self.sentence_encoder.padding_idx,
+            attention_mask=attention_mask,
         )
 
         # Do the attention calculations
@@ -473,34 +492,49 @@ def two_stream_self_attention(
         :return Optional[torch.Tensor]: Combined attention bias or None.
         """
         attn_bias = None
-        if attn_mask is not None:
-            if attn_mask.dim() == 2:
-                mask = attn_mask.unsqueeze(0)
-                if mask.size(0) == 1 and bsz * self.num_heads != 1:
-                    mask = mask.expand(bsz * self.num_heads, target_len, source_len)
-            else:
-                mask = attn_mask.unsqueeze(1).expand(
-                    bsz, self.num_heads, attn_mask.size(1), attn_mask.size(2)
-                )
-                mask = mask.reshape(bsz * self.num_heads, attn_mask.size(1), attn_mask.size(2))
-
-            attn_bias = torch.zeros(mask.shape, device=device, dtype=dtype).masked_fill(
-                mask, float("-inf")
-            )
+        attn_bias_from_positions = False
 
         if bias is not None:
-            bias = bias.to(device=device, dtype=dtype)
-            attn_bias = bias if attn_bias is None else attn_bias + bias
+            attn_bias = bias.to(device=device, dtype=dtype).view(
+                bsz, self.num_heads, target_len, source_len
+            )
+            attn_bias_from_positions = True
+
+        if attn_bias is None and (attn_mask is not None or padding_mask is not None):
+            attn_bias = torch.zeros(
+                (bsz, self.num_heads, target_len, source_len), device=device, dtype=dtype
+            )
+            attn_bias_from_positions = False
+
+        if attn_mask is not None:
+            if attn_mask.dtype == torch.bool:
+                mask = attn_mask
+                if mask.dim() == 2:
+                    mask = mask.unsqueeze(0).unsqueeze(0)
+                else:
+                    mask = mask.unsqueeze(1)
+                if attn_bias_from_positions:
+                    attn_bias = attn_bias.clone()
+                    attn_bias_from_positions = False
+                attn_bias.masked_fill_(mask, float("-inf"))
+            else:
+                mask = attn_mask.to(device=device, dtype=dtype)
+                if mask.dim() == 2:
+                    mask = mask.unsqueeze(0).unsqueeze(0)
+                else:
+                    mask = mask.unsqueeze(1)
+                if attn_bias_from_positions:
+                    attn_bias = attn_bias + mask
+                    attn_bias_from_positions = False
+                else:
+                    attn_bias += mask
 
         if padding_mask is not None:
-            key_mask = padding_mask.to(torch.bool)
-            key_mask = key_mask.unsqueeze(1).expand(bsz, target_len, source_len)
-            key_mask = key_mask.unsqueeze(1).expand(bsz, self.num_heads, target_len, source_len)
-            key_mask = key_mask.reshape(bsz * self.num_heads, target_len, source_len)
-            key_bias = torch.zeros(key_mask.shape, device=device, dtype=dtype).masked_fill(
-                key_mask, float("-inf")
-            )
-            attn_bias = key_bias if attn_bias is None else attn_bias + key_bias
+            key_mask = padding_mask.to(torch.bool).unsqueeze(1).unsqueeze(2)
+            if attn_bias_from_positions:
+                attn_bias = attn_bias.clone()
+                attn_bias_from_positions = False
+            attn_bias.masked_fill_(key_mask, float("-inf"))
 
         return attn_bias
 
@@ -530,19 +564,24 @@ def two_stream_self_attention(
             _q = transpose_fn(self.scaling * q_proj)
 
         if use_sdpa:
+            tgt_len = _q.size(1)
+            src_len = k.size(1)
+            q_sdpa = _q.contiguous().view(bsz, self.num_heads, tgt_len, self.head_dim)
+            k_sdpa = k.contiguous().view(bsz, self.num_heads, src_len, self.head_dim)
+            v_sdpa = v.contiguous().view(bsz, self.num_heads, src_len, self.head_dim)
             attn_bias = build_attn_bias(
                 mask,
                 bias,
                 key_padding_mask,
-                _q.size(1),
-                k.size(1),
+                tgt_len,
+                src_len,
                 device=_q.device,
                 dtype=_q.dtype,
             )
             attn = F.scaled_dot_product_attention(
-                _q,
-                k,
-                v,
+                q_sdpa,
+                k_sdpa,
+                v_sdpa,
                 attn_mask=attn_bias,
                 dropout_p=self.dropout if self.training else 0.0,
             )
@@ -584,7 +623,11 @@ def two_stream_self_attention(
             attn = torch.bmm(attn_weights, v)
 
         # Finally, transpose back to the embed dimension and return
-        attn = attn.transpose(0, 1).contiguous().view(-1, bsz, embed_dim)
+        if use_sdpa:
+            attn = attn.transpose(1, 2).contiguous().view(bsz, tgt_len, embed_dim)
+            attn = attn.transpose(0, 1)
+        else:
+            attn = attn.transpose(0, 1).contiguous().view(-1, bsz, embed_dim)
 
         return self.out_proj(attn)
 
@@ -601,7 +644,11 @@ def two_stream_self_attention(
 
 
 def make_query_and_content_mask(
-    input_ids: torch.Tensor, seq_len: int, pred_size: int, pad_token_id: Optional[int] = None
+    input_ids: torch.Tensor,
+    seq_len: int,
+    pred_size: int,
+    pad_token_id: Optional[int] = None,
+    attention_mask: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
     """Create content and query masks for MPNet two-stream attention.
 
@@ -609,6 +656,7 @@ def make_query_and_content_mask(
     :param int seq_len: Sequence length of the input.
     :param int pred_size: Size of the predicted subsequence.
     :param int pad_token_id: Optional padding token ID for per-batch key masking.
+    :param torch.Tensor attention_mask: Optional attention mask (1 for real tokens), defaults to None.
     :return Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]: Query mask, content mask,
         and optional key padding mask.
 
@@ -637,8 +685,8 @@ def make_query_and_content_mask(
     matrix-based and constructs masks based on the provided seq_len and pred_size.
     There's no need to modify this function when changing context length.
 
-    Padding note: When ``pad_token_id`` is provided, this returns a separate key padding mask so
-    the caller can apply padding without expanding the structural masks.
+    Padding note: ``attention_mask`` takes precedence when provided; otherwise ``pad_token_id``
+    is used to derive the key padding mask.
     """
 
     device = input_ids.device
@@ -679,11 +727,13 @@ def make_query_and_content_mask(
     query_mask = make_query_mask()
     content_mask = make_content_mask()
 
-    if pad_token_id is None:
-        return query_mask, content_mask, None
-
     key_len = seq_len + pred_size
-    key_padding_mask = input_ids[:, :key_len].eq(pad_token_id)
+    if attention_mask is not None:
+        key_padding_mask = attention_mask[:, :key_len].eq(0)
+    elif pad_token_id is not None:
+        key_padding_mask = input_ids[:, :key_len].eq(pad_token_id)
+    else:
+        return query_mask, content_mask, None
     if not key_padding_mask.any():
         return query_mask, content_mask, None
 

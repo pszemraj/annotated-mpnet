@@ -63,18 +63,23 @@ class PolynomialDecayLRScheduler(object):
         return self.optimizer.param_groups[0]["lr"]
 
     def step(self, num_updates: int) -> float:
-        """Update the learning rate and step the optimizer.
+        """Update the learning rate for the upcoming optimizer step.
 
-        :param int num_updates: Number of updates performed so far.
+        :param int num_updates: 1-based update index for the next optimizer step.
         :return float: Updated learning rate.
         """
+
+        # Treat warmup=0 as "use base LR for step 1" by offsetting decay index.
+        effective_updates = num_updates
+        if self.args.warmup_updates == 0:
+            effective_updates = max(num_updates - 1, 0)
 
         # Branch first to the linear increase using the warmup factor
         if self.args.warmup_updates > 0 and num_updates <= self.args.warmup_updates:
             self.warmup_factor = num_updates / float(self.args.warmup_updates)
             lr = self.warmup_factor * self.lr
         # Branch to end learning rate
-        elif num_updates > self.total_updates:
+        elif effective_updates > self.total_updates:
             lr = self.end_learning_rate
         # Branch to polynomial decay
         else:
@@ -84,16 +89,13 @@ class PolynomialDecayLRScheduler(object):
             lr_range = self.lr - self.end_learning_rate
 
             # Create a pct_remaining factor that calculates how to move the polynomial factor
-            pct_remaining = 1 - (num_updates - warmup) / (self.total_updates - warmup)
+            pct_remaining = 1 - (effective_updates - warmup) / (self.total_updates - warmup)
 
             # Finally use the power arg to calculate the polynomial factor
             lr = lr_range * pct_remaining ** (self.power) + self.end_learning_rate
 
         # Finally set the new LR
         self.set_lr(lr)
-
-        # Step with the new LR
-        self.optimizer.step()
 
         # Return this new LR so we can log it in tensorboard
         return self.get_lr()

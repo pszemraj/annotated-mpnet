@@ -48,7 +48,7 @@ class TestData(unittest.TestCase):
         :return None: This test returns nothing.
         """
         permuted_examples = self.collator.collate_fn(self.examples)
-        self.assertEqual(permuted_examples["pred_size"], 2)
+        self.assertEqual(permuted_examples["pred_size"], 1)
         self.assertEqual(permuted_examples["input_ids"].shape[0], 2)
         self.assertEqual(permuted_examples["targets"].shape[0], 2)
 
@@ -72,6 +72,35 @@ class TestData(unittest.TestCase):
             torch.equal(permuted_examples["positions"], permuted_examples_next["positions"]),
             "Masking/permutation repeated identically across batches with a fixed seed",
         )
+
+    def test_collator_skips_special_and_padding_targets(self) -> None:
+        """Ensure targets exclude special/pad tokens and attention_mask matches padding.
+
+        :return None: This test returns nothing.
+        """
+        tokenizer = AutoTokenizer.from_pretrained("microsoft/mpnet-base")
+        enc_a = tokenizer("hello world", add_special_tokens=True)
+        enc_b = tokenizer("short", add_special_tokens=True)
+        examples = [
+            {"input_ids": torch.tensor(enc_a["input_ids"], dtype=torch.long)},
+            {"input_ids": torch.tensor(enc_b["input_ids"], dtype=torch.long)},
+        ]
+        collator = DataCollatorForMaskedPermutedLanguageModeling(
+            tokenizer=tokenizer, random_seed=123
+        )
+        batch = collator.collate_fn(examples)
+
+        targets = batch["targets"]
+        special_ids = set(tokenizer.all_special_ids)
+        special_ids.add(tokenizer.pad_token_id)
+        for sid in special_ids:
+            self.assertFalse(torch.any(targets.eq(sid)))
+
+        attention_mask = batch["attention_mask"]
+        input_ids = batch["input_ids"]
+        self.assertEqual(attention_mask.shape, input_ids.shape)
+        pad_mask = input_ids.eq(tokenizer.pad_token_id)
+        self.assertTrue(torch.equal(attention_mask.eq(0), pad_mask))
 
     def test_training_seeded_sampling(self) -> None:
         """Verify deterministic sampling across epochs with a seed.
