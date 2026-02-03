@@ -13,7 +13,7 @@ import pathlib
 import random
 import sys
 from argparse import Namespace
-from typing import Any, Iterator, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Iterator
 
 import numpy as np
 from rich.logging import RichHandler

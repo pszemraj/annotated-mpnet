@@ -12,8 +12,8 @@ import math
 
 import torch
 import torch.nn.functional as F
-from torch.utils.checkpoint import checkpoint
 from torch import nn
+from torch.utils.checkpoint import checkpoint
 
 from annotated_mpnet.constants import position_offset
 from annotated_mpnet.transformer_modules import (
