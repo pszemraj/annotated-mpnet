@@ -133,6 +133,45 @@ def log_to_wandb(logging_dict: dict, step: int, split: str) -> None:
         wandb.log(wandb_dict)
 
 
+_METRIC_PRECISION = {
+    "acc": 4,
+    "loss": 4,
+    "sbal": 4,
+    "best_loss": 4,
+    "lr": 8,
+    "gnorm": 3,
+    "tpb": 2,
+    "ttp": 0,
+}
+
+
+def _format_logging_dict(logging_dict: dict[str, Any]) -> dict[str, Any]:
+    """Round logging metrics to stable precision for console and loggers.
+
+    :param dict[str, Any] logging_dict: Raw metrics dictionary.
+    :return dict[str, Any]: Rounded metrics dictionary.
+    """
+    formatted: dict[str, Any] = {}
+    for key, value in logging_dict.items():
+        if isinstance(value, torch.Tensor):
+            value = value.item()
+        if isinstance(value, bool):
+            formatted[key] = value
+            continue
+        if isinstance(value, (int, np.integer)):
+            formatted[key] = int(value)
+            continue
+        if isinstance(value, (float, np.floating)):
+            precision = _METRIC_PRECISION.get(key, 4)
+            if precision == 0:
+                formatted[key] = int(round(float(value)))
+            else:
+                formatted[key] = round(float(value), precision)
+            continue
+        formatted[key] = value
+    return formatted
+
+
 def _group_parameters_for_weight_decay(
     model: torch.nn.Module,
 ) -> tuple[list[torch.nn.Parameter], list[torch.nn.Parameter]]:
@@ -1729,6 +1768,7 @@ def main(args: Namespace) -> None:
                     "ttp": meters["token_throughput"].sum,
                     "tpb": meters["token_throughput"].avg,
                 }
+                logging_dict = _format_logging_dict(logging_dict)
 
                 if args.tensorboard_log_dir is not None:
                     write_to_tensorboard(writers["train"], logging_dict, step_id)
@@ -1860,6 +1900,7 @@ def main(args: Namespace) -> None:
                         "acc": final_valid_accuracy,
                         "best_loss": best_loss,
                     }
+                    logging_dict = _format_logging_dict(logging_dict)
 
                     if args.tensorboard_log_dir:
                         write_to_tensorboard(writers["valid"], logging_dict, steps)
@@ -1930,6 +1971,7 @@ def main(args: Namespace) -> None:
             "acc": final_valid_accuracy,
             "best_loss": best_loss,
         }
+        logging_dict = _format_logging_dict(logging_dict)
         if args.tensorboard_log_dir:
             write_to_tensorboard(writers["valid"], logging_dict, steps)
         else:
@@ -2004,6 +2046,7 @@ def main(args: Namespace) -> None:
             "loss": final_test_loss,
             "acc": final_test_accuracy,
         }
+        logging_dict = _format_logging_dict(logging_dict)
 
         # Log to tensorboard or print out the dict
         if args.tensorboard_log_dir:
