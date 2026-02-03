@@ -15,13 +15,11 @@ import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
 from torch import nn
 
-from annotated_mpnet.constants import POSITION_OFFSET
+from annotated_mpnet.constants import position_offset
 from annotated_mpnet.transformer_modules import (
     LayerNorm,
-    LearnedPositionalEmbedding,
     PositionalEmbedding,
     SentenceEncoderLayer,
-    SinusoidalPositionalEmbedding,
 )
 
 
@@ -242,6 +240,15 @@ class SentenceEncoder(nn.Module):
         """
         self.gradient_checkpointing = enable
 
+    def _position_offset(self) -> int:
+        """Return the position offset implied by the positional embedding padding index.
+
+        :return int: Offset to apply to 0-based positions.
+        """
+        if self.embed_positions is None:
+            return 0
+        return position_offset(getattr(self.embed_positions, "padding_idx", None))
+
     def _position_embeddings_from_positions(self, positions: torch.Tensor) -> torch.Tensor:
         """Return positional embeddings for precomputed positions.
 
@@ -251,27 +258,10 @@ class SentenceEncoder(nn.Module):
         if self.embed_positions is None:
             raise ValueError("Position embeddings are disabled but positions were provided.")
 
-        positions = positions + POSITION_OFFSET
+        positions = positions + self._position_offset()
 
-        if isinstance(self.embed_positions, LearnedPositionalEmbedding):
+        if hasattr(self.embed_positions, "_forward"):
             return self.embed_positions._forward(positions)
-
-        if isinstance(self.embed_positions, SinusoidalPositionalEmbedding):
-            max_pos = int(positions.max()) + 1
-            if self.embed_positions.weights is None or max_pos > self.embed_positions.weights.size(
-                0
-            ):
-                self.embed_positions.weights = SinusoidalPositionalEmbedding.get_embedding(
-                    max_pos,
-                    self.embed_positions.embedding_dim,
-                    self.embed_positions.padding_idx,
-                )
-            weights = self.embed_positions.weights.to(self.embed_positions._float_tensor)
-            return (
-                weights.index_select(0, positions.view(-1))
-                .view(positions.size(0), positions.size(1), -1)
-                .detach()
-            )
 
         if hasattr(self.embed_positions, "weight"):
             return F.embedding(positions, self.embed_positions.weight, self.padding_idx)
@@ -349,7 +339,10 @@ class SentenceEncoder(nn.Module):
 
         # Add in positional embeddings if they are specified
         if self.embed_positions is not None:
-            x += self.embed_positions(tokens, positions=positions)
+            if positions is not None:
+                x += self._position_embeddings_from_positions(positions)
+            else:
+                x += self.embed_positions(tokens)
 
         # If there is a segment label, pass those segments into the segment_embedding layer
         if self.segment_embeddings is not None and segment_labels is not None:

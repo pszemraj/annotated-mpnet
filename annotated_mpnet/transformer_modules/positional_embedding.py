@@ -9,7 +9,7 @@ LOGGER = logging.getLogger(__name__)
 
 from torch import nn
 
-from annotated_mpnet.constants import POSITION_OFFSET
+from annotated_mpnet.constants import position_offset
 from annotated_mpnet.transformer_modules import (
     LearnedPositionalEmbedding,
     SinusoidalPositionalEmbedding,
@@ -30,8 +30,9 @@ def PositionalEmbedding(
 
     # If we specified "learned" to be True, we want to create a learned positional embedding module
     if learned:
-        # Use shared offset so positional embeddings stay consistent across modules.
-        num_embeddings = num_embeddings + POSITION_OFFSET  # Add 2 for CLS and SEP
+        # Offset positions based on the configured padding index for consistency.
+        offset = position_offset(padding_idx)
+        num_embeddings = num_embeddings + offset
 
         # Instantiate the learned positional embeddings
         m = LearnedPositionalEmbedding(num_embeddings, embedding_dim, padding_idx)
@@ -44,10 +45,11 @@ def PositionalEmbedding(
             nn.init.constant_(m.weight[padding_idx], 0)
     # Branch to create sinusoidal embeddings if "learned" is False
     else:
+        offset = position_offset(padding_idx)
         m = SinusoidalPositionalEmbedding(
             embedding_dim,
             padding_idx,
-            init_size=num_embeddings + POSITION_OFFSET,  # Add 2 for CLS and SEP
+            init_size=num_embeddings + offset,
         )
 
     return m

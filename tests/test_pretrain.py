@@ -259,6 +259,37 @@ class TestPretrainHelpers(unittest.TestCase):
         self.assertEqual(all_states[-1].shape, last_only[0].shape)
         self.assertEqual(all_states[-1].shape[:2], tokens.shape)
 
+    def test_sentence_encoder_positions_match_default(self) -> None:
+        """Ensure explicit positions follow the default offset semantics.
+
+        :return None: This test returns nothing.
+        """
+        model = SentenceEncoder(
+            padding_idx=0,
+            vocab_size=64,
+            num_encoder_layers=1,
+            embedding_dim=16,
+            ffn_embedding_dim=32,
+            num_attention_heads=2,
+            dropout=0.0,
+            attention_dropout=0.0,
+            activation_dropout=0.0,
+            max_seq_len=8,
+            num_segments=0,
+            encoder_normalize_before=True,
+            activation_fn="gelu",
+            normalize_before=False,
+            relative_attention_num_buckets=8,
+            relative_attention_max_distance=16,
+        )
+        model.eval()
+        tokens = torch.tensor([[5, 6, 0, 0]])
+        positions = torch.arange(tokens.size(1)).unsqueeze(0)
+        with torch.no_grad():
+            default_states, _ = model(tokens, last_state_only=True)
+            explicit_states, _ = model(tokens, last_state_only=True, positions=positions)
+        self.assertTrue(torch.allclose(default_states[0], explicit_states[0]))
+
     def test_two_stream_attention_padding_mask(self) -> None:
         """Ensure padding masks stay 2D and SDPA matches non-SDPA behavior.
 

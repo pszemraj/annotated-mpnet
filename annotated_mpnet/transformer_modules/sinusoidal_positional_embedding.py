@@ -149,6 +149,26 @@ class SinusoidalPositionalEmbedding(nn.Module):
         # Return the weights selected by the positions generated above
         return self.weights.index_select(0, positions.view(-1)).view(bsz, seq_len, -1).detach()
 
+    def _forward(self, positions: torch.Tensor) -> torch.Tensor:
+        """Alias for embedding precomputed positions.
+
+        :param torch.Tensor positions: Precomputed position indices.
+        :return torch.Tensor: Positional embeddings.
+        """
+        max_pos = int(positions.max()) + 1
+        if self.weights is None or max_pos > self.weights.size(0):
+            self.weights = SinusoidalPositionalEmbedding.get_embedding(
+                max_pos,
+                self.embedding_dim,
+                self.padding_idx,
+            )
+        weights = self.weights.to(self._float_tensor)
+        return (
+            weights.index_select(0, positions.view(-1))
+            .view(positions.size(0), positions.size(1), -1)
+            .detach()
+        )
+
     # Helper function below
     def max_positions(self) -> int:
         """Return the maximum number of supported positions.
