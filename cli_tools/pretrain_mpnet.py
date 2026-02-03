@@ -1102,6 +1102,7 @@ def main(args: Namespace) -> None:
             args.num_workers,
         )
     resume_data_state = _normalize_data_state(resume_data_state, mode_hint=resume_mode)
+    legacy_flag = bool(resume_data_state.get("legacy", False))
     reset_collator_rng = False  # Flag to skip loading RNG states from checkpoint
     if resume_data_state["mode"] == "unknown":
         resume_data_state["mode"] = resume_mode
@@ -1118,7 +1119,7 @@ def main(args: Namespace) -> None:
                 "cycle": 0,
                 "batch_index": 0,
                 "samples_in_cycle": 0,
-                "legacy": False,
+                "legacy": legacy_flag,
             },
             mode_hint=resume_mode,
         )
@@ -1137,6 +1138,7 @@ def main(args: Namespace) -> None:
     resume_cycle_batch_index = int(resume_data_state.get("batch_index", 0) or 0)
     resume_cycle_samples = int(resume_data_state.get("samples_in_cycle", 0) or 0)
     # Legacy checkpoints (no data_state) are not resumable; we only use them to initialize weights.
+    # Backward-compatible resume paths are intentionally out of scope for this in-dev repo.
     legacy_resume = bool(resume_data_state.get("legacy", False))
 
     # Create optimizer state directory if saving optimizer states
