@@ -174,6 +174,19 @@ def _format_logging_dict(logging_dict: dict[str, Any]) -> dict[str, Any]:
     return formatted
 
 
+def _normalize_cli_path(path_value: str | Path) -> Path:
+    """Normalize CLI path inputs to absolute paths.
+
+    :param str | Path path_value: CLI path value to normalize.
+    :return Path: Normalized absolute path.
+    """
+    if isinstance(path_value, Path):
+        return path_value.expanduser().resolve()
+    if not path_value or path_value in {".", "./"}:
+        return Path.cwd()
+    return Path(path_value).expanduser().resolve()
+
+
 def _group_parameters_for_weight_decay(
     model: torch.nn.Module,
 ) -> tuple[list[torch.nn.Parameter], list[torch.nn.Parameter]]:
@@ -587,7 +600,7 @@ def _select_resume_checkpoint_path(checkpoint_dir: Path, resume_checkpoint: str 
             f"No resume checkpoint found. Expected {best_checkpoint_path} or interval checkpoints "
             f"in {checkpoint_dir}."
         )
-    resume_checkpoint_path = Path(resume_checkpoint)
+    resume_checkpoint_path = _normalize_cli_path(resume_checkpoint)
     if resume_checkpoint_path.is_dir():
         raise IsADirectoryError(
             f"Resume checkpoint path {resume_checkpoint_path} is a directory; expected a .pt file."
@@ -887,7 +900,7 @@ def main(args: Namespace) -> None:
                 "Install torch[torchvision] extras or tensorboard to enable this feature."
             ) from exc
 
-        log_dir = Path(args.tensorboard_log_dir)
+        log_dir = _normalize_cli_path(args.tensorboard_log_dir)
         writers = {
             "train": SummaryWriter(str(log_dir / "train")),
             "valid": SummaryWriter(str(log_dir / "valid")),
@@ -895,7 +908,7 @@ def main(args: Namespace) -> None:
         }
 
     # Check if we're resuming and need to load architecture from checkpoint
-    checkpoint_dir = Path(args.checkpoint_dir)
+    checkpoint_dir = _normalize_cli_path(args.checkpoint_dir)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
     arch_source = _select_architecture_source(args)
@@ -1127,7 +1140,7 @@ def main(args: Namespace) -> None:
         )
 
         # Get each of the files in the training directory
-        train_dir = Path(args.train_dir)
+        train_dir = _normalize_cli_path(args.train_dir)
         train_files = sorted(str(path) for path in train_dir.iterdir() if path.is_file())
 
     has_validation = len(valid_dataloader) > 0
