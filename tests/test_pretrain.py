@@ -735,6 +735,31 @@ class TestPretrainHelpers(unittest.TestCase):
                 explicit_checkpoint,
             )
 
+    def test_select_test_checkpoint_path_ignores_stale_best(self) -> None:
+        """Ensure test eval does not reuse stale best checkpoints.
+
+        :return None: This test returns nothing.
+        """
+        with TemporaryDirectory() as tmpdir:
+            checkpoint_dir = pathlib.Path(tmpdir)
+            stale_best = checkpoint_dir / "best_checkpoint.pt"
+            stale_best.write_bytes(b"")
+
+            self.assertIsNone(
+                pretrain_mpnet._select_test_checkpoint_path(
+                    checkpoint_dir,
+                    best_checkpoint_written=False,
+                )
+            )
+
+            self.assertEqual(
+                pretrain_mpnet._select_test_checkpoint_path(
+                    checkpoint_dir,
+                    best_checkpoint_written=True,
+                ),
+                stale_best,
+            )
+
     def test_select_optimizer_state_path(self) -> None:
         """Confirm optimizer state path matches resume checkpoint type.
 

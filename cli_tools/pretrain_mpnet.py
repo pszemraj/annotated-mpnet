@@ -662,6 +662,30 @@ def _select_best_checkpoint_path(
     return best_checkpoint_path
 
 
+def _select_test_checkpoint_path(
+    checkpoint_dir: pathlib.Path,
+    best_checkpoint_written: bool,
+) -> pathlib.Path | None:
+    """Select best-checkpoint path for final test evaluation.
+
+    :param pathlib.Path checkpoint_dir: Current output checkpoint directory.
+    :param bool best_checkpoint_written: Whether this run wrote a new best checkpoint.
+    :return pathlib.Path | None: Best checkpoint path to load, or None to use in-memory model.
+    """
+    if not best_checkpoint_written:
+        return None
+
+    best_checkpoint_path = checkpoint_dir / "best_checkpoint.pt"
+    if best_checkpoint_path.exists():
+        return best_checkpoint_path
+
+    LOGGER.warning(
+        "Expected best checkpoint in %s but none was found; using in-memory model.",
+        checkpoint_dir,
+    )
+    return None
+
+
 def _normalize_training_accuracy(accumulation_acc: float, accumulation_pred_tokens: int) -> float:
     """Normalize accumulated accuracy by predicted token count.
 
@@ -1559,6 +1583,7 @@ def main(args: Namespace) -> None:
     # Flag to track if non-trainable model repo files were saved at first checkpoint.
     initial_outputs_saved = False
     last_eval_step: int | None = None
+    best_checkpoint_written = False
 
     # Container to track current streaming dataset for RNG state serialization.
     # Using a list as a mutable container allows the nested generator to update it.
@@ -1918,6 +1943,7 @@ def main(args: Namespace) -> None:
 
                         best_checkpoint_path = checkpoint_dir / "best_checkpoint.pt"
                         _atomic_torch_save(best_checkpoint, best_checkpoint_path)
+                        best_checkpoint_written = True
 
                         if args.save_optimizer_state:
                             best_optimizer_state = {
@@ -1990,6 +2016,7 @@ def main(args: Namespace) -> None:
             }
             best_checkpoint_path = checkpoint_dir / "best_checkpoint.pt"
             _atomic_torch_save(best_checkpoint, best_checkpoint_path)
+            best_checkpoint_written = True
             if args.save_optimizer_state:
                 best_optimizer_state = {
                     "optimizer": optimizer.state_dict(),
@@ -2019,11 +2046,14 @@ def main(args: Namespace) -> None:
     # use the test dataloader we built above to get a final test metric using the best checkpoint.
     if has_test:
         # Begin by loading the model states and args from the best checkpoint.
-        # Prefer local best checkpoint; fall back to resume root if none was written.
-        # If no best checkpoint exists, use the in-memory model from the final step.
-        best_checkpoint_path = _select_best_checkpoint_path(checkpoint_dir, resume_checkpoint_path)
+        # Only use a best checkpoint if this run wrote one; otherwise use in-memory
+        # model to avoid loading stale weights from a prior resume root.
+        best_checkpoint_path = _select_test_checkpoint_path(
+            checkpoint_dir,
+            best_checkpoint_written,
+        )
         test_model: torch.nn.Module | None = None
-        if best_checkpoint_path.exists():
+        if best_checkpoint_path is not None and best_checkpoint_path.exists():
             try:
                 dicts = _safe_torch_load(
                     best_checkpoint_path,
@@ -2054,7 +2084,7 @@ def main(args: Namespace) -> None:
                     best_checkpoint_path,
                     exc,
                 )
-        else:
+        elif best_checkpoint_path is not None:
             LOGGER.warning(
                 "Best checkpoint not found at %s; using in-memory model for test evaluation.",
                 best_checkpoint_path,
