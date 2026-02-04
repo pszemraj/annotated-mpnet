@@ -262,8 +262,7 @@ annotated-mpnet/
 ├── LICENSE-3RD-PARTY.txt     # Licenses for third-party dependencies
 ├── README.md                 # This file
 ├── CHANGELOG.md              # Record of changes
-├── pyproject.toml            # Build and packaging configuration
-└── setup.py                  # Cython extension build shim
+└── pyproject.toml            # Build and packaging configuration
 ```
 
 ## Changelog

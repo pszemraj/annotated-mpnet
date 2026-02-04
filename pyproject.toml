@@ -40,6 +40,15 @@ convert-to-hf = "cli_tools.convert_pretrained_mpnet_to_hf_model:cli_main"
 [tool.setuptools]
 include-package-data = true
 
+[tool.setuptools.cmdclass]
+build_ext = "build_helpers.BuildExt"
+
+[[tool.setuptools.ext-modules]]
+name = "annotated_mpnet.utils.perm_utils_fast"
+sources = ["annotated_mpnet/utils/perm_utils_fast.cpp"]
+language = "c++"
+extra-compile-args = ["-O3"]
+
 [tool.setuptools.packages.find]
 exclude = ["tests", "tests.*"]
 
