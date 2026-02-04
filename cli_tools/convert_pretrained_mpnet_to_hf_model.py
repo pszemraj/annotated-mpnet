@@ -136,12 +136,20 @@ def convert_mpnet_checkpoint_to_pytorch(
                 "Segment embeddings requested but missing from checkpoint: "
                 f"{segment_key} not found."
             )
+        if not hasattr(model.mpnet.embeddings, "token_type_embeddings"):
+            raise AttributeError(
+                "Checkpoint expects segment embeddings but the HF MPNetEmbeddings "
+                "does not expose token_type_embeddings."
+            )
         model.mpnet.embeddings.token_type_embeddings.weight.data = mpnet_weight[
             segment_key
         ].type_as(tensor)
     else:
-        # Match annotated-mpnet defaults (no segment embeddings) by zeroing token_type_embeddings.
-        model.mpnet.embeddings.token_type_embeddings.weight.data.zero_()
+        # Match annotated-mpnet defaults (no segment embeddings).
+        if hasattr(model.mpnet.embeddings, "token_type_embeddings"):
+            model.mpnet.embeddings.token_type_embeddings.weight.data.zero_()
+        else:
+            LOGGER.info("HF MPNetEmbeddings has no token_type_embeddings; skipping zero-init.")
 
     # Here, we're setting the weights and biases for the LM head. This is important for loading into
     # the base HF model type (MPNetForMaskedLM), but this will usually be discarded in any sort of
