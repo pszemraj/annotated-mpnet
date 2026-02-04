@@ -765,56 +765,64 @@ class TestPretrainHelpers(unittest.TestCase):
 
         :return None: This test returns nothing.
         """
-        optimizer_dir = Path("/tmp/checkpoints/optimizer")
-        best_checkpoint = Path("/tmp/checkpoints/best_checkpoint.pt")
-        latest_checkpoint = Path("/tmp/checkpoints/checkpoint123.pt")
+        with TemporaryDirectory() as tmpdir:
+            base_dir = Path(tmpdir)
+            optimizer_dir = base_dir / "checkpoints" / "optimizer"
+            best_checkpoint = base_dir / "checkpoints" / "best_checkpoint.pt"
+            latest_checkpoint = base_dir / "checkpoints" / "checkpoint123.pt"
 
-        self.assertEqual(
-            pretrain_mpnet._select_optimizer_state_path(optimizer_dir, best_checkpoint),
-            optimizer_dir / "best_optimizer_state.pt",
-        )
-        self.assertEqual(
-            pretrain_mpnet._select_optimizer_state_path(optimizer_dir, latest_checkpoint),
-            optimizer_dir / "checkpoint123_optimizer_state.pt",
-        )
+            self.assertEqual(
+                pretrain_mpnet._select_optimizer_state_path(optimizer_dir, best_checkpoint),
+                optimizer_dir / "best_optimizer_state.pt",
+            )
+            self.assertEqual(
+                pretrain_mpnet._select_optimizer_state_path(optimizer_dir, latest_checkpoint),
+                optimizer_dir / "checkpoint123_optimizer_state.pt",
+            )
 
     def test_resolve_optimizer_state_dir(self) -> None:
         """Ensure optimizer state dir follows resume checkpoint location.
 
         :return None: This test returns nothing.
         """
-        checkpoint_dir = Path("/tmp/checkpoints")
-        resume_checkpoint = checkpoint_dir / "best_checkpoint.pt"
-        external_checkpoint = Path("/tmp/other_runs/best_checkpoint.pt")
+        with TemporaryDirectory() as tmpdir:
+            base_dir = Path(tmpdir)
+            checkpoint_dir = base_dir / "checkpoints"
+            resume_checkpoint = checkpoint_dir / "best_checkpoint.pt"
+            external_checkpoint = base_dir / "other_runs" / "best_checkpoint.pt"
 
-        self.assertEqual(
-            pretrain_mpnet._resolve_optimizer_state_dir(checkpoint_dir, resume_checkpoint),
-            checkpoint_dir / "optimizer",
-        )
-        self.assertEqual(
-            pretrain_mpnet._resolve_optimizer_state_dir(checkpoint_dir, external_checkpoint),
-            external_checkpoint.parent / "optimizer",
-        )
+            self.assertEqual(
+                pretrain_mpnet._resolve_optimizer_state_dir(checkpoint_dir, resume_checkpoint),
+                checkpoint_dir / "optimizer",
+            )
+            self.assertEqual(
+                pretrain_mpnet._resolve_optimizer_state_dir(checkpoint_dir, external_checkpoint),
+                external_checkpoint.parent / "optimizer",
+            )
 
     def test_get_optimizer_state_path_for_resume(self) -> None:
         """Ensure optimizer state path resolves for internal/external checkpoints.
 
         :return None: This test returns nothing.
         """
-        checkpoint_dir = Path("/tmp/checkpoints")
-        resume_checkpoint = checkpoint_dir / "best_checkpoint.pt"
-        external_checkpoint = Path("/tmp/other_runs/checkpoint42.pt")
+        with TemporaryDirectory() as tmpdir:
+            base_dir = Path(tmpdir)
+            checkpoint_dir = base_dir / "checkpoints"
+            resume_checkpoint = checkpoint_dir / "best_checkpoint.pt"
+            external_checkpoint = base_dir / "other_runs" / "checkpoint42.pt"
 
-        self.assertEqual(
-            pretrain_mpnet._get_optimizer_state_path_for_resume(checkpoint_dir, resume_checkpoint),
-            checkpoint_dir / "optimizer" / "best_optimizer_state.pt",
-        )
-        self.assertEqual(
-            pretrain_mpnet._get_optimizer_state_path_for_resume(
-                checkpoint_dir, external_checkpoint
-            ),
-            external_checkpoint.parent / "optimizer" / "checkpoint42_optimizer_state.pt",
-        )
+            self.assertEqual(
+                pretrain_mpnet._get_optimizer_state_path_for_resume(
+                    checkpoint_dir, resume_checkpoint
+                ),
+                checkpoint_dir / "optimizer" / "best_optimizer_state.pt",
+            )
+            self.assertEqual(
+                pretrain_mpnet._get_optimizer_state_path_for_resume(
+                    checkpoint_dir, external_checkpoint
+                ),
+                external_checkpoint.parent / "optimizer" / "checkpoint42_optimizer_state.pt",
+            )
 
     def test_select_best_checkpoint_path_prefers_resume_root(self) -> None:
         """Fallback to resume root best checkpoint when local is missing.

@@ -246,8 +246,8 @@ def convert_hf_model_to_mpnet(
 
     # Create checkpoint directory if it doesn't exist
     checkpoint_path = Path(mpnet_checkpoint_path)
-    checkpoint_dir = checkpoint_path.parent
-    if checkpoint_dir != Path(".") and not checkpoint_dir.exists():
+    checkpoint_dir = checkpoint_path.parent.resolve()
+    if not checkpoint_dir.exists():
         checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
     # Save the model
