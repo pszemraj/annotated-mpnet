@@ -85,8 +85,10 @@ Run `pretrain-mpnet -h` for all available options.
 
 ## Documentation
 
-- **[Training Guide](docs/training.md)** - Full usage: streaming vs. local data, all arguments, resuming, exporting to HuggingFace
-- **[Architecture](docs/architecture.md)** - Model internals: two-stream attention, encoder structure, normalization
+- **[Training Guide](docs/training.md)** - Full usage: streaming vs. local data, resuming, exporting to HuggingFace
+- **[Configuration Reference](docs/configuration.md)** - Complete reference for all CLI arguments
+- **[Architecture](docs/architecture.md)** - Model internals: two-stream attention, encoder structure
+- **[Development Guide](docs/dev.md)** - Running tests, contributing
 
 ## Project Structure
 
