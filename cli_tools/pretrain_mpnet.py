@@ -1450,6 +1450,8 @@ def main(args: Namespace) -> None:
 
     # Compile after any checkpoint/HF weight loading so state dict keys stay consistent.
     if args.compile:
+        # torch.compile may emit SymPy interpreter warnings (e.g., pow_by_natural) during
+        # shape analysis; these are harmless in practice and do not affect correctness.
         LOGGER.info("Compiling the model...")
         model = torch.compile(model)
 
