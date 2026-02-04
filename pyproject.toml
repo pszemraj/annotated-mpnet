@@ -45,7 +45,7 @@ build_ext = "build_helpers.BuildExt"
 
 [[tool.setuptools.ext-modules]]
 name = "annotated_mpnet.utils.perm_utils_fast"
-sources = ["annotated_mpnet/utils/perm_utils_fast.cpp"]
+sources = ["annotated_mpnet/utils/perm_utils_fast.pyx"]
 language = "c++"
 extra-compile-args = ["-O3"]
 
