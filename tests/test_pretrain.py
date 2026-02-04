@@ -1,6 +1,6 @@
 """Unit tests for pretraining helper utilities."""
 
-import pathlib
+from pathlib import Path
 import sys
 import unittest
 from argparse import Namespace
@@ -18,7 +18,7 @@ from annotated_mpnet.scheduler import PolynomialDecayLRScheduler
 from annotated_mpnet.transformer_modules import RelativeMultiHeadAttention, SentenceEncoder
 from annotated_mpnet.utils import utils
 
-ROOT = pathlib.Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -453,7 +453,7 @@ class TestPretrainHelpers(unittest.TestCase):
         :return None: This test returns nothing.
         """
         with TemporaryDirectory() as tmpdir:
-            checkpoint_dir = pathlib.Path(tmpdir)
+            checkpoint_dir = Path(tmpdir)
             best_checkpoint_path = checkpoint_dir / "best_checkpoint.pt"
 
             torch.save({"best_loss": 1.23}, best_checkpoint_path)
@@ -468,7 +468,7 @@ class TestPretrainHelpers(unittest.TestCase):
         :return None: This test returns nothing.
         """
         with TemporaryDirectory() as tmpdir:
-            checkpoint_dir = pathlib.Path(tmpdir)
+            checkpoint_dir = Path(tmpdir)
             best_checkpoint_path = checkpoint_dir / "best_checkpoint.pt"
 
             torch.save({"best_loss": 0.3}, best_checkpoint_path)
@@ -521,8 +521,8 @@ class TestPretrainHelpers(unittest.TestCase):
         :return None: This test returns nothing.
         """
         with TemporaryDirectory() as tmpdir:
-            checkpoint_dir = pathlib.Path(tmpdir) / "new_run"
-            resume_dir = pathlib.Path(tmpdir) / "resume_run"
+            checkpoint_dir = Path(tmpdir) / "new_run"
+            resume_dir = Path(tmpdir) / "resume_run"
             checkpoint_dir.mkdir()
             resume_dir.mkdir()
 
@@ -542,7 +542,7 @@ class TestPretrainHelpers(unittest.TestCase):
         :return None: This test returns nothing.
         """
         with TemporaryDirectory() as tmpdir:
-            checkpoint_dir = pathlib.Path(tmpdir)
+            checkpoint_dir = Path(tmpdir)
             (checkpoint_dir / "checkpoint1.pt").write_bytes(b"")
             latest = checkpoint_dir / "checkpoint3.pt"
             latest.write_bytes(b"")
@@ -557,7 +557,7 @@ class TestPretrainHelpers(unittest.TestCase):
         :return None: This test returns nothing.
         """
         with TemporaryDirectory() as tmpdir:
-            checkpoint_dir = pathlib.Path(tmpdir)
+            checkpoint_dir = Path(tmpdir)
 
             with self.assertRaises(FileNotFoundError):
                 pretrain_mpnet._select_resume_checkpoint_path(checkpoint_dir, None)
@@ -667,7 +667,7 @@ class TestPretrainHelpers(unittest.TestCase):
         :return None: This test returns nothing.
         """
         with TemporaryDirectory() as tmpdir:
-            checkpoint_dir = pathlib.Path(tmpdir)
+            checkpoint_dir = Path(tmpdir)
             optimizer_dir = checkpoint_dir / "optimizer"
             optimizer_dir.mkdir()
 
@@ -719,7 +719,7 @@ class TestPretrainHelpers(unittest.TestCase):
         :return None: This test returns nothing.
         """
         with TemporaryDirectory() as tmpdir:
-            checkpoint_dir = pathlib.Path(tmpdir)
+            checkpoint_dir = Path(tmpdir)
             best_checkpoint = checkpoint_dir / "best_checkpoint.pt"
             best_checkpoint.write_bytes(b"")
             self.assertEqual(
@@ -741,7 +741,7 @@ class TestPretrainHelpers(unittest.TestCase):
         :return None: This test returns nothing.
         """
         with TemporaryDirectory() as tmpdir:
-            checkpoint_dir = pathlib.Path(tmpdir)
+            checkpoint_dir = Path(tmpdir)
             stale_best = checkpoint_dir / "best_checkpoint.pt"
             stale_best.write_bytes(b"")
 
@@ -765,9 +765,9 @@ class TestPretrainHelpers(unittest.TestCase):
 
         :return None: This test returns nothing.
         """
-        optimizer_dir = pathlib.Path("/tmp/checkpoints/optimizer")
-        best_checkpoint = pathlib.Path("/tmp/checkpoints/best_checkpoint.pt")
-        latest_checkpoint = pathlib.Path("/tmp/checkpoints/checkpoint123.pt")
+        optimizer_dir = Path("/tmp/checkpoints/optimizer")
+        best_checkpoint = Path("/tmp/checkpoints/best_checkpoint.pt")
+        latest_checkpoint = Path("/tmp/checkpoints/checkpoint123.pt")
 
         self.assertEqual(
             pretrain_mpnet._select_optimizer_state_path(optimizer_dir, best_checkpoint),
@@ -783,9 +783,9 @@ class TestPretrainHelpers(unittest.TestCase):
 
         :return None: This test returns nothing.
         """
-        checkpoint_dir = pathlib.Path("/tmp/checkpoints")
+        checkpoint_dir = Path("/tmp/checkpoints")
         resume_checkpoint = checkpoint_dir / "best_checkpoint.pt"
-        external_checkpoint = pathlib.Path("/tmp/other_runs/best_checkpoint.pt")
+        external_checkpoint = Path("/tmp/other_runs/best_checkpoint.pt")
 
         self.assertEqual(
             pretrain_mpnet._resolve_optimizer_state_dir(checkpoint_dir, resume_checkpoint),
@@ -801,9 +801,9 @@ class TestPretrainHelpers(unittest.TestCase):
 
         :return None: This test returns nothing.
         """
-        checkpoint_dir = pathlib.Path("/tmp/checkpoints")
+        checkpoint_dir = Path("/tmp/checkpoints")
         resume_checkpoint = checkpoint_dir / "best_checkpoint.pt"
-        external_checkpoint = pathlib.Path("/tmp/other_runs/checkpoint42.pt")
+        external_checkpoint = Path("/tmp/other_runs/checkpoint42.pt")
 
         self.assertEqual(
             pretrain_mpnet._get_optimizer_state_path_for_resume(checkpoint_dir, resume_checkpoint),
@@ -822,8 +822,8 @@ class TestPretrainHelpers(unittest.TestCase):
         :return None: This test returns nothing.
         """
         with TemporaryDirectory() as tmpdir:
-            checkpoint_dir = pathlib.Path(tmpdir) / "new_run"
-            resume_dir = pathlib.Path(tmpdir) / "resume_run"
+            checkpoint_dir = Path(tmpdir) / "new_run"
+            resume_dir = Path(tmpdir) / "resume_run"
             checkpoint_dir.mkdir()
             resume_dir.mkdir()
 

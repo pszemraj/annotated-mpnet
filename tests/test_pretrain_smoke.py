@@ -3,7 +3,7 @@
 These are intentionally lightweight coverage tests, not exhaustive correctness checks.
 """
 
-import pathlib
+from pathlib import Path
 import sys
 import unittest
 from contextlib import contextmanager
@@ -12,7 +12,7 @@ from typing import Iterator, Sequence
 
 import torch
 
-ROOT = pathlib.Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -44,7 +44,7 @@ class TestPretrainSmoke(unittest.TestCase):
         :return None: This test returns nothing.
         """
         with TemporaryDirectory() as tmpdir:
-            tmp_path = pathlib.Path(tmpdir)
+            tmp_path = Path(tmpdir)
             data_dir = tmp_path / "data"
             train_dir = data_dir / "train"
             train_dir.mkdir(parents=True, exist_ok=True)

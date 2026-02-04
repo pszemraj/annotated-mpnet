@@ -9,7 +9,7 @@ import json
 import logging
 import math
 import os
-import pathlib
+from pathlib import Path
 import random
 import sys
 import time
@@ -92,11 +92,11 @@ def _seed_everything(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
-def _atomic_torch_save(payload: Any, path: pathlib.Path) -> None:
+def _atomic_torch_save(payload: Any, path: Path) -> None:
     """Write a torch checkpoint atomically to avoid partial files.
 
     :param Any payload: Object to serialize.
-    :param pathlib.Path path: Destination path.
+    :param Path path: Destination path.
     :return None: This function returns nothing.
     """
     tmp_path = path.with_suffix(path.suffix + ".tmp")
@@ -271,12 +271,10 @@ def _deserialize_numpy_rng_state(rng_state: Any) -> Any:
     return rng_state
 
 
-def _safe_torch_load(
-    path: pathlib.Path, map_location: str | torch.device, trust_checkpoint: bool
-) -> dict:
+def _safe_torch_load(path: Path, map_location: str | torch.device, trust_checkpoint: bool) -> dict:
     """Load a checkpoint with weights_only by default, optionally allowing unsafe fallback.
 
-    :param pathlib.Path path: Path to the checkpoint file.
+    :param Path path: Path to the checkpoint file.
     :param str | torch.device map_location: Map location for loading tensors.
     :param bool trust_checkpoint: Whether to allow unsafe loading fallback.
     :return dict: Loaded checkpoint payload.
@@ -300,15 +298,15 @@ def _safe_torch_load(
 
 def _resolve_best_loss(
     checkpoint: dict | None,
-    checkpoint_dir: pathlib.Path,
-    resume_checkpoint_path: pathlib.Path | None = None,
+    checkpoint_dir: Path,
+    resume_checkpoint_path: Path | None = None,
     trust_checkpoint: bool = False,
 ) -> float:
     """Resolve the best loss from a checkpoint or the best checkpoint file.
 
     :param dict checkpoint: Loaded checkpoint or None.
-    :param pathlib.Path checkpoint_dir: Directory containing checkpoints.
-    :param pathlib.Path resume_checkpoint_path: Resume checkpoint path, defaults to None.
+    :param Path checkpoint_dir: Directory containing checkpoints.
+    :param Path resume_checkpoint_path: Resume checkpoint path, defaults to None.
     :param bool trust_checkpoint: Whether to allow unsafe checkpoint loading, defaults to False.
     :return float: Best loss value.
     """
@@ -351,12 +349,12 @@ def _normalize_data_state(
 
 
 def _get_resume_metadata(
-    checkpoint: dict, resume_checkpoint_path: pathlib.Path | None
+    checkpoint: dict, resume_checkpoint_path: Path | None
 ) -> tuple[int, dict[str, int | str]]:
     """Return resume metadata with legacy checkpoint fallback.
 
     :param dict checkpoint: Loaded checkpoint data.
-    :param pathlib.Path resume_checkpoint_path: Checkpoint path, defaults to None.
+    :param Path resume_checkpoint_path: Checkpoint path, defaults to None.
     :return tuple[int, dict[str, int | str]]: samples_processed and normalized data_state.
     """
     data_state = checkpoint.get("data_state")
@@ -413,10 +411,10 @@ def _should_save_checkpoint(steps: int, checkpoint_interval: int) -> bool:
     return checkpoint_interval > 0 and steps > 0 and steps % checkpoint_interval == 0
 
 
-def _checkpoint_step_from_path(path: pathlib.Path) -> int:
+def _checkpoint_step_from_path(path: Path) -> int:
     """Extract the step number from a checkpoint filename.
 
-    :param pathlib.Path path: Checkpoint path.
+    :param Path path: Checkpoint path.
     :return int: Parsed step number or -1 if not parseable.
     """
     stem = path.stem
@@ -427,11 +425,11 @@ def _checkpoint_step_from_path(path: pathlib.Path) -> int:
     return -1
 
 
-def _find_latest_checkpoint(checkpoint_dir: pathlib.Path) -> pathlib.Path | None:
+def _find_latest_checkpoint(checkpoint_dir: Path) -> Path | None:
     """Return the latest interval checkpoint in a directory.
 
-    :param pathlib.Path checkpoint_dir: Directory containing checkpoint files.
-    :return pathlib.Path | None: Latest checkpoint path or None if not found.
+    :param Path checkpoint_dir: Directory containing checkpoint files.
+    :return Path | None: Latest checkpoint path or None if not found.
     """
     checkpoints = [
         checkpoint
@@ -444,15 +442,15 @@ def _find_latest_checkpoint(checkpoint_dir: pathlib.Path) -> pathlib.Path | None
 
 
 def _prune_checkpoints(
-    checkpoint_dir: pathlib.Path,
+    checkpoint_dir: Path,
     keep_checkpoints: int,
-    optimizer_dir: pathlib.Path | None = None,
+    optimizer_dir: Path | None = None,
 ) -> None:
     """Delete older interval checkpoints, keeping only the most recent N.
 
-    :param pathlib.Path checkpoint_dir: Directory containing checkpoint files.
+    :param Path checkpoint_dir: Directory containing checkpoint files.
     :param int keep_checkpoints: Number of recent checkpoints to keep (-1 disables pruning).
-    :param pathlib.Path optimizer_dir: Optimizer state directory to prune alongside checkpoints.
+    :param Path optimizer_dir: Optimizer state directory to prune alongside checkpoints.
     :return None: This function returns nothing.
     """
     if keep_checkpoints < 0:
@@ -564,14 +562,12 @@ def _select_architecture_source(args: Namespace) -> str:
     return "new"
 
 
-def _select_resume_checkpoint_path(
-    checkpoint_dir: pathlib.Path, resume_checkpoint: str | None
-) -> pathlib.Path:
+def _select_resume_checkpoint_path(checkpoint_dir: Path, resume_checkpoint: str | None) -> Path:
     """Select the checkpoint path for resuming training.
 
-    :param pathlib.Path checkpoint_dir: Base checkpoint directory.
+    :param Path checkpoint_dir: Base checkpoint directory.
     :param str resume_checkpoint: Explicit checkpoint path or None.
-    :return pathlib.Path: Checkpoint path to resume from.
+    :return Path: Checkpoint path to resume from.
     :raises FileNotFoundError: If no resume checkpoint can be found.
     :raises IsADirectoryError: If resume checkpoint points to a directory.
     """
@@ -591,7 +587,7 @@ def _select_resume_checkpoint_path(
             f"No resume checkpoint found. Expected {best_checkpoint_path} or interval checkpoints "
             f"in {checkpoint_dir}."
         )
-    resume_checkpoint_path = pathlib.Path(resume_checkpoint)
+    resume_checkpoint_path = Path(resume_checkpoint)
     if resume_checkpoint_path.is_dir():
         raise IsADirectoryError(
             f"Resume checkpoint path {resume_checkpoint_path} is a directory; expected a .pt file."
@@ -601,28 +597,24 @@ def _select_resume_checkpoint_path(
     return resume_checkpoint_path
 
 
-def _select_optimizer_state_path(
-    optimizer_dir: pathlib.Path, resume_checkpoint_path: pathlib.Path
-) -> pathlib.Path:
+def _select_optimizer_state_path(optimizer_dir: Path, resume_checkpoint_path: Path) -> Path:
     """Select the optimizer state path that matches the resume checkpoint.
 
-    :param pathlib.Path optimizer_dir: Directory containing optimizer states.
-    :param pathlib.Path resume_checkpoint_path: Checkpoint being resumed.
-    :return pathlib.Path: Optimizer state path to load.
+    :param Path optimizer_dir: Directory containing optimizer states.
+    :param Path resume_checkpoint_path: Checkpoint being resumed.
+    :return Path: Optimizer state path to load.
     """
     if resume_checkpoint_path.name == "best_checkpoint.pt":
         return optimizer_dir / "best_optimizer_state.pt"
     return optimizer_dir / f"{resume_checkpoint_path.stem}_optimizer_state.pt"
 
 
-def _resolve_optimizer_state_dir(
-    checkpoint_dir: pathlib.Path, resume_checkpoint_path: pathlib.Path
-) -> pathlib.Path:
+def _resolve_optimizer_state_dir(checkpoint_dir: Path, resume_checkpoint_path: Path) -> Path:
     """Resolve optimizer state directory for a resume checkpoint.
 
-    :param pathlib.Path checkpoint_dir: Current output checkpoint directory.
-    :param pathlib.Path resume_checkpoint_path: Checkpoint being resumed.
-    :return pathlib.Path: Optimizer state directory to use.
+    :param Path checkpoint_dir: Current output checkpoint directory.
+    :param Path resume_checkpoint_path: Checkpoint being resumed.
+    :return Path: Optimizer state directory to use.
     """
     if resume_checkpoint_path.parent.resolve() != checkpoint_dir.resolve():
         return resume_checkpoint_path.parent / "optimizer"
@@ -630,26 +622,24 @@ def _resolve_optimizer_state_dir(
 
 
 def _get_optimizer_state_path_for_resume(
-    checkpoint_dir: pathlib.Path, resume_checkpoint_path: pathlib.Path
-) -> pathlib.Path:
+    checkpoint_dir: Path, resume_checkpoint_path: Path
+) -> Path:
     """Return optimizer state path for a resume checkpoint.
 
-    :param pathlib.Path checkpoint_dir: Current output checkpoint directory.
-    :param pathlib.Path resume_checkpoint_path: Checkpoint being resumed.
-    :return pathlib.Path: Optimizer state path to load if available.
+    :param Path checkpoint_dir: Current output checkpoint directory.
+    :param Path resume_checkpoint_path: Checkpoint being resumed.
+    :return Path: Optimizer state path to load if available.
     """
     optimizer_state_dir = _resolve_optimizer_state_dir(checkpoint_dir, resume_checkpoint_path)
     return _select_optimizer_state_path(optimizer_state_dir, resume_checkpoint_path)
 
 
-def _select_best_checkpoint_path(
-    checkpoint_dir: pathlib.Path, resume_checkpoint_path: pathlib.Path | None
-) -> pathlib.Path:
+def _select_best_checkpoint_path(checkpoint_dir: Path, resume_checkpoint_path: Path | None) -> Path:
     """Select a best checkpoint path, falling back to resume root if needed.
 
-    :param pathlib.Path checkpoint_dir: Current output checkpoint directory.
-    :param pathlib.Path resume_checkpoint_path: Resume checkpoint path, defaults to None.
-    :return pathlib.Path: Best checkpoint path to load for final eval.
+    :param Path checkpoint_dir: Current output checkpoint directory.
+    :param Path resume_checkpoint_path: Resume checkpoint path, defaults to None.
+    :return Path: Best checkpoint path to load for final eval.
     """
     best_checkpoint_path = checkpoint_dir / "best_checkpoint.pt"
     if best_checkpoint_path.exists():
@@ -665,14 +655,14 @@ def _select_best_checkpoint_path(
 
 
 def _select_test_checkpoint_path(
-    checkpoint_dir: pathlib.Path,
+    checkpoint_dir: Path,
     best_checkpoint_written: bool,
-) -> pathlib.Path | None:
+) -> Path | None:
     """Select best-checkpoint path for final test evaluation.
 
-    :param pathlib.Path checkpoint_dir: Current output checkpoint directory.
+    :param Path checkpoint_dir: Current output checkpoint directory.
     :param bool best_checkpoint_written: Whether this run wrote a new best checkpoint.
-    :return pathlib.Path | None: Best checkpoint path to load, or None to use in-memory model.
+    :return Path | None: Best checkpoint path to load, or None to use in-memory model.
     """
     if not best_checkpoint_written:
         return None
@@ -897,7 +887,7 @@ def main(args: Namespace) -> None:
                 "Install torch[torchvision] extras or tensorboard to enable this feature."
             ) from exc
 
-        log_dir = pathlib.Path(args.tensorboard_log_dir)
+        log_dir = Path(args.tensorboard_log_dir)
         writers = {
             "train": SummaryWriter(str(log_dir / "train")),
             "valid": SummaryWriter(str(log_dir / "valid")),
@@ -905,11 +895,11 @@ def main(args: Namespace) -> None:
         }
 
     # Check if we're resuming and need to load architecture from checkpoint
-    checkpoint_dir = pathlib.Path(args.checkpoint_dir)
+    checkpoint_dir = Path(args.checkpoint_dir)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
     arch_source = _select_architecture_source(args)
-    resume_checkpoint_path: pathlib.Path | None = None
+    resume_checkpoint_path: Path | None = None
     resume_checkpoint: dict | None = None
     resume_samples_processed = 0
     resume_data_state: dict[str, int | str] = _normalize_data_state(None)
@@ -1137,7 +1127,7 @@ def main(args: Namespace) -> None:
         )
 
         # Get each of the files in the training directory
-        train_dir = pathlib.Path(args.train_dir)
+        train_dir = Path(args.train_dir)
         train_files = sorted(str(path) for path in train_dir.iterdir() if path.is_file())
 
     has_validation = len(valid_dataloader) > 0

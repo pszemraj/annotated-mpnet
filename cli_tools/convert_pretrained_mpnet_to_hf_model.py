@@ -8,7 +8,7 @@ doing here.
 
 import argparse
 import logging
-import pathlib
+from pathlib import Path
 from argparse import Namespace
 
 from rich.logging import RichHandler
@@ -230,7 +230,7 @@ def convert_mpnet_checkpoint_to_pytorch(
         )
 
     # Create the dump directory if it doesn't exist
-    pathlib.Path(pytorch_dump_folder_path).mkdir(parents=True, exist_ok=True)
+    Path(pytorch_dump_folder_path).mkdir(parents=True, exist_ok=True)
     LOGGER.info(f"Saving model to {pytorch_dump_folder_path}")
 
     if save_tokenizer and hasattr(mpnet_args, "tokenizer_name"):

@@ -5,7 +5,7 @@ This is the reverse of convert_pretrained_mpnet_to_hf_model.py.
 
 import argparse
 import logging
-import pathlib
+from pathlib import Path
 from argparse import Namespace
 
 from rich.logging import RichHandler
@@ -245,9 +245,9 @@ def convert_hf_model_to_mpnet(
             model.state_dict()[our_key].copy_(hf_tensor)
 
     # Create checkpoint directory if it doesn't exist
-    checkpoint_path = pathlib.Path(mpnet_checkpoint_path)
+    checkpoint_path = Path(mpnet_checkpoint_path)
     checkpoint_dir = checkpoint_path.parent
-    if checkpoint_dir != pathlib.Path(".") and not checkpoint_dir.exists():
+    if checkpoint_dir != Path(".") and not checkpoint_dir.exists():
         checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
     # Save the model
