@@ -8,18 +8,17 @@ doing here.
 
 import argparse
 import logging
-import pathlib
 from argparse import Namespace
+from pathlib import Path
 
 from rich.logging import RichHandler
 
 LOG_FORMAT = "%(message)s"
-logging.basicConfig(
-    level="INFO", format=LOG_FORMAT, datefmt="[%X] ", handlers=[RichHandler()]
-)
+logging.basicConfig(level="INFO", format=LOG_FORMAT, datefmt="[%X] ", handlers=[RichHandler()])
 LOGGER = logging.getLogger(__name__)
 
 
+import numpy as np
 import torch
 from torch.serialization import safe_globals
 from transformers import AutoTokenizer, MPNetConfig, MPNetForMaskedLM
@@ -36,21 +35,18 @@ def convert_mpnet_checkpoint_to_pytorch(
     pytorch_dump_folder_path: str,
     save_tokenizer: bool = True,
 ) -> None:
-    """
-    This is the main function of the script. It takes in a checkpoint path pointing to a specific
-    .pt serialization of the pretrained MPNet model and dumps the necessary files for the model to
-    be in accordance with Huggingface specifications.
+    """Convert a pretrained MPNet checkpoint to a HuggingFace model.
 
-    Args:
-        mpnet_checkpoint_path: the path to the .pt model containing the model weights and args
-        pytorch_dump_folder_path: the path to the directory that will contain the necessary
-            components for the HF model
+    :param str mpnet_checkpoint_path: Path to the .pt checkpoint containing weights and args.
+    :param str pytorch_dump_folder_path: Output directory for the HF model files.
+    :param bool save_tokenizer: Whether to save the tokenizer, defaults to True.
     """
 
     # Load up the state dicts (one for the weights and one for the args) from the provided
     # serialization path
-    with safe_globals([Namespace]):
-        state_dicts = torch.load(mpnet_checkpoint_path, map_location="cpu")
+    # PyTorch 2.6+ requires weights_only=False for loading checkpoints with custom objects
+    with safe_globals([Namespace, np.ndarray, np.dtype, np._core.multiarray._reconstruct]):
+        state_dicts = torch.load(mpnet_checkpoint_path, map_location="cpu", weights_only=False)
 
     # Extract the model args so that we can properly set the config later on
     # Extract the weights so we can set them within the constructs of the model
@@ -68,6 +64,14 @@ def convert_mpnet_checkpoint_to_pytorch(
     # Now we use the args (and one componennt of the weight to get the vocab size) to set the
     # MPNetConfig object, which will properly instantiate the MPNetForMaskedLM model to the specs
     # we set when we pretrained the model
+    # Derive segment embedding size (token type vocab) from args or weights.
+    num_segments = getattr(mpnet_args, "num_segments", None)
+    if num_segments is None:
+        segment_weight = mpnet_weight.get("sentence_encoder.segment_embeddings.weight")
+        num_segments = segment_weight.size(0) if segment_weight is not None else 0
+
+    type_vocab_size = num_segments if num_segments and num_segments > 0 else 1
+
     config = MPNetConfig(
         vocab_size=mpnet_weight["sentence_encoder.embed_tokens.weight"].size(0),
         hidden_size=mpnet_args.encoder_embed_dim,
@@ -78,12 +82,14 @@ def convert_mpnet_checkpoint_to_pytorch(
         # same size as max_tokens, since position embeddings start at padding_idx + 1, we need to
         # add 2 to the final count, since the lowest possible position is 2
         max_position_embeddings=mpnet_args.max_positions + 2,
+        # HF MPNetConfig doesn't expose relative_attention_max_distance; buckets cover the bias size.
         relative_attention_num_buckets=mpnet_args.relative_attention_num_buckets,
         hidden_act=mpnet_args.activation_fn,
         # Note: there are three dropouts in MPNetForPretraining, but only two in MPNetForMaskedLM
         hidden_dropout_prob=mpnet_args.activation_dropout,
         attention_probs_dropout_prob=mpnet_args.attention_dropout,
         layer_norm_eps=1e-5,
+        type_vocab_size=type_vocab_size,
     )
 
     # if the mpnet_args contain token_ids, ensure model config matches
@@ -123,21 +129,43 @@ def convert_mpnet_checkpoint_to_pytorch(
     model.mpnet.embeddings.LayerNorm.bias.data = mpnet_weight[
         "sentence_encoder.emb_layer_norm.bias"
     ].type_as(tensor)
+    if num_segments and num_segments > 0:
+        segment_key = "sentence_encoder.segment_embeddings.weight"
+        if segment_key not in mpnet_weight:
+            raise KeyError(
+                "Segment embeddings requested but missing from checkpoint: "
+                f"{segment_key} not found."
+            )
+        if not hasattr(model.mpnet.embeddings, "token_type_embeddings"):
+            raise AttributeError(
+                "Checkpoint expects segment embeddings but the HF MPNetEmbeddings "
+                "does not expose token_type_embeddings."
+            )
+        model.mpnet.embeddings.token_type_embeddings.weight.data = mpnet_weight[
+            segment_key
+        ].type_as(tensor)
+    else:
+        # Match annotated-mpnet defaults (no segment embeddings).
+        if hasattr(model.mpnet.embeddings, "token_type_embeddings"):
+            model.mpnet.embeddings.token_type_embeddings.weight.data.zero_()
+        else:
+            LOGGER.info("HF MPNetEmbeddings has no token_type_embeddings; skipping zero-init.")
 
     # Here, we're setting the weights and biases for the LM head. This is important for loading into
     # the base HF model type (MPNetForMaskedLM), but this will usually be discarded in any sort of
     # downstream task in favor of the appropriate fine-tuning head
-    model.lm_head.dense.weight.data = mpnet_weight["lm_head.dense.weight"].type_as(
-        tensor
-    )
+    model.lm_head.dense.weight.data = mpnet_weight["lm_head.dense.weight"].type_as(tensor)
     model.lm_head.dense.bias.data = mpnet_weight["lm_head.dense.bias"].type_as(tensor)
-    model.lm_head.layer_norm.weight.data = mpnet_weight[
-        "lm_head.layer_norm.weight"
-    ].type_as(tensor)
-    model.lm_head.layer_norm.bias.data = mpnet_weight[
-        "lm_head.layer_norm.bias"
-    ].type_as(tensor)
-    model.lm_head.decoder.weight.data = mpnet_weight["lm_head.weight"].type_as(tensor)
+    model.lm_head.layer_norm.weight.data = mpnet_weight["lm_head.layer_norm.weight"].type_as(tensor)
+    model.lm_head.layer_norm.bias.data = mpnet_weight["lm_head.layer_norm.bias"].type_as(tensor)
+    lm_head_weight_key = "lm_head.weight"
+    if lm_head_weight_key not in mpnet_weight:
+        # Some checkpoints only store the tied embedding weight.
+        LOGGER.warning(
+            "lm_head.weight missing in checkpoint; falling back to sentence_encoder.embed_tokens.weight."
+        )
+        lm_head_weight_key = "sentence_encoder.embed_tokens.weight"
+    model.lm_head.decoder.weight.data = mpnet_weight[lm_head_weight_key].type_as(tensor)
     model.lm_head.decoder.bias.data = mpnet_weight["lm_head.bias"].type_as(tensor)
 
     # Match up the relative attention bias weights with each other
@@ -158,9 +186,7 @@ def convert_mpnet_checkpoint_to_pytorch(
 
         # Match up the weight and bias for the initial projection layer of the self-attention
         # mechanism (i.e. stacked QKV)
-        in_proj_weight = mpnet_weight[prefix + "self_attn.in_proj_weight"].type_as(
-            tensor
-        )
+        in_proj_weight = mpnet_weight[prefix + "self_attn.in_proj_weight"].type_as(tensor)
         in_proj_bias = mpnet_weight[prefix + "self_attn.in_proj_bias"].type_as(tensor)
 
         # Now, as described above when we stored the hidden size in `dim`, we need to chunk up the
@@ -186,9 +212,9 @@ def convert_mpnet_checkpoint_to_pytorch(
         layer.attention.attn.o.weight.data = mpnet_weight[
             prefix + "self_attn.out_proj.weight"
         ].type_as(tensor)
-        layer.attention.attn.o.bias.data = mpnet_weight[
-            prefix + "self_attn.out_proj.bias"
-        ].type_as(tensor)
+        layer.attention.attn.o.bias.data = mpnet_weight[prefix + "self_attn.out_proj.bias"].type_as(
+            tensor
+        )
         layer.attention.LayerNorm.weight.data = mpnet_weight[
             prefix + "self_attn_layer_norm.weight"
         ].type_as(tensor)
@@ -198,27 +224,21 @@ def convert_mpnet_checkpoint_to_pytorch(
 
         # Extract the weights and biases for the feed-forward net after the self-attention
         # calculation
-        layer.intermediate.dense.weight.data = mpnet_weight[
-            prefix + "fc1.weight"
-        ].type_as(tensor)
-        layer.intermediate.dense.bias.data = mpnet_weight[prefix + "fc1.bias"].type_as(
-            tensor
-        )
-        layer.output.dense.weight.data = mpnet_weight[prefix + "fc2.weight"].type_as(
-            tensor
-        )
+        layer.intermediate.dense.weight.data = mpnet_weight[prefix + "fc1.weight"].type_as(tensor)
+        layer.intermediate.dense.bias.data = mpnet_weight[prefix + "fc1.bias"].type_as(tensor)
+        layer.output.dense.weight.data = mpnet_weight[prefix + "fc2.weight"].type_as(tensor)
         layer.output.dense.bias.data = mpnet_weight[prefix + "fc2.bias"].type_as(tensor)
 
         # Extract the final LayerNorm and set it here
         layer.output.LayerNorm.weight.data = mpnet_weight[
             prefix + "final_layer_norm.weight"
         ].type_as(tensor)
-        layer.output.LayerNorm.bias.data = mpnet_weight[
-            prefix + "final_layer_norm.bias"
-        ].type_as(tensor)
+        layer.output.LayerNorm.bias.data = mpnet_weight[prefix + "final_layer_norm.bias"].type_as(
+            tensor
+        )
 
     # Create the dump directory if it doesn't exist
-    pathlib.Path(pytorch_dump_folder_path).mkdir(parents=True, exist_ok=True)
+    Path(pytorch_dump_folder_path).mkdir(parents=True, exist_ok=True)
     LOGGER.info(f"Saving model to {pytorch_dump_folder_path}")
 
     if save_tokenizer and hasattr(mpnet_args, "tokenizer_name"):
@@ -245,9 +265,10 @@ def convert_mpnet_checkpoint_to_pytorch(
     LOGGER.info("Done!")
 
 
-def cli_main():
-    """
-    Wrapper function so we can define a CLI entrypoint when setting up this package
+def cli_main() -> None:
+    """CLI entrypoint for checkpoint conversion.
+
+    :return None: This function returns nothing.
     """
     parser = argparse.ArgumentParser(
         description="Convert MPNet .pt checkpoint to Huggingface model"

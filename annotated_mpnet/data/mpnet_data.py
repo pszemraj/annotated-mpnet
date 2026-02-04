@@ -4,27 +4,65 @@ as the data collator
 """
 
 import logging
-import os
-import random
-from typing import Dict, Iterator, Sized
+import time
+from pathlib import Path
+from typing import Any, Callable, Dict, Iterator, Optional, Sequence, Sized
 
-from rich.logging import RichHandler
-
-LOG_FORMAT = "%(message)s"
-logging.basicConfig(
-    level="INFO", format=LOG_FORMAT, datefmt="[%X] ", handlers=[RichHandler()]
-)
 LOGGER = logging.getLogger(__name__)
 
 
 import numpy as np
 import torch
 from datasets import load_dataset
-from torch.utils.data import Sampler
+from torch.utils.data import DataLoader, Sampler
 from transformers import PreTrainedTokenizer
 
 from annotated_mpnet.utils import utils
-from annotated_mpnet.utils.perm_utils_fast import make_span_perm
+
+try:
+    from annotated_mpnet.utils.perm_utils_fast import make_span_perm
+except ImportError:
+    make_span_perm = None
+    LOGGER.warning(
+        "Fast span permutation extension not available; falling back to Python implementation."
+    )
+
+
+def _serialize_np_generator_state(state: Any) -> Any:
+    """Convert NumPy generator state into builtin Python types for safe checkpoints.
+
+    :param Any state: NumPy generator state payload.
+    :return Any: Serialized state payload.
+    """
+    if isinstance(state, np.ndarray):
+        return state.tolist()
+    if isinstance(state, np.generic):
+        return state.item()
+    if isinstance(state, dict):
+        return {k: _serialize_np_generator_state(v) for k, v in state.items()}
+    if isinstance(state, (list, tuple)):
+        return [_serialize_np_generator_state(v) for v in state]
+    return state
+
+
+def _deserialize_np_generator_state(state: Any) -> Any:
+    """Return the NumPy generator state payload with arrays rehydrated.
+
+    NumPy Generator bit_generator.state may contain numpy arrays that were
+    serialized to lists. While NumPy's state setter can handle lists, we
+    reconstruct arrays explicitly for clarity and robustness.
+
+    :param Any state: Serialized NumPy generator state.
+    :return Any: Deserialized state payload.
+    """
+    if isinstance(state, dict):
+        return {k: _deserialize_np_generator_state(v) for k, v in state.items()}
+    if isinstance(state, list) and state and isinstance(state[0], (int, float)):
+        # Likely a serialized numpy array - reconstruct as uint64 (Generator default)
+        return np.asarray(state, dtype=np.uint64)
+    if isinstance(state, list):
+        return [_deserialize_np_generator_state(v) for v in state]
+    return state
 
 
 class MPNetDataset(torch.utils.data.Dataset):
@@ -35,20 +73,22 @@ class MPNetDataset(torch.utils.data.Dataset):
     def __init__(
         self,
         tokenizer: PreTrainedTokenizer,
-        file_path: str = None,
-        dataset=None,
+        file_path: Optional[str] = None,
+        dataset: Optional[Any] = None,
         block_size: int = 512,
         field_name: str = "text",
     ) -> None:
-        """
-        Init the dataset
+        """Initialize the dataset.
 
-        Args:
-            tokenizer: the tokenizer for the model
-            file_path: the file path containing the data in text lines to be tokenized
-            dataset: a pre-loaded HuggingFace dataset (alternative to file_path)
-            block_size: the maximum amount of tokens in the block
-            field_name: the field name containing text in the dataset (only used if dataset is provided)
+        :param PreTrainedTokenizer tokenizer: The tokenizer for the model.
+        :param str file_path: Path to the dataset text file, defaults to None.
+        :param object dataset: Pre-loaded HuggingFace dataset or list of examples, defaults to None.
+        :param int block_size: Maximum number of tokens per block, defaults to 512.
+        :param str field_name: Field containing text in the dataset, defaults to "text".
+        :note: File-based datasets are fully loaded into memory and tokenized line-by-line without
+            sequence packing.
+        :raises ValueError: If neither ``file_path`` nor ``dataset`` is provided.
+        :raises ValueError: If ``file_path`` does not exist.
         """
         super().__init__()
 
@@ -68,7 +108,7 @@ class MPNetDataset(torch.utils.data.Dataset):
                 lines = [example[field_name] for example in dataset]
         elif file_path is not None:
             # Check if the file path exists
-            if os.path.isfile(file_path) is False:
+            if not Path(file_path).is_file():
                 raise ValueError(f"Input file path {file_path} not found")
 
             LOGGER.info(f"Creating features from dataset file at {file_path}")
@@ -76,28 +116,26 @@ class MPNetDataset(torch.utils.data.Dataset):
             # We open the file and gather line by line
             with open(file_path, encoding="utf-8") as f:
                 lines = [
-                    line
-                    for line in f.read().splitlines()
-                    if (len(line) > 0 and not line.isspace())
+                    line for line in f.read().splitlines() if (len(line) > 0 and not line.isspace())
                 ]
         else:
             raise ValueError("Either file_path or dataset must be provided")
 
         # Process batch encoding using the tokenizer passed in
+        # NOTE: This dataset intentionally keeps a one-document-per-sample layout with truncation.
+        # For throughput-oriented pretraining, use a packing stream/iterator instead.
         batch_encoding = tokenizer(
             lines, add_special_tokens=True, truncation=True, max_length=block_size
         )
 
         # Extract the input IDs and store them
         self.examples = batch_encoding["input_ids"]
-        self.examples = [
-            {"input_ids": torch.tensor(e, dtype=torch.long)} for e in self.examples
-        ]
+        self.examples = [{"input_ids": torch.tensor(e, dtype=torch.long)} for e in self.examples]
 
     def __len__(self) -> int:
         return len(self.examples)
 
-    def __getitem__(self, i: int) -> Dict[str, torch.tensor]:
+    def __getitem__(self, i: int) -> Dict[str, torch.Tensor]:
         return self.examples[i]
 
 
@@ -114,28 +152,31 @@ class HFStreamingDataset(torch.utils.data.IterableDataset):
     def __init__(
         self,
         tokenizer: PreTrainedTokenizer,
-        dataset_name: str = None,
-        dataset_stream=None,
+        dataset_name: Optional[str] = None,
+        dataset_stream: Optional[Any] = None,
         split: str = "train",
         block_size: int = 512,
         buffer_size: int = 10000,
         seed: int = 42,
         min_text_length: int = 200,
         text_field: str = "text",
+        skip_samples: int = 0,
+        max_samples: Optional[int] = None,
     ) -> None:
-        """
-        Initialize the streaming dataset
+        """Initialize the streaming dataset.
 
-        Args:
-            tokenizer: the tokenizer for the model
-            dataset_name: the name of the HuggingFace dataset (not used if dataset_stream is provided)
-            dataset_stream: an already loaded HF streaming dataset (overrides dataset_name if provided)
-            split: the split to use (train, validation, test)
-            block_size: the maximum amount of tokens in the block
-            buffer_size: size of the buffer for streaming
-            seed: random seed for reproducibility
-            min_text_length: minimum text length to consider
-            text_field: the field name containing the text in the dataset
+        :param PreTrainedTokenizer tokenizer: The tokenizer for the model.
+        :param str dataset_name: HuggingFace dataset name, defaults to None.
+        :param object dataset_stream: Pre-loaded streaming dataset, defaults to None.
+        :param str split: Dataset split to use, defaults to "train".
+        :param int block_size: Maximum number of tokens per block, defaults to 512.
+        :param int buffer_size: Buffer size for streaming, defaults to 10000.
+        :param int seed: Random seed for reproducibility, defaults to 42.
+        :param int min_text_length: Minimum text length to keep, defaults to 200.
+        :param str text_field: Field containing text, defaults to "text".
+        :param int skip_samples: Number of samples to skip, defaults to 0.
+        :param int max_samples: Maximum number of samples to yield, defaults to None.
+        :raises ValueError: If neither ``dataset_name`` nor ``dataset_stream`` is provided.
         """
         super().__init__()
 
@@ -145,19 +186,17 @@ class HFStreamingDataset(torch.utils.data.IterableDataset):
         self.seed = seed
         self.min_text_length = min_text_length
         self.text_field = text_field
-
-        # Set random seed
-        random.seed(seed)
+        self.skip_samples = skip_samples
+        self.max_samples = max_samples
 
         # Either use provided stream or load a new one
         if dataset_stream is not None:
             LOGGER.info("Using provided dataset stream")
+            # min_text_length filtering is applied only when loading a dataset_name.
             self.dataset = dataset_stream
         elif dataset_name is not None:
             # Load the dataset in streaming mode
-            LOGGER.info(
-                f"Loading dataset {dataset_name}, split: {split} in streaming mode"
-            )
+            LOGGER.info(f"Loading dataset {dataset_name}, split: {split} in streaming mode")
             self.dataset = load_dataset(dataset_name, split=split, streaming=True)
 
             # Apply filter for minimum text length if specified
@@ -166,122 +205,114 @@ class HFStreamingDataset(torch.utils.data.IterableDataset):
                     lambda example: len(example[text_field]) >= min_text_length
                 )
 
+            # Shuffle once for deterministic streaming order.
+            self.dataset = self.dataset.shuffle(buffer_size=self.buffer_size, seed=self.seed)
+
             LOGGER.info(f"Dataset {dataset_name} loaded and filtered")
         else:
             raise ValueError("Either dataset_name or dataset_stream must be provided")
 
-    def __iter__(self):
-        """
-        Iterator for the dataset.
+    def __iter__(self) -> Iterator[Dict[str, torch.Tensor]]:
+        """Iterate over processed text samples.
 
-        Returns an iterator over text samples.
+        :return Iterator[Dict[str, torch.Tensor]]: Iterator yielding processed samples.
         """
         # Set worker seed for proper sharding
         worker_info = torch.utils.data.get_worker_info()
 
         if worker_info is not None:
-            # Use different seed for each worker
-            worker_seed = worker_info.id + self.seed
-            random.seed(worker_seed)
-
             # Shard the dataset based on worker id
             dataset_iter = iter(
-                self.dataset.shard(
-                    num_shards=worker_info.num_workers, index=worker_info.id
-                )
+                self.dataset.shard(num_shards=worker_info.num_workers, index=worker_info.id)
             )
         else:
             dataset_iter = iter(self.dataset)
 
-        # Initialize buffer
-        buffer = []
+        # skip_samples/max_samples apply per worker when multiple workers are used.
+        skip_samples = self.skip_samples
+        max_samples = self.max_samples
 
-        # Fill the buffer initially
-        for _ in range(self.buffer_size):
-            try:
-                example = next(dataset_iter)
-                buffer.append(example)
-            except StopIteration:
+        skipped = 0
+        yielded = 0
+        for example in dataset_iter:
+            if skipped < skip_samples:
+                skipped += 1
+                continue
+            if max_samples is not None and yielded >= max_samples:
                 break
-
-        # Continue as long as there are items in buffer
-        while buffer:
-            # Randomly select an example from the buffer
-            idx = random.randint(0, len(buffer) - 1)
-            example = buffer[idx]
-
-            # Process the example
             processed = self._process_example(example)
-
-            # Replace the used example with a new one if available
-            try:
-                buffer[idx] = next(dataset_iter)
-            except StopIteration:
-                # Remove the used example if no more examples
-                buffer.pop(idx)
-
+            yielded += 1
             yield processed
 
-    def _process_example(self, example: Dict) -> Dict[str, torch.tensor]:
-        """
-        Process a single example from the dataset.
+    def _process_example(self, example: Dict[str, Any]) -> Dict[str, torch.Tensor]:
+        """Process a single example from the dataset.
 
-        Args:
-            example: Dataset example containing text
-
-        Returns:
-            Dictionary with processed input_ids
+        :param dict example: Dataset example containing text.
+        :return Dict[str, torch.Tensor]: Processed input IDs.
         """
         text = example[self.text_field]
 
-        # Tokenize the text
+        # Tokenize the text (single-example truncation; no cross-document packing here by design).
         tokenized = self.tokenizer(
             text,
             max_length=self.block_size,
             truncation=True,
-            padding="max_length",
-            return_tensors="pt",
         )
 
-        # Extract the input IDs and return them in the expected format
-        return {"input_ids": tokenized["input_ids"].squeeze(0)}
+        # Leave padding to the collator to avoid redundant max_length padding here.
+        return {"input_ids": torch.tensor(tokenized["input_ids"], dtype=torch.long)}
+
+    def get_rng_state(self) -> Optional[Dict[str, Any]]:
+        """Return streaming dataset RNG state for deterministic resume.
+
+        Streaming order is managed by HuggingFace's shuffle; this dataset does not own RNG state.
+
+        :return Optional[Dict[str, Any]]: Always None for streaming datasets.
+        """
+        return None
+
+    def set_rng_state(self, state: Optional[Dict[str, Any]]) -> None:
+        """Restore streaming dataset RNG state from a checkpoint.
+
+        :param Optional[Dict[str, Any]] state: RNG state payload.
+        :return None: This method returns nothing.
+        """
+        return None
 
 
 def create_hf_dataloader(
-    tokenizer,
-    dataset_name,
-    split="train",
-    batch_size=32,
-    block_size=512,
-    buffer_size=10000,
-    seed=42,
-    min_text_length=200,
-    text_field="text",
-    skip_samples=0,
-    max_samples=None,
-    collator=None,
-    num_workers=4,
-):
-    """
-    Create a dataloader for a HuggingFace dataset in streaming mode.
+    tokenizer: PreTrainedTokenizer,
+    dataset_name: str,
+    split: str = "train",
+    batch_size: int = 32,
+    block_size: int = 512,
+    buffer_size: int = 10000,
+    seed: int = 42,
+    min_text_length: int = 200,
+    text_field: str = "text",
+    skip_samples: int = 0,
+    max_samples: Optional[int] = None,
+    collator: Optional[Callable] = None,
+    num_workers: int = 4,
+) -> DataLoader:
+    """Create a dataloader for a HuggingFace dataset in streaming mode.
 
-    Args:
-        tokenizer: the tokenizer for the model
-        dataset_name: the name of the HuggingFace dataset
-        split: the split to use (train, validation, test)
-        batch_size: batch size for the dataloader
-        block_size: the maximum amount of tokens in the block
-        buffer_size: size of the buffer for streaming
-        seed: random seed for reproducibility
-        min_text_length: minimum text length to consider
-        text_field: the field name containing the text in the dataset
-        skip_samples: number of samples to skip from the beginning
-        max_samples: maximum number of samples to use (None for all)
-        collator: data collator function to use
-        num_workers: number of worker processes for loading data
+    :param PreTrainedTokenizer tokenizer: Tokenizer for the model.
+    :param str dataset_name: Name of the HuggingFace dataset.
+    :param str split: Dataset split to use, defaults to "train".
+    :param int batch_size: Batch size for the dataloader, defaults to 32.
+    :param int block_size: Maximum number of tokens per block, defaults to 512.
+    :param int buffer_size: Buffer size for streaming, defaults to 10000.
+    :param int seed: Random seed for reproducibility, defaults to 42.
+    :param int min_text_length: Minimum text length to consider, defaults to 200.
+    :param str text_field: Field containing text in the dataset, defaults to "text".
+    :param int skip_samples: Number of samples to skip, defaults to 0.
+    :param int max_samples: Maximum number of samples to use, defaults to None.
+    :param Callable collator: Data collator callable, defaults to None.
+    :param int num_workers: Number of worker processes, defaults to 4.
+    :return DataLoader: PyTorch DataLoader for the dataset.
 
-    Returns:
-        PyTorch DataLoader for the dataset
+    Note: ``skip_samples`` and ``max_samples`` apply per worker when ``num_workers`` > 0.
     """
     dataset = HFStreamingDataset(
         tokenizer=tokenizer,
@@ -308,6 +339,8 @@ def create_hf_dataloader(
 
 
 class DataCollatorForMaskedPermutedLanguageModeling:
+    """Data collator for MPNet masked permuted language modeling."""
+
     def __init__(
         self,
         tokenizer: PreTrainedTokenizer,
@@ -316,21 +349,17 @@ class DataCollatorForMaskedPermutedLanguageModeling:
         rand_prob: float = 0.10,
         whole_word_mask: bool = True,
         use_fast: bool = True,
-        random_seed=None,
+        random_seed: Optional[int] = None,
     ) -> None:
-        """
-        Init the dataset
+        """Initialize the data collator.
 
-        Args:
-            tokenizer: the tokenizer for the model
-            pred_prob: the probability that a token will be in the prediction section
-            keep_prob: the probability that a token in the pred will be kept as is
-            rand_prob: the probability that a token in the pred will be randomly corrupted
-            whole_word_mask: boolean dictating whether or not we should be doing whole word masking
-                when generating permutations
-            use_fast: boolean dictation whether to use the Cython implementation of a costly
-                function to speed up training
-            random_seed: used for generating reproducible permutations during testing
+        :param PreTrainedTokenizer tokenizer: Tokenizer for the model.
+        :param float pred_prob: Probability that a token is predicted, defaults to 0.15.
+        :param float keep_prob: Probability that predicted tokens are kept, defaults to 0.10.
+        :param float rand_prob: Probability that predicted tokens are randomized, defaults to 0.10.
+        :param bool whole_word_mask: Whether to use whole word masking, defaults to True.
+        :param bool use_fast: Whether to use the fast span permutation, defaults to True.
+        :param int random_seed: Random seed for reproducible permutations, defaults to None.
         """
         super().__init__()
 
@@ -340,75 +369,190 @@ class DataCollatorForMaskedPermutedLanguageModeling:
         self.rand_prob = rand_prob
 
         self.use_fast = use_fast
+        if self.use_fast and make_span_perm is None:
+            LOGGER.warning(
+                "use_fast=True requested but fast span permutation extension is unavailable; "
+                "falling back to Python implementation."
+            )
+            self.use_fast = False
 
+        # Always seed RNGs for reproducibility; use time-based seed if none provided
+        # This ensures get_rng_state() never returns None, enabling proper resume
+        if random_seed is None:
+            random_seed = int(time.time() * 1000) % (2**32)
         self.random_seed = random_seed
+        self._np_rng = np.random.default_rng(random_seed)
+        self._torch_generator = torch.Generator()
+        self._torch_generator.manual_seed(random_seed)
+
+        # Cache vocab access via get_vocab when available (supports fast tokenizers).
+        if hasattr(tokenizer, "get_vocab") and callable(tokenizer.get_vocab):
+            vocab_dict = tokenizer.get_vocab()
+        else:
+            vocab_dict = tokenizer.vocab
+        if not isinstance(vocab_dict, dict):
+            raise ValueError("Tokenizer vocabulary is not a dictionary; cannot build masks.")
+
+        vocab_size = max(vocab_dict.values()) + 1 if vocab_dict else len(tokenizer)
+        vocab_size = max(vocab_size, len(tokenizer))
+        self.vocab_size = vocab_size
+
+        vocab_items_by_id = [None] * vocab_size
+        for token, idx in vocab_dict.items():
+            if 0 <= idx < vocab_size:
+                vocab_items_by_id[idx] = token
 
         # Let's also create a byte tensor that maps words that begin with ##
         # We'll use this later on to do whole word masking
         if whole_word_mask:
-            self.whole_word_mask_map = torch.ByteTensor(
-                [
-                    not token.startswith("##")
-                    for token, _ in sorted(tokenizer.vocab.items(), key=lambda x: x[1])
-                ]
+            # Require a reasonable number of ## tokens to avoid false positives for non-WordPiece.
+            min_wordpiece_tokens = 100
+            wordpiece_count = sum(
+                1
+                for token in vocab_dict.keys()
+                if isinstance(token, str) and token.startswith("##")
             )
+            has_wordpiece = wordpiece_count >= min_wordpiece_tokens
+            if not has_wordpiece:
+                LOGGER.warning(
+                    "whole_word_mask requested but tokenizer does not look WordPiece; "
+                    "disabling whole-word masking."
+                )
+                self.whole_word_mask_map = None
+            else:
+                wordpiece_flags = []
+                for token in vocab_items_by_id:
+                    if token is None or not isinstance(token, str):
+                        wordpiece_flags.append(True)
+                    else:
+                        wordpiece_flags.append(not token.startswith("##"))
+                self.whole_word_mask_map = torch.ByteTensor(wordpiece_flags)
         else:
             self.whole_word_mask_map = None
 
         # Finally, let's create a weight tensor that will make sure no special tokens are selected
         # when we are corrupting values later on
-        weights = np.ones(len(tokenizer.vocab))
-
+        weights = torch.ones(self.vocab_size, dtype=torch.float32)
         for idx in tokenizer.all_special_ids:
-            weights[idx] = 0
-
+            if 0 <= idx < self.vocab_size:
+                weights[idx] = 0.0
         self.weights = weights / weights.sum()
+        self._special_ids = list(tokenizer.all_special_ids)
 
-    def __call__(self, examples):
+    def reseed(self, random_seed: int) -> None:
+        """Reset the collator RNGs to a new seed.
+
+        :param int random_seed: Seed to initialize RNGs.
+        :return None: This method returns nothing.
+        """
+        self.random_seed = random_seed
+        self._np_rng = np.random.default_rng(random_seed)
+        self._torch_generator = torch.Generator()
+        self._torch_generator.manual_seed(random_seed)
+
+    def _maybe_seed_worker(self) -> None:
+        """Seed RNGs for DataLoader worker processes.
+
+        :return None: This method returns nothing.
+        """
+        worker_info = torch.utils.data.get_worker_info()
+        if worker_info is None:
+            return
+        worker_id = worker_info.id
+        if getattr(self, "_worker_seeded_id", None) != worker_id:
+            # Use the worker seed derived from the main process to avoid identical streams.
+            self.reseed(worker_info.seed)
+            self._worker_seeded_id = worker_id
+
+    def __call__(self, examples: Sequence[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
         return self.collate_fn(examples)
 
-    def collate_fn(self, examples):
+    def get_rng_state(self) -> Dict[str, Any]:
+        """Return collator RNG state for deterministic resume.
+
+        :return Dict[str, Any]: RNG state payload (always valid since RNGs are always seeded).
         """
-        The core collating function for MPNet lives here
+        return {
+            "numpy": _serialize_np_generator_state(self._np_rng.bit_generator.state),
+            "torch": self._torch_generator.get_state(),
+        }
+
+    def set_rng_state(self, state: Optional[Dict[str, Any]]) -> None:
+        """Restore collator RNG state from a checkpoint.
+
+        :param Optional[Dict[str, Any]] state: RNG state payload.
+        :return None: This method returns nothing.
         """
+        if not state:
+            return
+        if state.get("numpy") is not None:
+            self._np_rng.bit_generator.state = _deserialize_np_generator_state(state["numpy"])
+        if state.get("torch") is not None:
+            self._torch_generator.set_state(state["torch"])
+
+    def collate_fn(self, examples: Sequence[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
+        """Collate a batch of examples for MPNet pretraining.
+
+        :param Sequence[Dict[str, torch.Tensor]] examples: Tokenized examples.
+        :return Dict[str, torch.Tensor]: Batch dictionary with masked inputs and targets.
+        """
+        self._maybe_seed_worker()
 
         # Start by creating a batch
         batch = self.tokenizer.pad(examples, return_tensors="pt")
 
         # Let's get the input IDs for the batch
         src_tokens = batch["input_ids"]
+        attention_mask = batch.get("attention_mask")
+        if attention_mask is None:
+            attention_mask = src_tokens.ne(self.tokenizer.pad_token_id).long()
 
         # Get inline tokens so that we can keep track of the total non-padding tokens in the batch
         inline_tokens = src_tokens.view(-1)
 
         # Use these inline tokens with the padding_idx ignored to get the total number of tokens in
         # the batch
-        ntokens = inline_tokens[inline_tokens != 1].numel()
+        ntokens = inline_tokens[inline_tokens != self.tokenizer.pad_token_id].numel()
 
-        # Let's get the batch dimension
-        sz = src_tokens.size()
+        # Build masks to avoid predicting or corrupting padding/special tokens.
+        special_mask = torch.zeros_like(src_tokens, dtype=torch.bool)
+        for special_id in self._special_ids:
+            special_mask |= src_tokens.eq(special_id)
+        non_pad_mask = attention_mask.to(torch.bool)
+        predictable_mask = non_pad_mask & ~special_mask
 
-        # Calculate the pred_size for this batch
-        pred_size = round(sz[1] * self.pred_prob)
-
-        # If the sequence is too short to have a masked token, we will mask the whole thing
-        if pred_size == 0:
-            pred_size = sz[1]
-
-        # If we DO want to mask whole words, we use the span perm function which will permute whole
-        # spans / words. Otherwise, we simply do a random permutation
-        if self.whole_word_mask_map is not None:
-            positions = torch.stack(
-                [self.span_perm(src_tokens[i], pred_size) for i in range(sz[0])]
+        predictable_counts = predictable_mask.sum(dim=1)
+        if (predictable_counts == 0).any():
+            LOGGER.warning(
+                "Batch contains samples without non-special tokens; falling back to non-pad tokens "
+                "for prediction on those samples."
             )
-        else:
-            positions = torch.stack([torch.randperm(sz[1]) for i in range(sz[0])])
+            zero_rows = (predictable_counts == 0).nonzero(as_tuple=False).view(-1)
+            for row_idx in zero_rows.tolist():
+                predictable_mask[row_idx] = non_pad_mask[row_idx]
+            predictable_counts = predictable_mask.sum(dim=1)
+
+        min_predictable = int(predictable_counts.min().item())
+        if min_predictable <= 0:
+            raise ValueError("No tokens available for prediction after padding/special filtering.")
+
+        # Calculate the pred_size for this batch based on real tokens (not padding).
+        pred_size = max(1, round(min_predictable * self.pred_prob))
+        pred_size = min(pred_size, min_predictable)
+
+        # Generate permutation positions per sample without pulling pads/specials into the target set.
+        positions = torch.stack(
+            [
+                self._build_positions(src_tokens[i], predictable_mask[i], pred_size)
+                for i in range(src_tokens.size(0))
+            ]
+        )
 
         # Now we actually do the permutation of the inputs based on the position outputs from above
         src_tokens, targets = self.permute_inputs(src_tokens, positions), None
 
         # Get the range of indices where mask tokens exist
-        mask_range = range(sz[1] - pred_size, sz[1])
+        mask_range = range(src_tokens.size(1) - pred_size, src_tokens.size(1))
 
         # Extract targets, i.e. masked tokens, using the mask range
         targets = src_tokens[:, mask_range].contiguous()
@@ -423,27 +567,54 @@ class DataCollatorForMaskedPermutedLanguageModeling:
             (positions, positions[:, mask_range], positions[:, mask_range]), dim=1
         )
 
+        # Refresh attention_mask after permutation/append and drop unused fields.
+        attention_mask = src_tokens.ne(self.tokenizer.pad_token_id).long()
+        has_padding = bool(attention_mask.eq(0).any().item())
+        batch.pop("token_type_ids", None)
+
         # Now load these up into collated form
         batch["targets"] = targets
         batch["input_ids"] = src_tokens
         batch["positions"] = positions
         batch["pred_size"] = targets.size(1)
+        batch["pred_ntokens"] = int(targets.ne(self.tokenizer.pad_token_id).sum().item())
         batch["ntokens"] = ntokens
+        batch["attention_mask"] = attention_mask
+        batch["has_padding"] = has_padding
 
         return batch
 
-    # Let's define helper functions here
-    def span_perm(self, x: torch.Tensor, pred_size=None) -> torch.Tensor:
+    def _build_positions(
+        self, input_ids: torch.Tensor, predictable_mask: torch.Tensor, pred_size: int
+    ) -> torch.Tensor:
+        """Construct a permutation that keeps padding/special tokens out of the prediction set.
+
+        :param torch.Tensor input_ids: Input IDs for a single sample.
+        :param torch.Tensor predictable_mask: Boolean mask of tokens eligible for prediction.
+        :param int pred_size: Number of tokens to predict.
+        :return torch.Tensor: Permutation indices for the sample.
         """
-        This clever function is able to permute the input sequence while ALSO keeping words intact
+        predictable_idx = torch.nonzero(predictable_mask, as_tuple=False).view(-1)
+        protected_idx = torch.nonzero(~predictable_mask, as_tuple=False).view(-1)
 
-        Args:
-            x: input IDs
-            pred_size: the total amount of tokens that will be predicted
+        if predictable_idx.numel() == 0:
+            return torch.arange(input_ids.size(0))
 
-        Returns:
-            A tensor containing the permuted positions for that input ID sequence while also keeping
-            words intact
+        if self.whole_word_mask_map is not None:
+            perm = self.span_perm(input_ids[predictable_idx], pred_size)
+        else:
+            generator = self._torch_generator if self._torch_generator is not None else None
+            perm = torch.randperm(predictable_idx.numel(), generator=generator)
+
+        return torch.cat([protected_idx, predictable_idx[perm]], dim=0)
+
+    # Let's define helper functions here
+    def span_perm(self, x: torch.Tensor, pred_size: Optional[int] = None) -> torch.Tensor:
+        """Generate a span permutation while preserving whole words.
+
+        :param torch.Tensor x: Input IDs.
+        :param int pred_size: Total number of tokens to predict, defaults to None.
+        :return torch.Tensor: Permuted positions for the input sequence.
         """
 
         # Get a "mask" of which input IDs are the STARTS of words by using the map we created
@@ -457,18 +628,23 @@ class DataCollatorForMaskedPermutedLanguageModeling:
         # where each index represents the start of a word
         word_begins_idx = word_begins_mask.nonzero().view(-1).tolist()
 
+        # Guard: if no word boundaries found (all subword tokens), fall back to token-level permutation
+        if len(word_begins_idx) == 0:
+            if self._torch_generator is not None:
+                return torch.randperm(x.size(0), generator=self._torch_generator)
+            return torch.randperm(x.size(0))
+
         # Get the size of the positional sequence
         sz = len(word_begins_idx)
-
-        # If a random seed is passed, we set the random seed before doing the perm below
-        if self.random_seed is not None:
-            np.random.seed(self.random_seed)
 
         # Create a permutation based on this size. In the example above, we would permute length
         # 6, thus would have something like:
         # np.array([1 5 3 2 4 0])
         # This will serve as the permuted indices of the positions stored in `word_begins_idx`
-        perm = np.random.permutation(sz)
+        if self._np_rng is not None:
+            perm = self._np_rng.permutation(sz)
+        else:
+            perm = np.random.permutation(sz)
 
         # We also need to append the total length of the input sequence `x` for a reason that will
         # become clear below. Essentially, you may think about each of the values in
@@ -481,6 +657,11 @@ class DataCollatorForMaskedPermutedLanguageModeling:
         # leave the Python implementation as a branch here so that the reader can fully understand
         # how the permutations are generated without having to read into less friendly Cython
         if self.use_fast:
+            # Bounds check: ensure perm indices are valid for word_begins_idx access
+            # The Cython code accesses word_begins_idx[perm[i] + 1], so max(perm) + 1 < len(word_begins_idx)
+            assert perm.max() + 1 < len(word_begins_idx), (
+                f"perm index out of bounds: max(perm)+1={perm.max() + 1} >= len(word_begins_idx)={len(word_begins_idx)}"
+            )
             # Pass the necessary components into the Cython function and get the ndarray back
             spans = make_span_perm(perm, word_begins_idx, x.size(0))
 
@@ -517,10 +698,10 @@ class DataCollatorForMaskedPermutedLanguageModeling:
 
         # Now we do one last shuffle of the masked indices to make sure they are also permuted
         if pred_size is not None:
-            # Set the random seed if it's been provided
-            if self.random_seed is not None:
-                np.random.seed(self.random_seed)
-            np.random.shuffle(spans[-pred_size:])
+            if self._np_rng is not None:
+                self._np_rng.shuffle(spans[-pred_size:])
+            else:
+                np.random.shuffle(spans[-pred_size:])
 
         return torch.from_numpy(spans)
 
@@ -551,50 +732,43 @@ class DataCollatorForMaskedPermutedLanguageModeling:
             1.0 - mask_prob
         )  # i.e. rand_prob / (rand_prob + keep_prob)
 
-        # Set the torch random seed if one has been provided
-        if self.random_seed is not None:
-            torch.manual_seed(self.random_seed)
-
         # Now use torch's builtin bernoulli function to choose tokens (from a bernoulli dist.) that
         # will be masked and save their indices
         # More specifically, a tensor the size of `tokens` is created where each value is mask_prob
         # This is then passed to the bernoulli distribution, which either generates a 0 or 1 based
         # on that mask_prob
         # Finally we convert it to a boolean tensor for reasons that will be clear in the next step
-        mask_indices = torch.bernoulli(torch.full(tokens.shape, mask_prob)).bool()
-
-        # Set the torch random seed if one has been provided
-        if self.random_seed is not None:
-            torch.manual_seed(self.random_seed)
+        if self._torch_generator is not None:
+            mask_indices = torch.rand(tokens.shape, generator=self._torch_generator) < mask_prob
+        else:
+            mask_indices = torch.rand(tokens.shape) < mask_prob
 
         # Now we get the indices where we want to corrupt the tokens using a similar approach to the
         # above logic. Using corrupt_prob, we use the bernoulli distribution to get a list of
         # indices that we will want to corrupt. We also test against the boolean tensor we made
         # above to make sure that we aren't corrupting any tokens that were already slated for
         # maskin
-        corrupt_indices = (
-            torch.bernoulli(torch.full(tokens.shape, corrupt_prob)).bool()
-            & ~mask_indices
-        )
+        if self._torch_generator is not None:
+            corrupt_draw = torch.rand(tokens.shape, generator=self._torch_generator)
+        else:
+            corrupt_draw = torch.rand(tokens.shape)
+        corrupt_indices = (corrupt_draw < corrupt_prob) & ~mask_indices
 
         # Now we mask and corrupt the tokens dictated by the indices above
         # We use the generate_random_tensor helper function to select random indices from the vocab
         tokens[mask_indices] = mask_idx
-        tokens[corrupt_indices] = self.generate_random_tensor(
-            corrupt_indices.sum().tolist()
-        ).to(tokens.device)
+        tokens[corrupt_indices] = self.generate_random_tensor(corrupt_indices.sum().tolist()).to(
+            tokens.device
+        )
 
         return tokens
 
-    def permute_inputs(
-        self, inputs: torch.Tensor, positions: torch.Tensor
-    ) -> torch.Tensor:
-        """
-        This function uses the positions we permuted earlier to permute the actual input_ids
+    def permute_inputs(self, inputs: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
+        """Permute input IDs using the provided positions.
 
-        Args:
-            inputs: the input_ids
-            positions: the permuted positions
+        :param torch.Tensor inputs: Input IDs.
+        :param torch.Tensor positions: Permuted positions.
+        :return torch.Tensor: Permuted input IDs.
         """
 
         # Get the shape of the inputs, i.e., (batch_size, seq_len)
@@ -615,44 +789,64 @@ class DataCollatorForMaskedPermutedLanguageModeling:
         return inputs.reshape(-1)[index]
 
     def generate_random_tensor(self, sz: int) -> torch.Tensor:
+        """Generate random token IDs for corruption.
+
+        :param int sz: Number of random tokens to generate.
+        :return torch.Tensor: Random token IDs tensor.
         """
-        Helper function that will randomly select IDs from the tokenizer vocab to corrupt tokens
-        that aren't masked
-
-        Args:
-            sz: the number of random tokens to extract
-        """
-        # Set the numpy random seed if it's been provided
-        if self.random_seed is not None:
-            np.random.seed(self.random_seed)
-
-        # Generate the random choices first
-        random_indices = np.random.choice(len(self.tokenizer.vocab), sz, p=self.weights)
-
-        # Then convert to a torch tensor with the correct dtype
-        return torch.tensor(random_indices, dtype=torch.long)
+        if sz <= 0:
+            return torch.empty(0, dtype=torch.long)
+        generator = self._torch_generator if self._torch_generator is not None else None
+        return torch.multinomial(self.weights, sz, replacement=True, generator=generator)
 
 
 class RandomSamplerWithSeed(Sampler[int]):
-    """
-    Random sampler based on the base Sampler class that allows for seeded random sampling such that
-    epochs are reproducible. If a seed isn't provided, training will be truly random.
-    """
+    """Random sampler that produces a deterministic epoch-specific permutation."""
 
-    def __init__(self, data_source: Sized, epoch: int, random_seed=None) -> None:
+    def __init__(
+        self,
+        data_source: Sized,
+        epoch: int,
+        random_seed: Optional[int] = None,
+        start_index: int = 0,
+    ) -> None:
+        """Initialize the sampler with a deterministic seed and optional offset.
+
+        :param Sized data_source: Data source to sample from.
+        :param int epoch: Current epoch number.
+        :param Optional[int] random_seed: Optional random seed for reproducibility, defaults to None.
+        :param int start_index: Number of already-consumed samples to skip, defaults to 0.
+        :raises ValueError: If start_index is negative or exceeds dataset length.
+        """
         self.data_source = data_source
-        self.epoch = epoch
+        self.epoch = int(epoch)
 
         if random_seed is None:
             self.random_seed = int(torch.empty((), dtype=torch.int64).random_().item())
         else:
-            self.random_seed = random_seed
+            self.random_seed = int(random_seed)
+
+        self.start_index = int(start_index) if start_index is not None else 0
+        if self.start_index < 0:
+            raise ValueError(f"start_index must be >= 0, got {self.start_index}")
+
+        dataset_len = len(self.data_source)
+        if self.start_index > dataset_len:
+            raise ValueError(
+                f"start_index ({self.start_index}) exceeds dataset length ({dataset_len}). "
+                "This usually means the dataset changed between runs."
+            )
+
+        self._remaining = dataset_len - self.start_index
 
     def __iter__(self) -> Iterator[int]:
         with utils.numpy_seed(self.epoch + self.random_seed):
-            shuffle = np.random.permutation(len(self.data_source))
+            perm = np.random.permutation(len(self.data_source))
 
-        return iter(shuffle)
+        if self.start_index:
+            perm = perm[self.start_index :]
+
+        return iter(perm.tolist())
 
     def __len__(self) -> int:
-        return len(self.data_source)
+        return self._remaining

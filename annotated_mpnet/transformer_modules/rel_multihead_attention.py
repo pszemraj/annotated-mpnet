@@ -3,13 +3,8 @@ Defining relative multihead attention for MPNet
 """
 
 import logging
+from typing import Any, Dict, Optional, Tuple
 
-from rich.logging import RichHandler
-
-LOG_FORMAT = "%(message)s"
-logging.basicConfig(
-    level="INFO", format=LOG_FORMAT, datefmt="[%X] ", handlers=[RichHandler()]
-)
 LOGGER = logging.getLogger(__name__)
 
 
@@ -27,18 +22,32 @@ class RelativeMultiHeadAttention(nn.Module):
 
     def __init__(
         self,
-        embed_dim,
-        num_heads,
-        kdim=None,
-        vdim=None,
-        dropout=0.0,
-        bias=True,
-        add_bias_kv=False,
-        add_zero_attn=False,
-        self_attention=False,
-        encoder_decoder_attention=False,
-        max_relative_positions=128,
-    ):
+        embed_dim: int,
+        num_heads: int,
+        kdim: Optional[int] = None,
+        vdim: Optional[int] = None,
+        dropout: float = 0.0,
+        bias: bool = True,
+        add_bias_kv: bool = False,
+        add_zero_attn: bool = False,
+        self_attention: bool = False,
+        encoder_decoder_attention: bool = False,
+        max_relative_positions: int = 128,
+    ) -> None:
+        """Initialize relative multi-head attention.
+
+        :param int embed_dim: Embedding dimension.
+        :param int num_heads: Number of attention heads.
+        :param int kdim: Key dimension, defaults to None.
+        :param int vdim: Value dimension, defaults to None.
+        :param float dropout: Dropout probability, defaults to 0.0.
+        :param bool bias: Whether to use bias terms, defaults to True.
+        :param bool add_bias_kv: Whether to add bias to K/V, defaults to False.
+        :param bool add_zero_attn: Whether to add zero attention, defaults to False.
+        :param bool self_attention: Whether this is self-attention, defaults to False.
+        :param bool encoder_decoder_attention: Whether encoder-decoder attention, defaults to False.
+        :param int max_relative_positions: Maximum relative positions, defaults to 128.
+        """
         super().__init__()
 
         # Store args
@@ -97,25 +106,14 @@ class RelativeMultiHeadAttention(nn.Module):
         # Not useful for us, but is used down below, so we set it anyway
         self.onnx_trace = False
 
-        self.enable_torch_version = False
-        if hasattr(F, "multi_head_attention_forward"):
-            self.enable_torch_version = True
-        else:
-            self.enable_torch_version = False
-
         self.reset_parameters()
 
-    def prepare_for_onnx_export_(self):
-        """
-        If we export using ONNX, we would need to use this function, but it doesn't matter for us.
-        Leaving it in anyway.
-        """
+    def prepare_for_onnx_export_(self) -> None:
+        """Prepare the module for ONNX export."""
         self.onnx_trace = True
 
-    def reset_parameters(self):
-        """
-        Function for making sure all declared parameters are properly randomized on instantiation
-        """
+    def reset_parameters(self) -> None:
+        """Initialize all parameters."""
         # Init weights for Q, K, and V
         if self.qkv_same_dim:
             nn.init.xavier_uniform_(self.in_proj_weight)
@@ -138,24 +136,34 @@ class RelativeMultiHeadAttention(nn.Module):
 
     def forward(
         self,
-        query,
-        key,
-        value,
-        key_padding_mask=None,
-        incremental_state=None,
-        need_weights=True,
-        static_kv=False,
-        attn_mask=None,
-        positions_bias=None,
-    ):
-        """
-        Forward function for multihead relative attention
+        query: torch.Tensor,
+        key: Optional[torch.Tensor],
+        value: Optional[torch.Tensor],
+        key_padding_mask: Optional[torch.Tensor] = None,
+        incremental_state: Optional[Dict[str, Any]] = None,
+        need_weights: bool = True,
+        static_kv: bool = False,
+        attn_mask: Optional[torch.Tensor] = None,
+        positions_bias: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        """Compute multi-head relative attention.
 
         Input shape: Time x Batch x Channel
         Timesteps can be masked by supplying a T x T mask in the
         `attn_mask` argument. Padding elements can be excluded from
         the key by passing a binary ByteTensor (`key_padding_mask`) with shape:
         batch x src_len, where padding elements are indicated by 1s.
+        :param torch.Tensor query: Query tensor.
+        :param torch.Tensor key: Key tensor, defaults to None.
+        :param torch.Tensor value: Value tensor, defaults to None.
+        :param torch.Tensor key_padding_mask: Key padding mask, defaults to None.
+        :param dict incremental_state: Incremental state buffer, defaults to None.
+        :param bool need_weights: Whether to return attention weights, defaults to True.
+        :param bool static_kv: Whether key/value are static, defaults to False.
+        :param torch.Tensor attn_mask: Attention mask, defaults to None.
+        :param torch.Tensor positions_bias: Position bias tensor. Accepts shared (heads, tgt, src),
+            per-batch (bsz * heads, tgt, src), or 4D (1/bsz, heads, tgt, src) layouts.
+        :return Tuple[torch.Tensor, Optional[torch.Tensor]]: Output and optional attention weights.
         """
         # Unpack the dimensions of the query and assert that they match what we expect
         tgt_len, bsz, embed_dim = query.size()
@@ -193,18 +201,13 @@ class RelativeMultiHeadAttention(nn.Module):
             k = self.in_proj_k(key)
             v = self.in_proj_v(value)
 
-        # Get scaled Q before performing energy calculation
-        q *= self.scaling
-
         # If bias has been specified on the K, V matrices, process it here
         if self.bias_k is not None:
             assert self.bias_v is not None
             k = torch.cat([k, self.bias_k.repeat(1, bsz, 1)])
             v = torch.cat([v, self.bias_v.repeat(1, bsz, 1)])
             if attn_mask is not None:
-                attn_mask = torch.cat(
-                    [attn_mask, attn_mask.new_zeros(attn_mask.size(0), 1)], dim=1
-                )
+                attn_mask = torch.cat([attn_mask, attn_mask.new_zeros(attn_mask.size(0), 1)], dim=1)
             if key_padding_mask is not None:
                 key_padding_mask = torch.cat(
                     [
@@ -215,39 +218,23 @@ class RelativeMultiHeadAttention(nn.Module):
                 )
 
         # Do the matrix manipulation for the energy calculation, namely a transpose
-        q = (
-            q.contiguous()
-            .view(tgt_len, bsz * self.num_heads, self.head_dim)
-            .transpose(0, 1)
-        )
+        q = q.contiguous().view(tgt_len, bsz * self.num_heads, self.head_dim).transpose(0, 1)
         if k is not None:
-            k = (
-                k.contiguous()
-                .view(-1, bsz * self.num_heads, self.head_dim)
-                .transpose(0, 1)
-            )
+            k = k.contiguous().view(-1, bsz * self.num_heads, self.head_dim).transpose(0, 1)
         if v is not None:
-            v = (
-                v.contiguous()
-                .view(-1, bsz * self.num_heads, self.head_dim)
-                .transpose(0, 1)
-            )
+            v = v.contiguous().view(-1, bsz * self.num_heads, self.head_dim).transpose(0, 1)
 
         # Not entirely sure what this does, but leaving it in here in case MPNet uses it
         if saved_state is not None:
             # saved states are stored with shape (bsz, num_heads, seq_len, head_dim)
             if "prev_key" in saved_state:
-                prev_key = saved_state["prev_key"].view(
-                    bsz * self.num_heads, -1, self.head_dim
-                )
+                prev_key = saved_state["prev_key"].view(bsz * self.num_heads, -1, self.head_dim)
                 if static_kv:
                     k = prev_key
                 else:
                     k = torch.cat((prev_key, k), dim=1)
             if "prev_value" in saved_state:
-                prev_value = saved_state["prev_value"].view(
-                    bsz * self.num_heads, -1, self.head_dim
-                )
+                prev_value = saved_state["prev_value"].view(bsz * self.num_heads, -1, self.head_dim)
                 if static_kv:
                     v = prev_value
                 else:
@@ -274,22 +261,154 @@ class RelativeMultiHeadAttention(nn.Module):
             k = torch.cat([k, k.new_zeros((k.size(0), 1) + k.size()[2:])], dim=1)
             v = torch.cat([v, v.new_zeros((v.size(0), 1) + v.size()[2:])], dim=1)
             if attn_mask is not None:
-                attn_mask = torch.cat(
-                    [attn_mask, attn_mask.new_zeros(attn_mask.size(0), 1)], dim=1
-                )
+                attn_mask = torch.cat([attn_mask, attn_mask.new_zeros(attn_mask.size(0), 1)], dim=1)
             if key_padding_mask is not None:
                 key_padding_mask = torch.cat(
                     [
                         key_padding_mask,
-                        torch.zeros(key_padding_mask.size(0), 1).type_as(
-                            key_padding_mask
-                        ),
+                        torch.zeros(key_padding_mask.size(0), 1).type_as(key_padding_mask),
                     ],
                     dim=1,
                 )
 
+        def _reshape_positions_bias(
+            bias: torch.Tensor,
+            bsz: int,
+            tgt_len: int,
+            src_len: int,
+            device: torch.device,
+            dtype: torch.dtype,
+        ) -> torch.Tensor:
+            """Normalize position bias to a 4D (batch, heads, tgt, src) tensor."""
+            if bias.device != device or bias.dtype != dtype:
+                bias = bias.to(device=device, dtype=dtype)
+            if bias.dim() == 3:
+                if bias.size(0) == self.num_heads:
+                    bias = bias.unsqueeze(0)
+                elif bias.size(0) == bsz * self.num_heads:
+                    bias = bias.view(bsz, self.num_heads, tgt_len, src_len)
+                else:
+                    raise ValueError(
+                        "positions_bias has unexpected shape; expected heads or bsz*heads in dim 0."
+                    )
+            elif bias.dim() == 4:
+                if bias.size(1) != self.num_heads:
+                    raise ValueError(
+                        "positions_bias has unexpected head dimension; expected num_heads."
+                    )
+                if bias.size(0) not in (1, bsz):
+                    raise ValueError(
+                        "positions_bias has unexpected batch dimension; expected 1 or bsz."
+                    )
+            else:
+                raise ValueError("positions_bias must be 3D or 4D for attention biasing.")
+            return bias
+
+        def _add_positions_bias(
+            attn_weights: torch.Tensor,
+            bias: torch.Tensor,
+            bsz: int,
+            tgt_len: int,
+            src_len: int,
+        ) -> torch.Tensor:
+            """Add position bias to attention weights with broadcast where possible."""
+            if bias.device != attn_weights.device or bias.dtype != attn_weights.dtype:
+                bias = bias.to(device=attn_weights.device, dtype=attn_weights.dtype)
+            if bias.dim() == 3 and bias.size(0) == self.num_heads:
+                attn_weights = attn_weights.view(bsz, self.num_heads, tgt_len, src_len)
+                attn_weights = attn_weights + bias.unsqueeze(0)
+                return attn_weights.view(bsz * self.num_heads, tgt_len, src_len)
+            if bias.dim() == 4:
+                attn_weights = attn_weights.view(bsz, self.num_heads, tgt_len, src_len)
+                attn_weights = attn_weights + bias
+                return attn_weights.view(bsz * self.num_heads, tgt_len, src_len)
+            return attn_weights + bias
+
+        use_sdpa = (
+            hasattr(F, "scaled_dot_product_attention")
+            and not need_weights
+            and not self.onnx_trace
+            and k is not None
+            and v is not None
+        )
+        if use_sdpa:
+            q_sdpa = q.contiguous().view(bsz, self.num_heads, tgt_len, self.head_dim)
+            k_sdpa = k.contiguous().view(bsz, self.num_heads, src_len, self.head_dim)
+            v_sdpa = v.contiguous().view(bsz, self.num_heads, src_len, self.head_dim)
+
+            attn_bias = None
+            attn_bias_from_positions = False
+            if positions_bias is not None:
+                attn_bias = _reshape_positions_bias(
+                    positions_bias,
+                    bsz,
+                    tgt_len,
+                    src_len,
+                    device=q.device,
+                    dtype=q.dtype,
+                )
+                if attn_bias.size(0) == 1 and (
+                    key_padding_mask is not None or (attn_mask is not None and attn_mask.dim() == 3)
+                ):
+                    attn_bias = attn_bias.expand(bsz, -1, -1, -1).contiguous()
+                attn_bias_from_positions = True
+
+            if attn_bias is None and (attn_mask is not None or key_padding_mask is not None):
+                attn_bias = torch.zeros(
+                    (bsz, self.num_heads, tgt_len, src_len),
+                    device=q.device,
+                    dtype=q.dtype,
+                )
+                attn_bias_from_positions = False
+
+            if attn_mask is not None:
+                if attn_mask.dtype == torch.bool:
+                    mask = attn_mask
+                    if mask.dim() == 2:
+                        mask = mask.unsqueeze(0).unsqueeze(0)
+                    elif mask.dim() == 3:
+                        mask = mask.unsqueeze(1)
+                    if attn_bias_from_positions:
+                        attn_bias = attn_bias.clone()
+                        attn_bias_from_positions = False
+                    attn_bias.masked_fill_(mask, float("-inf"))
+                else:
+                    mask = attn_mask.to(device=q.device, dtype=q.dtype)
+                    if mask.dim() == 2:
+                        mask = mask.unsqueeze(0).unsqueeze(0)
+                    elif mask.dim() == 3:
+                        mask = mask.unsqueeze(1)
+                    if attn_bias_from_positions:
+                        attn_bias = attn_bias + mask
+                        attn_bias_from_positions = False
+                    else:
+                        attn_bias += mask
+
+            if key_padding_mask is not None:
+                key_mask = key_padding_mask.to(torch.bool).unsqueeze(1).unsqueeze(2)
+                if attn_bias_from_positions:
+                    attn_bias = attn_bias.clone()
+                    attn_bias_from_positions = False
+                attn_bias.masked_fill_(key_mask, float("-inf"))
+
+            attn = F.scaled_dot_product_attention(
+                q_sdpa,
+                k_sdpa,
+                v_sdpa,
+                attn_mask=attn_bias,
+                dropout_p=self.dropout if self.training else 0.0,
+            )
+            assert list(attn.size()) == [bsz, self.num_heads, tgt_len, self.head_dim]
+            attn = attn.transpose(1, 2).contiguous().view(bsz, tgt_len, embed_dim)
+            attn = attn.transpose(0, 1)
+            attn = self.out_proj(attn)
+            return attn, None
+
+        # Apply explicit scaling for the non-SDPA path (SDPA handles scaling internally).
+        q = q * self.scaling
+
         # Extract the attention weights, i.e., do the energy calculation (QK) before inputting to
-        # softmax below
+        # softmax below.
         attn_weights = torch.bmm(q, k.transpose(1, 2))
         attn_weights = self.apply_sparse_mask(attn_weights, tgt_len, src_len, bsz)
 
@@ -298,6 +417,12 @@ class RelativeMultiHeadAttention(nn.Module):
 
         # Factor in the attention mask now
         if attn_mask is not None:
+            if attn_mask.dtype == torch.bool:
+                attn_mask = torch.zeros(
+                    attn_mask.shape, device=attn_weights.device, dtype=attn_weights.dtype
+                ).masked_fill(attn_mask, float("-inf"))
+            else:
+                attn_mask = attn_mask.to(device=attn_weights.device, dtype=attn_weights.dtype)
             attn_mask = attn_mask.unsqueeze(0)
             if self.onnx_trace:
                 attn_mask = attn_mask.repeat(attn_weights.size(0), 1, 1)
@@ -322,12 +447,10 @@ class RelativeMultiHeadAttention(nn.Module):
 
         # Add in the position bias here
         if positions_bias is not None:
-            attn_weights += positions_bias
+            attn_weights = _add_positions_bias(attn_weights, positions_bias, bsz, tgt_len, src_len)
 
         # Softmax on the energy calculation
-        attn_weights = F.softmax(attn_weights, dim=-1, dtype=torch.float32).type_as(
-            attn_weights
-        )
+        attn_weights = F.softmax(attn_weights, dim=-1, dtype=torch.float32).type_as(attn_weights)
 
         # Calculate dropout on the softmaxed energy calculation
         attn_weights = F.dropout(attn_weights, p=self.dropout, training=self.training)
@@ -355,9 +478,15 @@ class RelativeMultiHeadAttention(nn.Module):
 
         return attn, attn_weights
 
-    def _in_proj(self, input, start=0, end=None):
-        """
-        Wrapper function for the attention projection layers
+    def _in_proj(
+        self, input: torch.Tensor, start: int = 0, end: Optional[int] = None
+    ) -> torch.Tensor:
+        """Project input using the shared in-projection weights.
+
+        :param torch.Tensor input: Input tensor.
+        :param int start: Start index in the projection weight, defaults to 0.
+        :param int end: End index in the projection weight, defaults to None.
+        :return torch.Tensor: Projected tensor.
         """
         weight = self.in_proj_weight
         bias = self.in_proj_bias
@@ -370,17 +499,20 @@ class RelativeMultiHeadAttention(nn.Module):
         # Return the output of a FC linear layer using these selected weights and biases
         return F.linear(input, weight, bias)
 
-    def in_proj_qkv(self, query):
-        """
-        Calculate self attention using the in_proj layer defined above
+    def in_proj_qkv(self, query: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Project query into Q, K, V tensors.
+
+        :param torch.Tensor query: Query tensor.
+        :return Tuple[torch.Tensor, torch.Tensor, torch.Tensor]: Q, K, V projections.
         """
         # Use the chunking function to split the tensor out into the Q, K, V components
         return self._in_proj(query).chunk(3, dim=-1)
 
-    def in_proj_q(self, query):
-        """
-        If we need to calculate Q individually (i.e. in a encoder-decoder setup or if QKV are
-        non-symmetrical) we define functions that will individually handle the calculations
+    def in_proj_q(self, query: torch.Tensor) -> torch.Tensor:
+        """Project query tensor for Q.
+
+        :param torch.Tensor query: Query tensor.
+        :return torch.Tensor: Projected Q tensor.
         """
         if self.qkv_same_dim:
             return self._in_proj(query, end=self.embed_dim)
@@ -390,10 +522,11 @@ class RelativeMultiHeadAttention(nn.Module):
                 bias = bias[: self.embed_dim]
             return F.linear(query, self.q_proj_weight, bias)
 
-    def in_proj_k(self, key):
-        """
-        If we need to calculate K individually (i.e. in a encoder-decoder setup or if QKV are
-        non-symmetrical) we define functions that will individually handle the calculations
+    def in_proj_k(self, key: torch.Tensor) -> torch.Tensor:
+        """Project key tensor for K.
+
+        :param torch.Tensor key: Key tensor.
+        :return torch.Tensor: Projected K tensor.
         """
         if self.qkv_same_dim:
             return self._in_proj(key, start=self.embed_dim, end=2 * self.embed_dim)
@@ -404,10 +537,11 @@ class RelativeMultiHeadAttention(nn.Module):
                 bias = bias[self.embed_dim : 2 * self.embed_dim]
             return F.linear(key, weight, bias)
 
-    def in_proj_v(self, value):
-        """
-        If we need to calculate V individually (i.e. in a encoder-decoder setup or if QKV are
-        non-symmetrical) we define functions that will individually handle the calculations
+    def in_proj_v(self, value: torch.Tensor) -> torch.Tensor:
+        """Project value tensor for V.
+
+        :param torch.Tensor value: Value tensor.
+        :return torch.Tensor: Projected V tensor.
         """
         if self.qkv_same_dim:
             return self._in_proj(value, start=2 * self.embed_dim)
@@ -418,15 +552,26 @@ class RelativeMultiHeadAttention(nn.Module):
                 bias = bias[2 * self.embed_dim :]
             return F.linear(value, weight, bias)
 
-    def reorder_incremental_state(self, incremental_state, new_order):
-        """Reorder buffered internal state (for incremental generation)."""
+    def reorder_incremental_state(
+        self, incremental_state: Dict[str, Any], new_order: torch.Tensor
+    ) -> None:
+        """Reorder buffered internal state (for incremental generation).
+
+        :param dict incremental_state: Incremental state buffer.
+        :param torch.Tensor new_order: New ordering indices.
+        """
         input_buffer = self._get_input_buffer(incremental_state)
         if input_buffer is not None:
             for k in input_buffer.keys():
                 input_buffer[k] = input_buffer[k].index_select(0, new_order)
             self._set_input_buffer(incremental_state, input_buffer)
 
-    def _get_input_buffer(self, incremental_state):
+    def _get_input_buffer(self, incremental_state: Dict[str, Any]) -> Dict[str, torch.Tensor]:
+        """Fetch the incremental state buffer for attention.
+
+        :param dict incremental_state: Incremental state buffer.
+        :return Dict[str, torch.Tensor]: Attention state dictionary.
+        """
         return (
             utils.get_incremental_state(
                 self,
@@ -436,7 +581,14 @@ class RelativeMultiHeadAttention(nn.Module):
             or {}
         )
 
-    def _set_input_buffer(self, incremental_state, buffer):
+    def _set_input_buffer(
+        self, incremental_state: Dict[str, Any], buffer: Dict[str, torch.Tensor]
+    ) -> None:
+        """Set the incremental state buffer for attention.
+
+        :param dict incremental_state: Incremental state buffer.
+        :param Dict[str, torch.Tensor] buffer: Attention state dictionary.
+        """
         utils.set_incremental_state(
             self,
             incremental_state,
@@ -444,5 +596,15 @@ class RelativeMultiHeadAttention(nn.Module):
             buffer,
         )
 
-    def apply_sparse_mask(self, attn_weights, tgt_len, src_len, bsz):
+    def apply_sparse_mask(
+        self, attn_weights: torch.Tensor, tgt_len: int, src_len: int, bsz: int
+    ) -> torch.Tensor:
+        """Apply a sparse attention mask (no-op by default).
+
+        :param torch.Tensor attn_weights: Attention weights.
+        :param int tgt_len: Target length.
+        :param int src_len: Source length.
+        :param int bsz: Batch size.
+        :return torch.Tensor: Masked attention weights.
+        """
         return attn_weights

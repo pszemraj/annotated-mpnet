@@ -4,16 +4,12 @@ something like a sinusoidal distribution
 """
 
 import logging
+from typing import Any, Dict, Optional
 
-from rich.logging import RichHandler
-
-LOG_FORMAT = "%(message)s"
-logging.basicConfig(
-    level="INFO", format=LOG_FORMAT, datefmt="[%X] ", handlers=[RichHandler()]
-)
 LOGGER = logging.getLogger(__name__)
 
 
+import torch
 from torch import nn
 
 from annotated_mpnet.utils import utils
@@ -24,9 +20,13 @@ class LearnedPositionalEmbedding(nn.Embedding):
     A subclass of the Embedding module that will operate as a layer for learning positional embeds
     """
 
-    def __init__(
-        self, num_embeddings: int, embedding_dim: int, padding_idx: int
-    ) -> None:
+    def __init__(self, num_embeddings: int, embedding_dim: int, padding_idx: int) -> None:
+        """Initialize learned positional embeddings.
+
+        :param int num_embeddings: Number of embeddings.
+        :param int embedding_dim: Embedding dimensionality.
+        :param int padding_idx: Padding index.
+        """
         # Initialize the superclass embedding layer
         super().__init__(num_embeddings, embedding_dim, padding_idx)
 
@@ -34,12 +34,18 @@ class LearnedPositionalEmbedding(nn.Embedding):
         # useless for us
         self.onnx_trace = False
 
-    def forward(self, input, incremental_state=None, positions=None):
-        """
-        Forward pass for the learned embeddings. We pass in a batch of examples in "input" with the
-        shape (bsz x seq_len) as expected. One note is that if positions are precomputed (which will
-        most likely be the case for MPNet), we should not pass in a padding_idx when instantiating
-        this class.
+    def forward(
+        self,
+        input: torch.Tensor,
+        incremental_state: Optional[Dict[str, Any]] = None,
+        positions: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Compute learned positional embeddings.
+
+        :param torch.Tensor input: Input batch of shape (bsz, seq_len).
+        :param dict incremental_state: Incremental decoding state, defaults to None.
+        :param torch.Tensor positions: Precomputed positions, defaults to None.
+        :return torch.Tensor: Positional embeddings.
         """
 
         # Assert that only one of `positions` or `padding_idx` is set
@@ -53,9 +59,7 @@ class LearnedPositionalEmbedding(nn.Embedding):
             if incremental_state is not None:
                 # positions is the same for every token when decoding a single step
                 # Without the int() cast, it doesn't work in some cases when exporting to ONNX
-                positions = input.data.new(1, 1).fill_(
-                    int(self.padding_idx + input.size(1))
-                )
+                positions = input.data.new(1, 1).fill_(int(self.padding_idx + input.size(1)))
             else:
                 # Create positions using the `make_positions` function. This basically just creates
                 # incremental positions starting at padding_idx+1. Very simple function that you
@@ -71,17 +75,20 @@ class LearnedPositionalEmbedding(nn.Embedding):
 
     # Below are some convenience functions and aliases for this class. Should not be of too much
     # importance for our usage
-    def max_positions(self):
-        """
-        Returns the max number of positional embeddings
+    def max_positions(self) -> int:
+        """Return the maximum number of positional embeddings.
+
+        :return int: Maximum supported positions.
         """
         if self.padding_idx is not None:
             return self.num_embeddings - self.padding_idx - 1
         else:
             return self.num_embeddings
 
-    def _forward(self, positions):
-        """
-        Alias for calling the embedding layer if positions are precomputed
+    def _forward(self, positions: torch.Tensor) -> torch.Tensor:
+        """Alias for calling the embedding layer with precomputed positions.
+
+        :param torch.Tensor positions: Precomputed position indices.
+        :return torch.Tensor: Positional embeddings.
         """
         return super().forward(positions)

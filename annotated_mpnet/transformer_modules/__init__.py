@@ -1,3 +1,5 @@
+"""Transformer module building blocks for MPNet."""
+
 from .layer_norm import LayerNorm
 from .learned_positional_embedding import LearnedPositionalEmbedding
 from .sinusoidal_positional_embedding import SinusoidalPositionalEmbedding

@@ -5,6 +5,7 @@ Setup script for the annotated_mpnet library
 """
 
 import sys
+from typing import Any, List
 
 from setuptools import Extension, find_packages, setup
 
@@ -30,18 +31,32 @@ else:
 class NumpyExtension(Extension):
     """Source: https://stackoverflow.com/a/54128391"""
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        """Initialize the numpy-aware extension.
+
+        :param args: Positional arguments for ``Extension``.
+        :param kwargs: Keyword arguments for ``Extension``.
+        """
         self.__include_dirs = []
         super().__init__(*args, **kwargs)
 
     @property
-    def include_dirs(self):
+    def include_dirs(self) -> List[str]:
+        """Return include directories with NumPy include path appended.
+
+        :return list: Include directories.
+        """
         import numpy
 
         return self.__include_dirs + [numpy.get_include()]
 
     @include_dirs.setter
-    def include_dirs(self, dirs):
+    def include_dirs(self, dirs: List[str]) -> None:
+        """Set include directories.
+
+        :param list dirs: Include directories.
+        :return None: This setter returns nothing.
+        """
         self.__include_dirs = dirs
 
 
@@ -57,7 +72,7 @@ extensions = [
 
 setup(
     name="annotated_mpnet",
-    version="0.1.4",
+    version="0.1.6",
     description="Raw Torch, heavily annotated, pretrainable MPNet",
     url="https://github.com/pszemraj/annotated-mpnet",
     long_description=readme,
@@ -77,7 +92,7 @@ setup(
         "transformers",
         "wandb",
     ],
-    packages=find_packages(exclude=["cli_tools", "tests"]),
+    packages=find_packages(exclude=["tests"]),
     ext_modules=extensions,
     test_suite="tests",
     entry_points={

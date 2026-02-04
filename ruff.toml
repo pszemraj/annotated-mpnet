@@ -1,0 +1,26 @@
+# Ruff configuration for annotated-mpnet
+
+# Set line length to match the project style
+line-length = 100
+
+[lint]
+# Exclude __init__.py files from import-related checks to avoid circular import issues
+exclude = ["*/__init__.py"]
+
+# Enable pycodestyle warnings (E) and Pyflakes (F)
+select = ["E", "F"]
+
+# Ignore specific rules
+ignore = [
+    "E402", # Module level import not at top of file
+    "F401", # Imported but unused (common in __init__.py)
+    "E501", # Line too long (handled by formatter)
+]
+
+[format]
+# Use double quotes for strings
+quote-style = "double"
+# NOTE: We do not enforce f-string vs .format usage; pick the clearer option per call site.
+
+# Format docstrings
+docstring-code-format = true
