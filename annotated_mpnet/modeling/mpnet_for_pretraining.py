@@ -4,7 +4,7 @@ code
 """
 
 import logging
-from functools import lru_cache
+from collections import OrderedDict
 from typing import Any, Optional, Sequence, Tuple, Union
 
 LOGGER = logging.getLogger(__name__)
@@ -722,11 +722,21 @@ def two_stream_self_attention(
     return c, q
 
 
-@lru_cache(maxsize=32)
-def _cached_two_stream_masks(
+_TWO_STREAM_MASK_CACHE_MAXSIZE = 32
+_TWO_STREAM_MASK_CACHE: "OrderedDict[tuple[int, int, str, int], tuple[torch.Tensor, torch.Tensor]]" = OrderedDict()
+
+
+def _dynamo_is_compiling() -> bool:
+    """Return True when torch._dynamo is tracing/compiling."""
+    if hasattr(torch, "_dynamo") and hasattr(torch._dynamo, "is_compiling"):
+        return torch._dynamo.is_compiling()
+    return False
+
+
+def _build_two_stream_masks(
     seq_len: int, pred_size: int, device_type: str, device_index: int
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Return cached boolean query/content masks for two-stream attention.
+    """Build boolean query/content masks for two-stream attention.
 
     :param int seq_len: Content sequence length (without pred_size).
     :param int pred_size: Prediction length.
@@ -761,6 +771,37 @@ def _cached_two_stream_masks(
     content_mask = torch.cat((left_block, ~base, base), dim=-1)
 
     return query_mask, content_mask
+
+
+def _cached_two_stream_masks(
+    seq_len: int, pred_size: int, device_type: str, device_index: int
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Return cached boolean query/content masks for two-stream attention.
+
+    Torch Dynamo ignores functools.lru_cache wrappers; use a small manual cache and
+    bypass caching while compiling to avoid Dynamo warnings/graph breaks.
+
+    :param int seq_len: Content sequence length (without pred_size).
+    :param int pred_size: Prediction length.
+    :param str device_type: Device type (cpu/cuda).
+    :param int device_index: Device index or -1 for CPU/default.
+    :return Tuple[torch.Tensor, torch.Tensor]: Query and content masks.
+    """
+    if _dynamo_is_compiling():
+        return _build_two_stream_masks(seq_len, pred_size, device_type, device_index)
+
+    key = (seq_len, pred_size, device_type, device_index)
+    cached = _TWO_STREAM_MASK_CACHE.get(key)
+    if cached is not None:
+        _TWO_STREAM_MASK_CACHE.move_to_end(key)
+        return cached
+
+    masks = _build_two_stream_masks(seq_len, pred_size, device_type, device_index)
+    _TWO_STREAM_MASK_CACHE[key] = masks
+    _TWO_STREAM_MASK_CACHE.move_to_end(key)
+    if len(_TWO_STREAM_MASK_CACHE) > _TWO_STREAM_MASK_CACHE_MAXSIZE:
+        _TWO_STREAM_MASK_CACHE.popitem(last=False)
+    return masks
 
 
 def make_query_and_content_mask(

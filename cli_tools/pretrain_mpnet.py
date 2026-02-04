@@ -803,6 +803,11 @@ def main(args: Namespace) -> None:
     if args.debug:
         LOGGER.setLevel(logging.DEBUG)
 
+    # Avoid tokenizers parallelism warning/deadlocks with forked dataloaders.
+    if "TOKENIZERS_PARALLELISM" not in os.environ:
+        os.environ["TOKENIZERS_PARALLELISM"] = "false"
+        LOGGER.debug("TOKENIZERS_PARALLELISM not set; defaulting to false.")
+
     # Check the torch device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if device.type != "cuda" and os.getenv("MPNET_CPU_OVERRIDE", "0") != "1":
