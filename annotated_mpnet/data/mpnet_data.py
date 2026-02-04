@@ -4,8 +4,8 @@ as the data collator
 """
 
 import logging
-from pathlib import Path
 import time
+from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, Optional, Sequence, Sized
 
 LOGGER = logging.getLogger(__name__)

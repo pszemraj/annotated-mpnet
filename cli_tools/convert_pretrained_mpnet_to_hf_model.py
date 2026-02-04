@@ -8,8 +8,8 @@ doing here.
 
 import argparse
 import logging
-from pathlib import Path
 from argparse import Namespace
+from pathlib import Path
 
 from rich.logging import RichHandler
 

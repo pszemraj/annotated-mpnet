@@ -5,8 +5,8 @@ This is the reverse of convert_pretrained_mpnet_to_hf_model.py.
 
 import argparse
 import logging
-from pathlib import Path
 from argparse import Namespace
+from pathlib import Path
 
 from rich.logging import RichHandler
 
