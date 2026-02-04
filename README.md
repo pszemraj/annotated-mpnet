@@ -79,6 +79,7 @@ See `pyproject.toml` for a full list of dependencies.
 
 The primary script for pretraining is `pretrain-mpnet`. You can see all available arguments by running `pretrain-mpnet -h`.
 Training is **step-based** (no user-facing epochs). Datasets are cycled and reshuffled internally as needed, and training runs for `--total-updates` steps.
+Training metrics are logged every 25 update steps by default; adjust with `--logging-steps`.
 
 **1. Using a Hugging Face Dataset (Streaming):**
 This method streams data directly from the Hugging Face Hub. Validation and test sets are created by taking initial samples from the training stream.
