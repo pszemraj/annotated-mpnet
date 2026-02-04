@@ -578,6 +578,16 @@ def _select_architecture_source(args: Namespace) -> str:
 def _select_resume_checkpoint_path(checkpoint_dir: Path, resume_checkpoint: str | None) -> Path:
     """Select the checkpoint path for resuming training.
 
+    Policy (crash-safe default):
+      1) If --resume-checkpoint is provided, use it (must exist, must be a file).
+      2) Else, prefer the most recent interval checkpoint: checkpoint{step}.pt.
+      3) If no interval checkpoints exist, fall back to best_checkpoint.pt.
+      4) Otherwise, error.
+
+    Rationale:
+      - "resume" should mean "continue from the latest state", not "jump back to best".
+      - best_checkpoint.pt remains available explicitly via --resume-checkpoint.
+
     :param Path checkpoint_dir: Base checkpoint directory.
     :param str resume_checkpoint: Explicit checkpoint path or None.
     :return Path: Checkpoint path to resume from.
@@ -585,21 +595,24 @@ def _select_resume_checkpoint_path(checkpoint_dir: Path, resume_checkpoint: str 
     :raises IsADirectoryError: If resume checkpoint points to a directory.
     """
     if resume_checkpoint is None:
-        best_checkpoint_path = checkpoint_dir / "best_checkpoint.pt"
-        if best_checkpoint_path.exists():
-            return best_checkpoint_path
         latest_checkpoint = _find_latest_checkpoint(checkpoint_dir)
         if latest_checkpoint is not None:
-            LOGGER.warning(
-                "Best checkpoint not found at %s; falling back to latest interval checkpoint %s.",
-                best_checkpoint_path,
-                latest_checkpoint,
-            )
             return latest_checkpoint
+
+        best_checkpoint_path = checkpoint_dir / "best_checkpoint.pt"
+        if best_checkpoint_path.exists():
+            LOGGER.warning(
+                "No interval checkpoints found in %s; falling back to best checkpoint %s.",
+                checkpoint_dir,
+                best_checkpoint_path,
+            )
+            return best_checkpoint_path
+
         raise FileNotFoundError(
-            f"No resume checkpoint found. Expected {best_checkpoint_path} or interval checkpoints "
-            f"in {checkpoint_dir}."
+            f"No resume checkpoint found. Expected interval checkpoints (checkpoint{{step}}.pt) "
+            f"or {best_checkpoint_path} in {checkpoint_dir}."
         )
+
     resume_checkpoint_path = _normalize_cli_path(resume_checkpoint)
     if resume_checkpoint_path.is_dir():
         raise IsADirectoryError(
@@ -2475,9 +2488,9 @@ def cli_main() -> None:
     )
     parser.add_argument(
         "--resume-checkpoint",
-        help="Path to the checkpoint to resume from. If not provided, will use best_checkpoint.pt. "
-        "If best_checkpoint.pt is missing, the latest interval checkpoint will be used. "
-        "Legacy checkpoints will only initialize weights.",
+        help="Path to the checkpoint to resume from. If not provided, will use the latest interval "
+        "checkpoint (checkpoint{step}.pt). If no interval checkpoints exist, will fall back to "
+        "best_checkpoint.pt. Legacy checkpoints will only initialize weights.",
         type=str,
         default=None,
     )
@@ -2552,17 +2565,19 @@ def cli_main() -> None:
     elif has_any_file:
         LOGGER.warning("--dataset-name provided; ignoring --train-dir/--valid-file/--test-file.")
 
-    # Check for validity of resumable training arguments
-    if args.resume and args.hf_model_path:
-        LOGGER.warning(
-            "Both --resume and --hf-model-path are specified. "
-            "HuggingFace model will take precedence over resuming from checkpoint."
+    # ---- Resumable training flag validation ----
+    # Enforce XOR: either resume from repo checkpoint OR init from HF weights, never both.
+    if args.hf_model_path is not None and (args.resume or args.resume_checkpoint is not None):
+        parser.error(
+            "Invalid flag combination: --hf-model-path cannot be used with --resume/--resume-checkpoint. "
+            "Choose exactly one initialization source."
         )
 
-    if args.resume_checkpoint and not args.resume:
-        LOGGER.warning(
-            "--resume-checkpoint provided but --resume flag not set. "
-            "Will not resume from checkpoint. Did you mean to add --resume?"
+    # If user provided an explicit checkpoint, require --resume (prevents silent no-op).
+    if args.resume_checkpoint is not None and not args.resume:
+        parser.error(
+            "--resume-checkpoint was provided but --resume is not set. "
+            "Add --resume to resume training, or drop --resume-checkpoint."
         )
 
     LOGGER.info(args)

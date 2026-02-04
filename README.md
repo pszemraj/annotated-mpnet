@@ -201,11 +201,12 @@ Notes:
 
 - If you pass `--resume` with a legacy checkpoint (pre-v0.1.5), the script will **only load weights** and start fresh from step 0.
 - To initialize from a legacy checkpoint, you can also convert it to Hugging Face format and pass `--hf-model-path`.
+- `--hf-model-path` cannot be combined with `--resume` or `--resume-checkpoint`.
 - Checkpoints are loaded with safe `weights_only` by default. Use `--trust-checkpoint` to load legacy or external `.pt` files.
 - Resuming requires a tokenizer with the same vocab size as the checkpoint/HF config. Mismatches will raise an error.
 - Streaming datasets rely on Hugging Face's `shuffle()` per cycle; resume uses cycle + sample offset (no extra dataset-level shuffling).
 - For streaming datasets, deterministic resume requires `--num-workers 0`; with more workers, data order is best-effort via sample skipping.
-- If `--resume` is set without `--resume-checkpoint` and `best_checkpoint.pt` is missing, the latest interval checkpoint is used when available.
+- If `--resume` is set without `--resume-checkpoint`, the latest interval checkpoint is used; if none exist, it falls back to `best_checkpoint.pt`.
 - If validation/test datasets are empty or disabled, validation/test evaluation is skipped and the final test eval falls back to the in-memory model.
 
 ### Exporting Checkpoint to Hugging Face

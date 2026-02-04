@@ -537,7 +537,7 @@ class TestPretrainHelpers(unittest.TestCase):
         self.assertEqual(best_loss, 2.34)
 
     def test_select_resume_checkpoint_path_falls_back_to_latest(self) -> None:
-        """Fallback to latest interval checkpoint when best is missing.
+        """Prefer latest interval checkpoint when no explicit resume checkpoint is provided.
 
         :return None: This test returns nothing.
         """
@@ -725,6 +725,12 @@ class TestPretrainHelpers(unittest.TestCase):
             self.assertEqual(
                 pretrain_mpnet._select_resume_checkpoint_path(checkpoint_dir, None),
                 best_checkpoint,
+            )
+            latest_checkpoint = checkpoint_dir / "checkpoint42.pt"
+            latest_checkpoint.write_bytes(b"")
+            self.assertEqual(
+                pretrain_mpnet._select_resume_checkpoint_path(checkpoint_dir, None),
+                latest_checkpoint,
             )
             explicit_checkpoint = checkpoint_dir / "checkpoint123.pt"
             explicit_checkpoint.write_bytes(b"")
