@@ -71,7 +71,7 @@ pip install -e .
 - `cython`
 - `tensorboard` (for logging, optional)
 
-See `setup.py` for a full list of dependencies.
+See `pyproject.toml` for a full list of dependencies.
 
 ## Usage
 
@@ -261,7 +261,8 @@ annotated-mpnet/
 ├── LICENSE-3RD-PARTY.txt     # Licenses for third-party dependencies
 ├── README.md                 # This file
 ├── CHANGELOG.md              # Record of changes
-└── setup.py                  # Package setup script
+├── pyproject.toml            # Build and packaging configuration
+└── setup.py                  # Cython extension build shim
 ```
 
 ## Changelog

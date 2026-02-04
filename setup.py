@@ -1,104 +1,50 @@
 #!/usr/bin/env python3
 
-"""
-Setup script for the annotated_mpnet library
-"""
-
+from pathlib import Path
 import sys
-from typing import Any, List
 
-from setuptools import Extension, find_packages, setup
+from setuptools import Extension, setup
+from setuptools.command.build_ext import build_ext as _build_ext
 
-# Exit if running Python2
-if sys.version_info < (3,):
-    sys.exit("Python3 required to install and run annotated_mpnet")
-
-# Open up the readme to be loaded into the setup function below
-with open("README.md") as f:
-    readme = f.read()
-
-# Create the necessary Cython extension for our fast perm utils
-
-# Have to include some additional compilation args depending on platfom
 if sys.platform == "darwin":
     extra_compile_args = ["-stdlib=libc++", "-O3"]
 else:
     extra_compile_args = ["-std=c++11", "-O3"]
 
+try:
+    from Cython.Build import cythonize
 
-# We need to build a subclass of Extension to get the numpy extensions to install properly.
-# Otherwise, install will fail in envs that don't have numpy previously installed
-class NumpyExtension(Extension):
-    """Source: https://stackoverflow.com/a/54128391"""
+    USE_CYTHON = True
+except ImportError:
+    cythonize = None
+    USE_CYTHON = False
 
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        """Initialize the numpy-aware extension.
 
-        :param args: Positional arguments for ``Extension``.
-        :param kwargs: Keyword arguments for ``Extension``.
-        """
-        self.__include_dirs = []
-        super().__init__(*args, **kwargs)
-
-    @property
-    def include_dirs(self) -> List[str]:
-        """Return include directories with NumPy include path appended.
-
-        :return list: Include directories.
-        """
+class BuildExt(_build_ext):
+    def finalize_options(self) -> None:
+        super().finalize_options()
         import numpy
 
-        return self.__include_dirs + [numpy.get_include()]
-
-    @include_dirs.setter
-    def include_dirs(self, dirs: List[str]) -> None:
-        """Set include directories.
-
-        :param list dirs: Include directories.
-        :return None: This setter returns nothing.
-        """
-        self.__include_dirs = dirs
+        if self.include_dirs is None:
+            self.include_dirs = []
+        self.include_dirs.append(numpy.get_include())
 
 
-# Now make reference to the specific extension
+source = Path("annotated_mpnet/utils/perm_utils_fast.pyx")
+sources = [str(source if USE_CYTHON else source.with_suffix(".cpp"))]
+
 extensions = [
-    NumpyExtension(
+    Extension(
         "annotated_mpnet.utils.perm_utils_fast",
-        sources=["annotated_mpnet/utils/perm_utils_fast.pyx"],
+        sources=sources,
         language="c++",
         extra_compile_args=extra_compile_args,
-    ),
+    )
 ]
 
-setup(
-    name="annotated_mpnet",
-    version="0.1.6",
-    description="Raw Torch, heavily annotated, pretrainable MPNet",
-    url="https://github.com/pszemraj/annotated-mpnet",
-    long_description=readme,
-    long_description_content_type="text/markdown",
-    setup_requires=[
-        "cython",
-        "numpy",
-        "setuptools>=18.0",
-    ],
-    install_requires=[
-        "cython",
-        "datasets",
-        "numpy",
-        "rich",
-        "tensorboard",
-        "torch>=2.6.0",
-        "transformers",
-        "wandb",
-    ],
-    packages=find_packages(exclude=["tests"]),
-    ext_modules=extensions,
-    test_suite="tests",
-    entry_points={
-        "console_scripts": [
-            "pretrain-mpnet = cli_tools.pretrain_mpnet:cli_main",
-            "convert-to-hf = cli_tools.convert_pretrained_mpnet_to_hf_model:cli_main",
-        ]
-    },
-)
+if USE_CYTHON and cythonize is not None:
+    ext_modules = cythonize(extensions, compiler_directives={"language_level": "3"})
+else:
+    ext_modules = extensions
+
+setup(ext_modules=ext_modules, cmdclass={"build_ext": BuildExt})
