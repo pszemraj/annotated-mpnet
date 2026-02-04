@@ -1142,7 +1142,8 @@ def main(args: Namespace) -> None:
         )
     resume_data_state = _normalize_data_state(resume_data_state, mode_hint=resume_mode)
     legacy_flag = bool(resume_data_state.get("legacy", False))
-    reset_collator_rng = False  # Flag to skip loading RNG states from checkpoint
+    reset_collator_rng = False  # Flag to skip loading collator RNG state from checkpoint
+    skip_checkpoint_rng_restore = False  # Keep mode-mismatch RNG reset from being overwritten.
     if resume_data_state["mode"] == "unknown":
         resume_data_state["mode"] = resume_mode
     elif resume_data_state["mode"] != resume_mode:
@@ -1174,6 +1175,7 @@ def main(args: Namespace) -> None:
 
         # Set flag to skip loading RNG states from checkpoint.
         reset_collator_rng = True
+        skip_checkpoint_rng_restore = True
     resume_cycle_batch_index = int(resume_data_state.get("batch_index", 0) or 0)
     resume_cycle_samples = int(resume_data_state.get("samples_in_cycle", 0) or 0)
     # Legacy checkpoints (no data_state) are not resumable; we only use them to initialize weights.
@@ -1327,7 +1329,7 @@ def main(args: Namespace) -> None:
                 LOGGER.info(f"Best validation loss from checkpoint: {best_loss}")
 
             # Restore RNG state if available
-            if "rng_state" in checkpoint:
+            if "rng_state" in checkpoint and not skip_checkpoint_rng_restore:
                 # RNG restoration is best-effort; warn and continue to avoid aborting training.
                 try:
                     rng_state = checkpoint["rng_state"]
@@ -1354,6 +1356,8 @@ def main(args: Namespace) -> None:
                 except (TypeError, ValueError, AttributeError) as e:
                     LOGGER.warning(f"Could not restore RNG state: {e}")
                     LOGGER.info("Continuing with current RNG state")
+            elif skip_checkpoint_rng_restore:
+                LOGGER.info("Skipped RNG restoration due to mode mismatch")
 
             # Restore collator RNG state for deterministic masking when resuming.
             # Skip if mode mismatch was detected (reset_collator_rng is True).
@@ -1452,6 +1456,43 @@ def main(args: Namespace) -> None:
             model_inputs["segment_labels"] = batch["segment_labels"]
         return model_inputs
 
+    def _to_device(value: Any) -> Any:
+        """Move a value to the training device only if it's a Tensor.
+
+        :param Any value: Value to move if it is a tensor.
+        :return Any: Value moved to device when applicable.
+        """
+        if isinstance(value, torch.Tensor):
+            return value.to(device, non_blocking=(device.type == "cuda"))
+        return value
+
+    def _to_device_dict(values: dict[str, Any]) -> dict[str, Any]:
+        """Move only tensor values in a dict to device.
+
+        :param dict[str, Any] values: Dictionary of values to move.
+        :return dict[str, Any]: Dictionary with tensors moved to device.
+        """
+        return {key: _to_device(val) for key, val in values.items()}
+
+    def _prepare_forward_batch(batch: dict[str, Any]) -> tuple[dict[str, Any], torch.Tensor]:
+        """CPU-select model inputs, then move only those tensors (+ targets) to device.
+
+        Selecting on CPU avoids transferring attention_mask when has_padding is False.
+
+        :param dict[str, Any] batch: CPU batch from the collator.
+        :return tuple[dict[str, Any], torch.Tensor]: (model_inputs, targets) on device.
+        :raises TypeError: If batch["targets"] is not a tensor.
+        """
+        model_inputs_cpu = _select_model_inputs(batch)
+        model_inputs_device = _to_device_dict(model_inputs_cpu)
+        targets_cpu = batch.get("targets")
+        if not isinstance(targets_cpu, torch.Tensor):
+            raise TypeError(
+                f"Expected batch['targets'] to be a torch.Tensor, got {type(targets_cpu)}"
+            )
+        targets_device = targets_cpu.to(device, non_blocking=(device.type == "cuda"))
+        return model_inputs_device, targets_device
+
     def _evaluate_split(
         model_to_eval: torch.nn.Module,
         dataloader: torch.utils.data.DataLoader,
@@ -1482,23 +1523,20 @@ def main(args: Namespace) -> None:
             description=f"{split_name} evaluation",
             total=len(dataloader),
         ):
-            device_batch = {
-                data_type: (t.to(device) if isinstance(t, torch.Tensor) else t)
-                for data_type, t in batch.items()
-            }
-            targets = device_batch["targets"]
+            pred_tokens = batch.get("pred_ntokens")
+            if pred_tokens is None:
+                pred_tokens = _count_pred_tokens(batch["targets"], tokenizer.pad_token_id)
+
+            model_inputs, targets = _prepare_forward_batch(batch)
             with torch.no_grad():
                 with _get_autocast_context(device):
-                    outs = model_to_eval(**_select_model_inputs(device_batch))
+                    outs = model_to_eval(**model_inputs)
                 logits = outs.float().view(-1, outs.size(-1))
                 loss = F.cross_entropy(
                     logits,
                     targets.view(-1),
                     reduction="sum",
                     ignore_index=tokenizer.pad_token_id,
-                )
-                pred_tokens = device_batch.get(
-                    "pred_ntokens", _count_pred_tokens(targets, tokenizer.pad_token_id)
                 )
                 if pred_tokens > 0:
                     normal_loss = loss.item() / pred_tokens / math.log(2)
@@ -1682,27 +1720,24 @@ def main(args: Namespace) -> None:
                 current_cycle = batch_cycle
                 cycle_samples_processed = 0
 
-            device_batch = {
-                data_type: (t.to(device) if isinstance(t, torch.Tensor) else t)
-                for data_type, t in batch.items()
-            }
-
-            batch_size = int(device_batch["input_ids"].shape[0])
+            batch_size = int(batch["input_ids"].shape[0])
             samples_processed += batch_size
             cycle_samples_processed += batch_size
             cycle_batch_index = batch_index
 
-            targets = device_batch["targets"]
-            input_token_count = int(device_batch["ntokens"])
-            pred_token_count = device_batch.get(
-                "pred_ntokens", _count_pred_tokens(targets, tokenizer.pad_token_id)
-            )
+            input_token_count = int(batch["ntokens"])
+            pred_token_count = batch.get("pred_ntokens")
+            if pred_token_count is None:
+                pred_token_count = _count_pred_tokens(batch["targets"], tokenizer.pad_token_id)
+            else:
+                pred_token_count = int(pred_token_count)
 
             accumulation_input_tokens += input_token_count
             accumulation_pred_tokens += pred_token_count
 
+            model_inputs, targets = _prepare_forward_batch(batch)
             with _get_autocast_context(device):
-                outs = model(**_select_model_inputs(device_batch))
+                outs = model(**model_inputs)
 
             # Compute loss in fp32 outside autocast for numerical stability.
             logits = outs.float().view(-1, outs.size(-1))
