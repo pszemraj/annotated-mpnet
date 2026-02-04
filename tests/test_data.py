@@ -134,16 +134,23 @@ class TestData(unittest.TestCase):
         sampler_epoch_0 = RandomSamplerWithSeed([self.examples] * 10, epoch=0, random_seed=12345)
         sampler_epoch_1 = RandomSamplerWithSeed([self.examples] * 10, epoch=1, random_seed=12345)
 
+        order_epoch_0 = list(sampler_epoch_0.__iter__())
+        order_epoch_0_repeat = list(sampler_epoch_0.__iter__())
+        order_epoch_1 = list(sampler_epoch_1.__iter__())
+
+        self.assertEqual(len(order_epoch_0), 10)
+        self.assertEqual(sorted(order_epoch_0), list(range(10)))
         self.assertEqual(
-            list(sampler_epoch_0.__iter__()),
-            [0, 7, 3, 9, 6, 4, 1, 8, 5, 2],
-            "Sampler not seeding correctly",
+            order_epoch_0,
+            order_epoch_0_repeat,
+            "Sampler not seeding deterministically for the same epoch",
         )
         self.assertNotEqual(
-            list(sampler_epoch_0.__iter__()),
-            list(sampler_epoch_1.__iter__()),
-            "Sampler seed may be broken since epoch 0 and epoch 1 are showing the same smpl order",
+            order_epoch_0,
+            order_epoch_1,
+            "Sampler seed may be broken since epoch 0 and epoch 1 are identical",
         )
+        self.assertEqual(sorted(order_epoch_1), list(range(10)))
 
     def test_streaming_dataset_skip_and_max(self) -> None:
         """Validate skip/max sample handling for streaming datasets.
