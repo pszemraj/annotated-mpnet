@@ -1,0 +1,79 @@
+[build-system]
+requires = [
+  "setuptools>=68",
+  "setuptools-scm>=8",
+  "wheel",
+  "Cython>=0.29.35",
+  "numpy>=1.20",
+]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "annotated_mpnet"
+dynamic = ["version"]
+description = "Raw Torch, heavily annotated, pretrainable MPNet"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.9"
+authors = [{ name = "annotated-mpnet contributors" }]
+dependencies = [
+  "cython",
+  "datasets",
+  "numpy",
+  "rich",
+  "tensorboard",
+  "torch>=2.6.0",
+  "transformers",
+  "wandb",
+]
+
+[project.urls]
+Homepage = "https://github.com/pszemraj/annotated-mpnet"
+Source = "https://github.com/pszemraj/annotated-mpnet"
+Issues = "https://github.com/pszemraj/annotated-mpnet/issues"
+Changelog = "https://github.com/pszemraj/annotated-mpnet/blob/main/CHANGELOG.md"
+
+[project.scripts]
+pretrain-mpnet = "cli_tools.pretrain_mpnet:cli_main"
+convert-to-hf = "cli_tools.convert_pretrained_mpnet_to_hf_model:cli_main"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.cmdclass]
+build_ext = "annotated_mpnet.utils._build_helpers.BuildExt"
+
+[[tool.setuptools.ext-modules]]
+name = "annotated_mpnet.utils.perm_utils_fast"
+sources = ["annotated_mpnet/utils/perm_utils_fast.pyx"]
+language = "c++"
+extra-compile-args = ["-O3"]
+
+[tool.setuptools.packages.find]
+exclude = ["tests", "tests.*"]
+
+[tool.setuptools_scm]
+tag_regex = "^v(?P<version>.*)$"
+fallback_version = "0.1.6"
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+exclude = ["*/__init__.py"]
+select = ["E", "F"]
+ignore = ["E402", "F401", "E501"]
+
+[tool.ruff.format]
+quote-style = "double"
+docstring-code-format = true
+
+[tool.isort]
+profile = "black"
+line_length = 88
+skip_glob = ["*/__init__.py"]
+multi_line_output = 3
+include_trailing_comma = true
+force_grid_wrap = 0
+use_parentheses = true
+ensure_newline_before_comments = true

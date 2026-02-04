@@ -1764,6 +1764,7 @@ def main(args: Namespace) -> None:
         cycle_samples_processed = resume_cycle_samples
         cycle_batch_index = resume_cycle_batch_index
         last_log_time = time.perf_counter()
+        logging_input_tokens = 0
 
         while steps < args.total_updates:
             batch, batch_cycle, batch_index = next(train_iter)
@@ -1844,30 +1845,34 @@ def main(args: Namespace) -> None:
                     meters["train_acc"].update(normal_acc, accumulation_pred_tokens)
                     meters["train_loss"].update(normal_loss, accumulation_pred_tokens)
                 meters["token_throughput"].update(accumulation_input_tokens)
-                now = time.perf_counter()
-                elapsed = max(now - last_log_time, 1e-8)
-                tokens_per_sec = accumulation_input_tokens / elapsed
-                last_log_time = now
+                logging_input_tokens += accumulation_input_tokens
+                should_log = step_id % args.logging_steps == 0 or step_id == args.total_updates
+                if should_log:
+                    now = time.perf_counter()
+                    elapsed = max(now - last_log_time, 1e-8)
+                    tokens_per_sec = logging_input_tokens / elapsed
+                    last_log_time = now
+                    logging_input_tokens = 0
 
-                logging_dict = {
-                    "acc": meters["train_acc"].avg,
-                    "loss": normal_loss,
-                    "sbal": meters["train_loss"].avg,
-                    "lr": lr,
-                    "gnorm": gnorm,
-                    "ttp": meters["token_throughput"].sum,
-                    "tpb": meters["token_throughput"].avg,
-                    "tts": tokens_per_sec,
-                }
-                logging_dict = _format_logging_dict(logging_dict)
+                    logging_dict = {
+                        "acc": meters["train_acc"].avg,
+                        "loss": normal_loss,
+                        "sbal": meters["train_loss"].avg,
+                        "lr": lr,
+                        "gnorm": gnorm,
+                        "ttp": meters["token_throughput"].sum,
+                        "tpb": meters["token_throughput"].avg,
+                        "tts": tokens_per_sec,
+                    }
+                    logging_dict = _format_logging_dict(logging_dict)
 
-                if args.tensorboard_log_dir is not None:
-                    write_to_tensorboard(writers["train"], logging_dict, step_id)
-                else:
-                    LOGGER.info(logging_dict)
+                    if args.tensorboard_log_dir is not None:
+                        write_to_tensorboard(writers["train"], logging_dict, step_id)
+                    else:
+                        LOGGER.info(logging_dict)
 
-                if args.wandb:
-                    log_to_wandb(logging_dict, step_id, "train")
+                    if args.wandb:
+                        log_to_wandb(logging_dict, step_id, "train")
 
                 accumulation_acc = torch.zeros((), device=device)
                 accumulation_loss = torch.zeros((), device=device)
@@ -2454,6 +2459,14 @@ def cli_main() -> None:
         type=str,
     )
     parser.add_argument(
+        "--logging-steps",
+        "--logging_steps",
+        dest="logging_steps",
+        help="How often to log training stats (in update steps).",
+        default=25,
+        type=int,
+    )
+    parser.add_argument(
         "--debug",
         help="Whether or not to output debug logs",
         action="store_true",
@@ -2553,6 +2566,8 @@ def cli_main() -> None:
 
     if args.eval_samples < 0:
         parser.error("--eval-samples must be >= 0.")
+    if args.logging_steps <= 0:
+        parser.error("--logging-steps must be >= 1.")
 
     has_any_file = any([args.train_dir, args.valid_file, args.test_file])
     has_file_data = all([args.train_dir, args.valid_file, args.test_file])
