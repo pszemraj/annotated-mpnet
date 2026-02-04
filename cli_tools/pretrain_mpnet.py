@@ -1747,7 +1747,7 @@ def main(args: Namespace) -> None:
         current_cycle = resume_data_state["cycle"]
         cycle_samples_processed = resume_cycle_samples
         cycle_batch_index = resume_cycle_batch_index
-        last_log_time = time.time()
+        last_log_time = time.perf_counter()
 
         while steps < args.total_updates:
             batch, batch_cycle, batch_index = next(train_iter)
@@ -1828,7 +1828,7 @@ def main(args: Namespace) -> None:
                     meters["train_acc"].update(normal_acc, accumulation_pred_tokens)
                     meters["train_loss"].update(normal_loss, accumulation_pred_tokens)
                 meters["token_throughput"].update(accumulation_input_tokens)
-                now = time.time()
+                now = time.perf_counter()
                 elapsed = max(now - last_log_time, 1e-8)
                 tokens_per_sec = accumulation_input_tokens / elapsed
                 last_log_time = now
