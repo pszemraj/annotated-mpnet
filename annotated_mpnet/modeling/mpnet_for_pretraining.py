@@ -17,6 +17,7 @@ from torch.utils.checkpoint import checkpoint
 from transformers import PreTrainedTokenizer
 
 from annotated_mpnet.transformer_modules import LayerNorm, SentenceEncoder
+from annotated_mpnet.utils.tensor_ops import maybe
 from annotated_mpnet.utils import utils
 
 
@@ -48,6 +49,19 @@ def init_final_params(module: nn.Module) -> None:
         proj_weight = getattr(module, proj_name, None)
         if proj_weight is not None:
             proj_weight.data.normal_(mean=0.0, std=0.02)
+
+
+@maybe
+def cast_bias(bias: torch.Tensor, ref: torch.Tensor) -> torch.Tensor:
+    """Cast attention bias to match a reference tensor.
+
+    :param torch.Tensor bias: Bias tensor to cast.
+    :param torch.Tensor ref: Reference tensor for dtype/device.
+    :return torch.Tensor: Casted bias tensor.
+    """
+    if bias.device != ref.device or bias.dtype != ref.dtype:
+        return bias.to(device=ref.device, dtype=ref.dtype)
+    return bias
 
 
 class MPNetForPretraining(nn.Module):
@@ -176,21 +190,8 @@ class MPNetForPretraining(nn.Module):
         query_position_bias = content_position_bias[:, -pred_size:].contiguous()
 
         # Cast position bias once to match the attention dtype/device.
-        def _cast_bias(bias: Optional[torch.Tensor], ref: torch.Tensor) -> Optional[torch.Tensor]:
-            """Cast attention bias to match a reference tensor.
-
-            :param Optional[torch.Tensor] bias: Bias tensor to cast.
-            :param torch.Tensor ref: Reference tensor for dtype/device.
-            :return Optional[torch.Tensor]: Casted bias tensor.
-            """
-            if bias is None:
-                return None
-            if bias.device != ref.device or bias.dtype != ref.dtype:
-                return bias.to(device=ref.device, dtype=ref.dtype)
-            return bias
-
-        content_position_bias = _cast_bias(content_position_bias, emb)
-        query_position_bias = _cast_bias(query_position_bias, emb)
+        content_position_bias = cast_bias(content_position_bias, emb)
+        query_position_bias = cast_bias(query_position_bias, emb)
 
         # Get the sz of the inital src_length without the tokens to be predicted
         sz = c.size(0) - pred_size

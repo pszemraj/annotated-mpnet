@@ -18,6 +18,7 @@ from torch.utils.data import DataLoader, Sampler
 from transformers import PreTrainedTokenizer
 
 from annotated_mpnet.utils import utils
+from annotated_mpnet.utils.tensor_ops import or_masks
 
 try:
     from annotated_mpnet.utils.perm_utils_fast import make_span_perm
@@ -515,11 +516,13 @@ class DataCollatorForMaskedPermutedLanguageModeling:
         ntokens = inline_tokens[inline_tokens != self.tokenizer.pad_token_id].numel()
 
         # Build masks to avoid predicting or corrupting padding/special tokens.
-        special_mask = torch.zeros_like(src_tokens, dtype=torch.bool)
-        for special_id in self._special_ids:
-            special_mask |= src_tokens.eq(special_id)
+        special_masks = [src_tokens.eq(special_id) for special_id in self._special_ids]
+        special_mask = or_masks(special_masks)
         non_pad_mask = attention_mask.to(torch.bool)
-        predictable_mask = non_pad_mask & ~special_mask
+        if special_mask is not None:
+            predictable_mask = non_pad_mask & ~special_mask
+        else:
+            predictable_mask = non_pad_mask
 
         predictable_counts = predictable_mask.sum(dim=1)
         if (predictable_counts == 0).any():

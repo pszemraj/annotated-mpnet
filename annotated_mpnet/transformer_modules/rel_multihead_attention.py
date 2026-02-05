@@ -11,6 +11,7 @@ LOGGER = logging.getLogger(__name__)
 import torch
 import torch.nn.functional as F
 from torch import nn
+from einops import rearrange
 
 from annotated_mpnet.utils import utils
 
@@ -218,11 +219,11 @@ class RelativeMultiHeadAttention(nn.Module):
                 )
 
         # Do the matrix manipulation for the energy calculation, namely a transpose
-        q = q.contiguous().view(tgt_len, bsz * self.num_heads, self.head_dim).transpose(0, 1)
+        q = rearrange(q, "t b (h d) -> (b h) t d", h=self.num_heads)
         if k is not None:
-            k = k.contiguous().view(-1, bsz * self.num_heads, self.head_dim).transpose(0, 1)
+            k = rearrange(k, "t b (h d) -> (b h) t d", h=self.num_heads)
         if v is not None:
-            v = v.contiguous().view(-1, bsz * self.num_heads, self.head_dim).transpose(0, 1)
+            v = rearrange(v, "t b (h d) -> (b h) t d", h=self.num_heads)
 
         # Not entirely sure what this does, but leaving it in here in case MPNet uses it
         if saved_state is not None:
@@ -332,9 +333,9 @@ class RelativeMultiHeadAttention(nn.Module):
             and v is not None
         )
         if use_sdpa:
-            q_sdpa = q.contiguous().view(bsz, self.num_heads, tgt_len, self.head_dim)
-            k_sdpa = k.contiguous().view(bsz, self.num_heads, src_len, self.head_dim)
-            v_sdpa = v.contiguous().view(bsz, self.num_heads, src_len, self.head_dim)
+            q_sdpa = rearrange(q, "(b h) t d -> b h t d", b=bsz, h=self.num_heads)
+            k_sdpa = rearrange(k, "(b h) s d -> b h s d", b=bsz, h=self.num_heads)
+            v_sdpa = rearrange(v, "(b h) s d -> b h s d", b=bsz, h=self.num_heads)
 
             attn_bias = None
             attn_bias_from_positions = False
@@ -399,8 +400,7 @@ class RelativeMultiHeadAttention(nn.Module):
                 dropout_p=self.dropout if self.training else 0.0,
             )
             assert list(attn.size()) == [bsz, self.num_heads, tgt_len, self.head_dim]
-            attn = attn.transpose(1, 2).contiguous().view(bsz, tgt_len, embed_dim)
-            attn = attn.transpose(0, 1)
+            attn = rearrange(attn, "b h t d -> t b (h d)")
             attn = self.out_proj(attn)
             return attn, None
 
@@ -459,12 +459,7 @@ class RelativeMultiHeadAttention(nn.Module):
         attn = torch.bmm(attn_weights, v)
         assert list(attn.size()) == [bsz * self.num_heads, tgt_len, self.head_dim]
 
-        if self.onnx_trace and attn.size(1) == 1:
-            # when ONNX tracing a single decoder step (sequence length == 1)
-            # the transpose is a no-op copy before view, thus unnecessary
-            attn = attn.contiguous().view(tgt_len, bsz, embed_dim)
-        else:
-            attn = attn.transpose(0, 1).contiguous().view(tgt_len, bsz, embed_dim)
+        attn = rearrange(attn, "(b h) t d -> t b (h d)", b=bsz, h=self.num_heads)
 
         # Run the final attention number through the FC linear layer
         attn = self.out_proj(attn)
