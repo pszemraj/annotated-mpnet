@@ -15,6 +15,7 @@ import torch.nn.functional as F
 from torch import nn
 from torch.utils.checkpoint import checkpoint
 from transformers import PreTrainedTokenizer
+from einops import rearrange
 
 from annotated_mpnet.transformer_modules import LayerNorm, SentenceEncoder
 from annotated_mpnet.utils.tensor_ops import maybe, normalize_position_bias
@@ -489,7 +490,7 @@ def two_stream_self_attention(
     c, q = query
 
     # Get dimensions
-    bsz, embed_dim = key.size(1), key.size(2)
+    bsz = key.size(1)
 
     # Define a few in-scope helper functions that we will be reusing a bunch
     def transpose_fn(x: torch.Tensor) -> torch.Tensor:
@@ -498,7 +499,7 @@ def two_stream_self_attention(
         :param torch.Tensor x: Input tensor.
         :return torch.Tensor: Transposed tensor.
         """
-        return x.contiguous().view(-1, bsz * self.num_heads, self.head_dim).transpose(0, 1)
+        return rearrange(x, "t b (h d) -> (b h) t d", h=self.num_heads)
 
     def fill_mask(attn_weights: torch.Tensor, attn_mask: torch.Tensor) -> torch.Tensor:
         """Apply attention mask to attention weights.
@@ -622,9 +623,9 @@ def two_stream_self_attention(
         if use_sdpa:
             tgt_len = _q.size(1)
             src_len = k.size(1)
-            q_sdpa = _q.contiguous().view(bsz, self.num_heads, tgt_len, self.head_dim)
-            k_sdpa = k.contiguous().view(bsz, self.num_heads, src_len, self.head_dim)
-            v_sdpa = v.contiguous().view(bsz, self.num_heads, src_len, self.head_dim)
+            q_sdpa = rearrange(_q, "(b h) t d -> b h t d", b=bsz, h=self.num_heads)
+            k_sdpa = rearrange(k, "(b h) s d -> b h s d", b=bsz, h=self.num_heads)
+            v_sdpa = rearrange(v, "(b h) s d -> b h s d", b=bsz, h=self.num_heads)
             attn_bias = build_attn_bias(
                 mask,
                 bias,
@@ -695,10 +696,9 @@ def two_stream_self_attention(
 
         # Finally, transpose back to the embed dimension and return
         if use_sdpa:
-            attn = attn.transpose(1, 2).contiguous().view(bsz, tgt_len, embed_dim)
-            attn = attn.transpose(0, 1)
+            attn = rearrange(attn, "b h t d -> t b (h d)")
         else:
-            attn = attn.transpose(0, 1).contiguous().view(-1, bsz, embed_dim)
+            attn = rearrange(attn, "(b h) t d -> t b (h d)", b=bsz, h=self.num_heads)
 
         return self.out_proj(attn)
 
