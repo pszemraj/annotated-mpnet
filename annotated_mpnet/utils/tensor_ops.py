@@ -118,6 +118,46 @@ def pad_right_at_dim(
     return torch.cat((tensor, pad_tensor), dim=dim)
 
 
+def slice_at_dim(tensor: torch.Tensor, slc: slice, dim: int = -1) -> torch.Tensor:
+    """Slice a tensor along a specific dimension.
+
+    :param torch.Tensor tensor: Input tensor to slice.
+    :param slice slc: Slice object to apply.
+    :param int dim: Dimension to slice, defaults to -1.
+    :return torch.Tensor: Sliced tensor.
+    """
+    dim = dim if dim >= 0 else tensor.ndim + dim
+    full_slice = [slice(None)] * tensor.ndim
+    full_slice[dim] = slc
+    return tensor[tuple(full_slice)]
+
+
+def slice_left_at_dim(tensor: torch.Tensor, length: int, dim: int = -1) -> torch.Tensor:
+    """Slice the left portion of a tensor along a dimension.
+
+    :param torch.Tensor tensor: Input tensor to slice.
+    :param int length: Length of the left slice.
+    :param int dim: Dimension to slice, defaults to -1.
+    :return torch.Tensor: Left slice of the tensor.
+    """
+    if length == 0:
+        return slice_at_dim(tensor, slice(0, 0), dim=dim)
+    return slice_at_dim(tensor, slice(None, length), dim=dim)
+
+
+def slice_right_at_dim(tensor: torch.Tensor, length: int, dim: int = -1) -> torch.Tensor:
+    """Slice the right portion of a tensor along a dimension.
+
+    :param torch.Tensor tensor: Input tensor to slice.
+    :param int length: Length of the right slice.
+    :param int dim: Dimension to slice, defaults to -1.
+    :return torch.Tensor: Right slice of the tensor.
+    """
+    if length == 0:
+        return slice_at_dim(tensor, slice(0, 0), dim=dim)
+    return slice_at_dim(tensor, slice(-length, None), dim=dim)
+
+
 def compact(values: Iterable[Optional[T]]) -> list[T]:
     """Drop None entries from an iterable.
 

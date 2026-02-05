@@ -18,7 +18,13 @@ from transformers import PreTrainedTokenizer
 from einops import rearrange
 
 from annotated_mpnet.transformer_modules import LayerNorm, SentenceEncoder
-from annotated_mpnet.utils.tensor_ops import maybe, normalize_position_bias, pad_left_ndim_to
+from annotated_mpnet.utils.tensor_ops import (
+    maybe,
+    normalize_position_bias,
+    pad_left_ndim_to,
+    slice_left_at_dim,
+    slice_right_at_dim,
+)
 from annotated_mpnet.utils import utils
 
 
@@ -185,10 +191,13 @@ class MPNetForPretraining(nn.Module):
 
         # Get the content and query position biases
         # Use the shared encoder helper to keep relative position bucketing in one place.
+        content_positions = slice_left_at_dim(positions, positions.size(1) - pred_size, dim=1)
         content_position_bias = self.sentence_encoder.compute_position_bias_from_positions(
-            positions[:, :-pred_size]
+            content_positions
         )
-        query_position_bias = content_position_bias[:, -pred_size:].contiguous()
+        query_position_bias = slice_right_at_dim(
+            content_position_bias, pred_size, dim=1
+        ).contiguous()
 
         # Cast position bias once to match the attention dtype/device.
         content_position_bias = cast_bias(content_position_bias, emb)
