@@ -1,5 +1,8 @@
 """
 Utility helpers for tensor ops and optional handling.
+
+largely inspired by/adapted from:
+https://github.com/lucidrains/torch-einops-utils
 """
 
 from __future__ import annotations
