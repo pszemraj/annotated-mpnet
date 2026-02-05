@@ -1,12 +1,13 @@
 # Annotated MPNet
 
-`annotated-mpnet` provides a lightweight, heavily annotated, and standalone PyTorch implementation for pretraining MPNet models. This project aims to demystify the MPNet pretraining process, which was originally part of the larger `fairseq` codebase, making it more accessible for research and custom pretraining.
+`annotated-mpnet` provides a lightweight, heavily annotated, and PyTorch/einops implementation for pretraining MPNet models. This project aims to demystify the MPNet pretraining process, originally part of the larger `fairseq` codebase, making it more accessible for research and custom pretraining.
 
 ---
 
 - [About the Project](#about-the-project)
 - [Key Features](#key-features)
 - [Installation](#installation)
+  - [Requirements](#requirements)
 - [Quick Start](#quick-start)
 - [Documentation](#documentation)
 - [Project Structure](#project-structure)
@@ -22,7 +23,7 @@
 > [!NOTE]
 > **This repo** is a fork/update of the [original by yext](https://github.com/yext/annotated-mpnet).
 
-MPNet (Masked and Permuted Pre-training for Language Understanding) is a powerful pretraining method. However, its original pretraining code is embedded within the `fairseq` library, which can be complex to navigate and adapt. `annotated-mpnet` addresses this by:
+MPNet ([Masked and Permuted Pre-training for Language Understanding](https://arxiv.org/abs/2004.09297)) is a powerful pretraining method. However, its [original pretraining code](https://github.com/microsoft/MPNet) is embedded within the `fairseq` library, which can be complex to navigate and adapt. `annotated-mpnet` addresses this by:
 
 - Providing a clean, raw PyTorch implementation of MPNet pretraining.
 - Offering extensive annotations and comments throughout the codebase to improve understanding.
@@ -59,6 +60,7 @@ pip install -e .
 
 - Python 3.x
 - PyTorch (version >= 2.6.0, CUDA is required for training)
+- `einops` (version >= 0.7.0) for explicit tensor shape transforms
 - CUDA GPU with BF16 support (Ampere+). As of 2026, legacy GPUs without BF16 are not supported.
 - HuggingFace `transformers`, `datasets`
 - `wandb` (for Weights & Biases logging, optional)

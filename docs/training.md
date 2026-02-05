@@ -2,6 +2,17 @@
 
 This document covers pretraining MPNet models using `annotated-mpnet`.
 
+---
+
+- [Pretraining MPNet](#pretraining-mpnet)
+  - [Using a HuggingFace Dataset (Streaming)](#using-a-huggingface-dataset-streaming)
+  - [Using Local Text Files](#using-local-text-files)
+- [Key Pretraining Arguments](#key-pretraining-arguments)
+- [Resuming Training](#resuming-training)
+- [Exporting Checkpoint to HuggingFace](#exporting-checkpoint-to-huggingface)
+
+---
+
 ## Pretraining MPNet
 
 The primary script for pretraining is `pretrain-mpnet`. You can see all available arguments by running `pretrain-mpnet -h`.
@@ -9,6 +20,9 @@ The primary script for pretraining is `pretrain-mpnet`. You can see all availabl
 Training is **step-based** (no user-facing epochs). Datasets are cycled and reshuffled internally as needed, and training runs for `--total-updates` steps. Training metrics are logged every 25 update steps by default; adjust with `--logging-steps`.
 
 ### Using a HuggingFace Dataset (Streaming)
+
+> [!NOTE]
+> The default streaming dataset is [fineweb-edu](https://huggingface.co/datasets/HuggingFaceFW/fineweb-edu)
 
 This method streams data directly from the HuggingFace Hub. Validation and test sets are created by taking initial samples from the training stream.
 

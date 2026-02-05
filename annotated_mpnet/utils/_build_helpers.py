@@ -11,6 +11,7 @@ class BuildExt(_build_ext):
     """Custom build_ext to inject NumPy headers and platform flags."""
 
     def finalize_options(self) -> None:
+        """Finalize build options and add NumPy include dirs."""
         super().finalize_options()
         import numpy
 
@@ -19,6 +20,7 @@ class BuildExt(_build_ext):
         self.include_dirs.append(numpy.get_include())
 
     def build_extensions(self) -> None:
+        """Build extensions with platform-specific compile flags."""
         if sys.platform == "darwin":
             extra_compile_args = ["-stdlib=libc++", "-O3"]
         else:

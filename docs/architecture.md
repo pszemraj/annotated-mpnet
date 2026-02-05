@@ -82,6 +82,7 @@ graph LR
 **Components:**
 
 - **RelativeMultiHeadAttention**: A multi-head self-attention mechanism that incorporates relative positional information, crucial for MPNet. Defined in `annotated_mpnet/transformer_modules/rel_multihead_attention.py`.
+- **Explicit tensor layouts**: Shape transforms in attention and encoder paths use `einops.rearrange` to document and validate expected layouts (e.g., `(t b (h d)) -> (b h) t d`).
 - Position-wise Feed-Forward Networks (FFN).
 - Layer normalization.
 

@@ -15,8 +15,16 @@ import torch.nn.functional as F
 from torch import nn
 from torch.utils.checkpoint import checkpoint
 from transformers import PreTrainedTokenizer
+from einops import rearrange
 
 from annotated_mpnet.transformer_modules import LayerNorm, SentenceEncoder
+from annotated_mpnet.utils.tensor_ops import (
+    maybe,
+    normalize_position_bias,
+    pad_left_ndim_to,
+    slice_left_at_dim,
+    slice_right_at_dim,
+)
 from annotated_mpnet.utils import utils
 
 
@@ -48,6 +56,19 @@ def init_final_params(module: nn.Module) -> None:
         proj_weight = getattr(module, proj_name, None)
         if proj_weight is not None:
             proj_weight.data.normal_(mean=0.0, std=0.02)
+
+
+@maybe
+def cast_bias(bias: torch.Tensor, ref: torch.Tensor) -> torch.Tensor:
+    """Cast attention bias to match a reference tensor.
+
+    :param torch.Tensor bias: Bias tensor to cast.
+    :param torch.Tensor ref: Reference tensor for dtype/device.
+    :return torch.Tensor: Casted bias tensor.
+    """
+    if bias.device != ref.device or bias.dtype != ref.dtype:
+        return bias.to(device=ref.device, dtype=ref.dtype)
+    return bias
 
 
 class MPNetForPretraining(nn.Module):
@@ -170,27 +191,17 @@ class MPNetForPretraining(nn.Module):
 
         # Get the content and query position biases
         # Use the shared encoder helper to keep relative position bucketing in one place.
+        content_positions = slice_left_at_dim(positions, positions.size(1) - pred_size, dim=1)
         content_position_bias = self.sentence_encoder.compute_position_bias_from_positions(
-            positions[:, :-pred_size]
+            content_positions
         )
-        query_position_bias = content_position_bias[:, -pred_size:].contiguous()
+        query_position_bias = slice_right_at_dim(
+            content_position_bias, pred_size, dim=1
+        ).contiguous()
 
         # Cast position bias once to match the attention dtype/device.
-        def _cast_bias(bias: Optional[torch.Tensor], ref: torch.Tensor) -> Optional[torch.Tensor]:
-            """Cast attention bias to match a reference tensor.
-
-            :param Optional[torch.Tensor] bias: Bias tensor to cast.
-            :param torch.Tensor ref: Reference tensor for dtype/device.
-            :return Optional[torch.Tensor]: Casted bias tensor.
-            """
-            if bias is None:
-                return None
-            if bias.device != ref.device or bias.dtype != ref.dtype:
-                return bias.to(device=ref.device, dtype=ref.dtype)
-            return bias
-
-        content_position_bias = _cast_bias(content_position_bias, emb)
-        query_position_bias = _cast_bias(query_position_bias, emb)
+        content_position_bias = cast_bias(content_position_bias, emb)
+        query_position_bias = cast_bias(query_position_bias, emb)
 
         # Get the sz of the inital src_length without the tokens to be predicted
         sz = c.size(0) - pred_size
@@ -488,7 +499,7 @@ def two_stream_self_attention(
     c, q = query
 
     # Get dimensions
-    bsz, embed_dim = key.size(1), key.size(2)
+    bsz = key.size(1)
 
     # Define a few in-scope helper functions that we will be reusing a bunch
     def transpose_fn(x: torch.Tensor) -> torch.Tensor:
@@ -497,7 +508,20 @@ def two_stream_self_attention(
         :param torch.Tensor x: Input tensor.
         :return torch.Tensor: Transposed tensor.
         """
-        return x.contiguous().view(-1, bsz * self.num_heads, self.head_dim).transpose(0, 1)
+        return rearrange(x, "t b (h d) -> (b h) t d", h=self.num_heads)
+
+    def expand_attn_mask(attn_mask: torch.Tensor) -> torch.Tensor:
+        """Expand attention mask to (bsz*heads, tgt, src) for non-SDPA attention.
+
+        :param torch.Tensor attn_mask: Attention mask (tgt x src or bsz x tgt x src).
+        :return torch.Tensor: Expanded attention mask for attention weights.
+        """
+        mask = pad_left_ndim_to(attn_mask, 3)
+        if mask.size(0) == 1 and bsz > 1:
+            mask = mask.expand(bsz, -1, -1)
+        tgt_len, src_len = mask.size(-2), mask.size(-1)
+        mask = mask.unsqueeze(1).expand(bsz, self.num_heads, tgt_len, src_len)
+        return mask.reshape(bsz * self.num_heads, tgt_len, src_len)
 
     def fill_mask(attn_weights: torch.Tensor, attn_mask: torch.Tensor) -> torch.Tensor:
         """Apply attention mask to attention weights.
@@ -506,13 +530,7 @@ def two_stream_self_attention(
         :param torch.Tensor attn_mask: Mask tensor (tgt x src or bsz x tgt x src).
         :return torch.Tensor: Masked attention weights.
         """
-        if attn_mask.dim() == 2:
-            mask = attn_mask.unsqueeze(0)
-        else:
-            mask = attn_mask.unsqueeze(1).expand(
-                bsz, self.num_heads, attn_mask.size(1), attn_mask.size(2)
-            )
-            mask = mask.reshape(bsz * self.num_heads, attn_mask.size(1), attn_mask.size(2))
+        mask = expand_attn_mask(attn_mask)
         return attn_weights.masked_fill(mask, float("-inf"))
 
     def build_attn_bias(
@@ -538,29 +556,33 @@ def two_stream_self_attention(
         attn_bias = None
         attn_bias_from_positions = False
 
-        if bias is not None:
-            if bias.device != device or bias.dtype != dtype:
-                bias = bias.to(device=device, dtype=dtype)
-            if bias.dim() == 3:
-                if bias.size(0) == self.num_heads:
-                    bias = bias.unsqueeze(0)
-                elif bias.size(0) == bsz * self.num_heads:
-                    bias = bias.view(bsz, self.num_heads, target_len, source_len)
-                else:
-                    raise ValueError(
-                        "positions_bias has unexpected shape; expected heads or bsz*heads in dim 0."
-                    )
-            elif bias.dim() == 4:
-                if bias.size(1) != self.num_heads or bias.size(0) not in (1, bsz):
-                    raise ValueError(
-                        "positions_bias has unexpected shape; expected (1|bsz, heads, tgt, src)."
-                    )
+        def normalize_attn_mask(mask: torch.Tensor) -> torch.Tensor:
+            """Normalize attention mask to (batch, 1, tgt, src) for SDPA.
+
+            :param torch.Tensor mask: Attention mask tensor to normalize.
+            :return torch.Tensor: Normalized attention mask.
+            """
+            if mask.dtype == torch.bool:
+                mask = mask.to(device=device)
             else:
-                raise ValueError("positions_bias must be 3D or 4D for attention biasing.")
-            if bias.size(0) == 1 and (
-                padding_mask is not None or (attn_mask is not None and attn_mask.dim() == 3)
-            ):
-                bias = bias.expand(bsz, -1, -1, -1).contiguous()
+                mask = mask.to(device=device, dtype=dtype)
+            mask = pad_left_ndim_to(mask, 3)
+            return mask.unsqueeze(1)
+
+        if bias is not None:
+            expand_batch = padding_mask is not None or (
+                attn_mask is not None and attn_mask.dim() == 3
+            )
+            bias = normalize_position_bias(
+                bias,
+                bsz,
+                self.num_heads,
+                target_len,
+                source_len,
+                device=device,
+                dtype=dtype,
+                expand_batch=expand_batch,
+            )
             attn_bias = bias
             attn_bias_from_positions = True
 
@@ -572,21 +594,13 @@ def two_stream_self_attention(
 
         if attn_mask is not None:
             if attn_mask.dtype == torch.bool:
-                mask = attn_mask
-                if mask.dim() == 2:
-                    mask = mask.unsqueeze(0).unsqueeze(0)
-                else:
-                    mask = mask.unsqueeze(1)
+                mask = normalize_attn_mask(attn_mask)
                 if attn_bias_from_positions:
                     attn_bias = attn_bias.clone()
                     attn_bias_from_positions = False
                 attn_bias.masked_fill_(mask, float("-inf"))
             else:
-                mask = attn_mask.to(device=device, dtype=dtype)
-                if mask.dim() == 2:
-                    mask = mask.unsqueeze(0).unsqueeze(0)
-                else:
-                    mask = mask.unsqueeze(1)
+                mask = normalize_attn_mask(attn_mask)
                 if attn_bias_from_positions:
                     attn_bias = attn_bias + mask
                     attn_bias_from_positions = False
@@ -630,9 +644,9 @@ def two_stream_self_attention(
         if use_sdpa:
             tgt_len = _q.size(1)
             src_len = k.size(1)
-            q_sdpa = _q.contiguous().view(bsz, self.num_heads, tgt_len, self.head_dim)
-            k_sdpa = k.contiguous().view(bsz, self.num_heads, src_len, self.head_dim)
-            v_sdpa = v.contiguous().view(bsz, self.num_heads, src_len, self.head_dim)
+            q_sdpa = rearrange(_q, "(b h) t d -> b h t d", b=bsz, h=self.num_heads)
+            k_sdpa = rearrange(k, "(b h) s d -> b h s d", b=bsz, h=self.num_heads)
+            v_sdpa = rearrange(v, "(b h) s d -> b h s d", b=bsz, h=self.num_heads)
             attn_bias = build_attn_bias(
                 mask,
                 bias,
@@ -655,22 +669,21 @@ def two_stream_self_attention(
 
             # Process bias if applicable
             if bias is not None:
-                if bias.device != attn_weights.device or bias.dtype != attn_weights.dtype:
-                    bias = bias.to(device=attn_weights.device, dtype=attn_weights.dtype)
-                if bias.dim() == 3 and bias.size(0) == self.num_heads:
-                    tgt_len = attn_weights.size(1)
-                    src_len = attn_weights.size(2)
-                    attn_weights = attn_weights.view(bsz, self.num_heads, tgt_len, src_len)
-                    attn_weights = attn_weights + bias.unsqueeze(0)
-                    attn_weights = attn_weights.view(bsz * self.num_heads, tgt_len, src_len)
-                elif bias.dim() == 4:
-                    tgt_len = attn_weights.size(1)
-                    src_len = attn_weights.size(2)
-                    attn_weights = attn_weights.view(bsz, self.num_heads, tgt_len, src_len)
-                    attn_weights = attn_weights + bias
-                    attn_weights = attn_weights.view(bsz * self.num_heads, tgt_len, src_len)
-                else:
-                    attn_weights += bias
+                tgt_len = attn_weights.size(1)
+                src_len = attn_weights.size(2)
+                bias = normalize_position_bias(
+                    bias,
+                    bsz,
+                    self.num_heads,
+                    tgt_len,
+                    src_len,
+                    device=attn_weights.device,
+                    dtype=attn_weights.dtype,
+                    expand_batch=False,
+                )
+                attn_weights = attn_weights.view(bsz, self.num_heads, tgt_len, src_len)
+                attn_weights = attn_weights + bias
+                attn_weights = attn_weights.view(bsz * self.num_heads, tgt_len, src_len)
 
             # Process attention masking
             if mask is not None:
@@ -703,10 +716,9 @@ def two_stream_self_attention(
 
         # Finally, transpose back to the embed dimension and return
         if use_sdpa:
-            attn = attn.transpose(1, 2).contiguous().view(bsz, tgt_len, embed_dim)
-            attn = attn.transpose(0, 1)
+            attn = rearrange(attn, "b h t d -> t b (h d)")
         else:
-            attn = attn.transpose(0, 1).contiguous().view(-1, bsz, embed_dim)
+            attn = rearrange(attn, "(b h) t d -> t b (h d)", b=bsz, h=self.num_heads)
 
         return self.out_proj(attn)
 
@@ -727,7 +739,10 @@ _TWO_STREAM_MASK_CACHE: "OrderedDict[tuple[int, int, str, int], tuple[torch.Tens
 
 
 def _dynamo_is_compiling() -> bool:
-    """Return True when torch._dynamo is tracing/compiling."""
+    """Return True when torch._dynamo is tracing/compiling.
+
+    :return bool: True if Dynamo is compiling, otherwise False.
+    """
     if hasattr(torch, "_dynamo") and hasattr(torch._dynamo, "is_compiling"):
         return torch._dynamo.is_compiling()
     return False

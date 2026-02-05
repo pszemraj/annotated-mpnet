@@ -19,6 +19,7 @@ authors = [{ name = "annotated-mpnet contributors" }]
 dependencies = [
   "cython",
   "datasets",
+  "einops>=0.7.0",
   "numpy",
   "rich",
   "tensorboard",

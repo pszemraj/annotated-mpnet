@@ -14,6 +14,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 from torch.utils.checkpoint import checkpoint
+from einops import rearrange
 
 from annotated_mpnet.constants import position_offset
 from annotated_mpnet.transformer_modules import (
@@ -379,7 +380,7 @@ class SentenceEncoder(nn.Module):
         # Transpose the batch for easier attention caluclation later on. This is an artifact of the
         # fairseq codebase, but since it's done like this everywhere, we have to keep it
         # B x T x C -> T x B x C
-        x = x.transpose(0, 1)
+        x = rearrange(x, "b t c -> t b c")
 
         # Compute the relative attention bias (explicit positions must drive relative bias too).
         if positions is not None:
@@ -433,11 +434,11 @@ class SentenceEncoder(nn.Module):
 
         # Transpose the batch back to the standard format
         # T x B x C -> B x T x C
-        x = x.transpose(0, 1)
+        x = rearrange(x, "t b c -> b t c")
 
         if not last_state_only:
             # Normalize inner state layout to B x T x C regardless of last_state_only.
-            inner_states = [state.transpose(0, 1) for state in inner_states]
+            inner_states = [rearrange(state, "t b c -> b t c") for state in inner_states]
 
         # Get the sentence representation by extracting the CLS token embedding (index 0)
         sentence_rep = x[:, 0, :]
@@ -519,12 +520,10 @@ class SentenceEncoder(nn.Module):
         values = self.relative_attention_bias(rp_bucket)
 
         if relative_position.dim() == 2:
-            values = values.permute(2, 0, 1).contiguous()
             # Shared across batch; avoid expanding to (bsz * heads) for sequential positions.
-            return values
+            return rearrange(values, "q k h -> h q k")
 
-        values = values.permute(0, 3, 1, 2).contiguous()
-        return values.view(-1, qlen, klen)
+        return rearrange(values, "b q k h -> (b h) q k")
 
     @staticmethod
     def relative_position_bucket(

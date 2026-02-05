@@ -11,8 +11,10 @@ LOGGER = logging.getLogger(__name__)
 import torch
 import torch.nn.functional as F
 from torch import nn
+from einops import rearrange
 
 from annotated_mpnet.utils import utils
+from annotated_mpnet.utils.tensor_ops import normalize_position_bias, pad_right_at_dim
 
 
 class RelativeMultiHeadAttention(nn.Module):
@@ -207,22 +209,16 @@ class RelativeMultiHeadAttention(nn.Module):
             k = torch.cat([k, self.bias_k.repeat(1, bsz, 1)])
             v = torch.cat([v, self.bias_v.repeat(1, bsz, 1)])
             if attn_mask is not None:
-                attn_mask = torch.cat([attn_mask, attn_mask.new_zeros(attn_mask.size(0), 1)], dim=1)
+                attn_mask = pad_right_at_dim(attn_mask, 1, dim=1, value=0)
             if key_padding_mask is not None:
-                key_padding_mask = torch.cat(
-                    [
-                        key_padding_mask,
-                        key_padding_mask.new_zeros(key_padding_mask.size(0), 1),
-                    ],
-                    dim=1,
-                )
+                key_padding_mask = pad_right_at_dim(key_padding_mask, 1, dim=1, value=0)
 
         # Do the matrix manipulation for the energy calculation, namely a transpose
-        q = q.contiguous().view(tgt_len, bsz * self.num_heads, self.head_dim).transpose(0, 1)
+        q = rearrange(q, "t b (h d) -> (b h) t d", h=self.num_heads)
         if k is not None:
-            k = k.contiguous().view(-1, bsz * self.num_heads, self.head_dim).transpose(0, 1)
+            k = rearrange(k, "t b (h d) -> (b h) t d", h=self.num_heads)
         if v is not None:
-            v = v.contiguous().view(-1, bsz * self.num_heads, self.head_dim).transpose(0, 1)
+            v = rearrange(v, "t b (h d) -> (b h) t d", h=self.num_heads)
 
         # Not entirely sure what this does, but leaving it in here in case MPNet uses it
         if saved_state is not None:
@@ -258,18 +254,12 @@ class RelativeMultiHeadAttention(nn.Module):
 
         if self.add_zero_attn:
             src_len += 1
-            k = torch.cat([k, k.new_zeros((k.size(0), 1) + k.size()[2:])], dim=1)
-            v = torch.cat([v, v.new_zeros((v.size(0), 1) + v.size()[2:])], dim=1)
+            k = pad_right_at_dim(k, 1, dim=1, value=0)
+            v = pad_right_at_dim(v, 1, dim=1, value=0)
             if attn_mask is not None:
-                attn_mask = torch.cat([attn_mask, attn_mask.new_zeros(attn_mask.size(0), 1)], dim=1)
+                attn_mask = pad_right_at_dim(attn_mask, 1, dim=1, value=0)
             if key_padding_mask is not None:
-                key_padding_mask = torch.cat(
-                    [
-                        key_padding_mask,
-                        torch.zeros(key_padding_mask.size(0), 1).type_as(key_padding_mask),
-                    ],
-                    dim=1,
-                )
+                key_padding_mask = pad_right_at_dim(key_padding_mask, 1, dim=1, value=0)
 
         def _reshape_positions_bias(
             bias: torch.Tensor,
@@ -278,31 +268,29 @@ class RelativeMultiHeadAttention(nn.Module):
             src_len: int,
             device: torch.device,
             dtype: torch.dtype,
+            expand_batch: bool = False,
         ) -> torch.Tensor:
-            """Normalize position bias to a 4D (batch, heads, tgt, src) tensor."""
-            if bias.device != device or bias.dtype != dtype:
-                bias = bias.to(device=device, dtype=dtype)
-            if bias.dim() == 3:
-                if bias.size(0) == self.num_heads:
-                    bias = bias.unsqueeze(0)
-                elif bias.size(0) == bsz * self.num_heads:
-                    bias = bias.view(bsz, self.num_heads, tgt_len, src_len)
-                else:
-                    raise ValueError(
-                        "positions_bias has unexpected shape; expected heads or bsz*heads in dim 0."
-                    )
-            elif bias.dim() == 4:
-                if bias.size(1) != self.num_heads:
-                    raise ValueError(
-                        "positions_bias has unexpected head dimension; expected num_heads."
-                    )
-                if bias.size(0) not in (1, bsz):
-                    raise ValueError(
-                        "positions_bias has unexpected batch dimension; expected 1 or bsz."
-                    )
-            else:
-                raise ValueError("positions_bias must be 3D or 4D for attention biasing.")
-            return bias
+            """Normalize position bias to a 4D (batch, heads, tgt, src) tensor.
+
+            :param torch.Tensor bias: Position bias tensor.
+            :param int bsz: Batch size.
+            :param int tgt_len: Target sequence length.
+            :param int src_len: Source sequence length.
+            :param torch.device device: Device to match.
+            :param torch.dtype dtype: Data type to match.
+            :param bool expand_batch: Whether to expand batch dimension to ``bsz``.
+            :return torch.Tensor: Normalized bias tensor.
+            """
+            return normalize_position_bias(
+                bias,
+                bsz,
+                self.num_heads,
+                tgt_len,
+                src_len,
+                device=device,
+                dtype=dtype,
+                expand_batch=expand_batch,
+            )
 
         def _add_positions_bias(
             attn_weights: torch.Tensor,
@@ -311,18 +299,28 @@ class RelativeMultiHeadAttention(nn.Module):
             tgt_len: int,
             src_len: int,
         ) -> torch.Tensor:
-            """Add position bias to attention weights with broadcast where possible."""
-            if bias.device != attn_weights.device or bias.dtype != attn_weights.dtype:
-                bias = bias.to(device=attn_weights.device, dtype=attn_weights.dtype)
-            if bias.dim() == 3 and bias.size(0) == self.num_heads:
-                attn_weights = attn_weights.view(bsz, self.num_heads, tgt_len, src_len)
-                attn_weights = attn_weights + bias.unsqueeze(0)
-                return attn_weights.view(bsz * self.num_heads, tgt_len, src_len)
-            if bias.dim() == 4:
-                attn_weights = attn_weights.view(bsz, self.num_heads, tgt_len, src_len)
-                attn_weights = attn_weights + bias
-                return attn_weights.view(bsz * self.num_heads, tgt_len, src_len)
-            return attn_weights + bias
+            """Add position bias to attention weights with broadcast where possible.
+
+            :param torch.Tensor attn_weights: Attention weights to bias.
+            :param torch.Tensor bias: Position bias tensor.
+            :param int bsz: Batch size.
+            :param int tgt_len: Target sequence length.
+            :param int src_len: Source sequence length.
+            :return torch.Tensor: Biased attention weights.
+            """
+            bias = normalize_position_bias(
+                bias,
+                bsz,
+                self.num_heads,
+                tgt_len,
+                src_len,
+                device=attn_weights.device,
+                dtype=attn_weights.dtype,
+                expand_batch=False,
+            )
+            attn_weights = attn_weights.view(bsz, self.num_heads, tgt_len, src_len)
+            attn_weights = attn_weights + bias
+            return attn_weights.view(bsz * self.num_heads, tgt_len, src_len)
 
         use_sdpa = (
             hasattr(F, "scaled_dot_product_attention")
@@ -332,13 +330,16 @@ class RelativeMultiHeadAttention(nn.Module):
             and v is not None
         )
         if use_sdpa:
-            q_sdpa = q.contiguous().view(bsz, self.num_heads, tgt_len, self.head_dim)
-            k_sdpa = k.contiguous().view(bsz, self.num_heads, src_len, self.head_dim)
-            v_sdpa = v.contiguous().view(bsz, self.num_heads, src_len, self.head_dim)
+            q_sdpa = rearrange(q, "(b h) t d -> b h t d", b=bsz, h=self.num_heads)
+            k_sdpa = rearrange(k, "(b h) s d -> b h s d", b=bsz, h=self.num_heads)
+            v_sdpa = rearrange(v, "(b h) s d -> b h s d", b=bsz, h=self.num_heads)
 
             attn_bias = None
             attn_bias_from_positions = False
             if positions_bias is not None:
+                expand_batch = key_padding_mask is not None or (
+                    attn_mask is not None and attn_mask.dim() == 3
+                )
                 attn_bias = _reshape_positions_bias(
                     positions_bias,
                     bsz,
@@ -346,11 +347,8 @@ class RelativeMultiHeadAttention(nn.Module):
                     src_len,
                     device=q.device,
                     dtype=q.dtype,
+                    expand_batch=expand_batch,
                 )
-                if attn_bias.size(0) == 1 and (
-                    key_padding_mask is not None or (attn_mask is not None and attn_mask.dim() == 3)
-                ):
-                    attn_bias = attn_bias.expand(bsz, -1, -1, -1).contiguous()
                 attn_bias_from_positions = True
 
             if attn_bias is None and (attn_mask is not None or key_padding_mask is not None):
@@ -399,8 +397,7 @@ class RelativeMultiHeadAttention(nn.Module):
                 dropout_p=self.dropout if self.training else 0.0,
             )
             assert list(attn.size()) == [bsz, self.num_heads, tgt_len, self.head_dim]
-            attn = attn.transpose(1, 2).contiguous().view(bsz, tgt_len, embed_dim)
-            attn = attn.transpose(0, 1)
+            attn = rearrange(attn, "b h t d -> t b (h d)")
             attn = self.out_proj(attn)
             return attn, None
 
@@ -459,12 +456,7 @@ class RelativeMultiHeadAttention(nn.Module):
         attn = torch.bmm(attn_weights, v)
         assert list(attn.size()) == [bsz * self.num_heads, tgt_len, self.head_dim]
 
-        if self.onnx_trace and attn.size(1) == 1:
-            # when ONNX tracing a single decoder step (sequence length == 1)
-            # the transpose is a no-op copy before view, thus unnecessary
-            attn = attn.contiguous().view(tgt_len, bsz, embed_dim)
-        else:
-            attn = attn.transpose(0, 1).contiguous().view(tgt_len, bsz, embed_dim)
+        attn = rearrange(attn, "(b h) t d -> t b (h d)", b=bsz, h=self.num_heads)
 
         # Run the final attention number through the FC linear layer
         attn = self.out_proj(attn)
