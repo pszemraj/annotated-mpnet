@@ -648,22 +648,21 @@ def two_stream_self_attention(
 
             # Process bias if applicable
             if bias is not None:
-                if bias.device != attn_weights.device or bias.dtype != attn_weights.dtype:
-                    bias = bias.to(device=attn_weights.device, dtype=attn_weights.dtype)
-                if bias.dim() == 3 and bias.size(0) == self.num_heads:
-                    tgt_len = attn_weights.size(1)
-                    src_len = attn_weights.size(2)
-                    attn_weights = attn_weights.view(bsz, self.num_heads, tgt_len, src_len)
-                    attn_weights = attn_weights + bias.unsqueeze(0)
-                    attn_weights = attn_weights.view(bsz * self.num_heads, tgt_len, src_len)
-                elif bias.dim() == 4:
-                    tgt_len = attn_weights.size(1)
-                    src_len = attn_weights.size(2)
-                    attn_weights = attn_weights.view(bsz, self.num_heads, tgt_len, src_len)
-                    attn_weights = attn_weights + bias
-                    attn_weights = attn_weights.view(bsz * self.num_heads, tgt_len, src_len)
-                else:
-                    attn_weights += bias
+                tgt_len = attn_weights.size(1)
+                src_len = attn_weights.size(2)
+                bias = normalize_position_bias(
+                    bias,
+                    bsz,
+                    self.num_heads,
+                    tgt_len,
+                    src_len,
+                    device=attn_weights.device,
+                    dtype=attn_weights.dtype,
+                    expand_batch=False,
+                )
+                attn_weights = attn_weights.view(bsz, self.num_heads, tgt_len, src_len)
+                attn_weights = attn_weights + bias
+                attn_weights = attn_weights.view(bsz * self.num_heads, tgt_len, src_len)
 
             # Process attention masking
             if mask is not None:
