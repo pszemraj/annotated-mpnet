@@ -37,6 +37,67 @@ def maybe(fn: Callable[..., T]) -> Callable[..., Optional[T]]:
     return inner
 
 
+def pad_left_ndim_to(tensor: torch.Tensor, ndims: int) -> torch.Tensor:
+    """Pad tensor with leading singleton dimensions until it has ``ndims`` dims.
+
+    :param torch.Tensor tensor: Input tensor to reshape.
+    :param int ndims: Target number of dimensions.
+    :return torch.Tensor: Reshaped tensor with leading singleton dims.
+    """
+    if tensor.ndim >= ndims:
+        return tensor
+    shape = (1,) * (ndims - tensor.ndim) + tuple(tensor.shape)
+    return tensor.reshape(*shape)
+
+
+def normalize_position_bias(
+    bias: torch.Tensor,
+    bsz: int,
+    num_heads: int,
+    tgt_len: int,
+    src_len: int,
+    device: torch.device,
+    dtype: torch.dtype,
+    expand_batch: bool = False,
+) -> torch.Tensor:
+    """Normalize position bias to 4D (batch, heads, tgt, src) format.
+
+    :param torch.Tensor bias: Position bias tensor to normalize.
+    :param int bsz: Batch size.
+    :param int num_heads: Number of attention heads.
+    :param int tgt_len: Target sequence length.
+    :param int src_len: Source sequence length.
+    :param torch.device device: Device to match.
+    :param torch.dtype dtype: Data type to match.
+    :param bool expand_batch: Whether to expand batch dim when bias has batch size 1.
+    :return torch.Tensor: Normalized bias tensor with shape (bsz|1, heads, tgt, src).
+    """
+    if bias.device != device or bias.dtype != dtype:
+        bias = bias.to(device=device, dtype=dtype)
+
+    if bias.dim() == 3:
+        if bias.size(0) == bsz * num_heads:
+            bias = bias.view(bsz, num_heads, tgt_len, src_len)
+        elif bias.size(0) != num_heads:
+            raise ValueError(
+                "positions_bias has unexpected shape; expected heads or bsz*heads in dim 0."
+            )
+    elif bias.dim() == 4:
+        if bias.size(1) != num_heads or bias.size(0) not in (1, bsz):
+            raise ValueError(
+                "positions_bias has unexpected shape; expected (1|bsz, heads, tgt, src)."
+            )
+    else:
+        raise ValueError("positions_bias must be 3D or 4D for attention biasing.")
+
+    bias = pad_left_ndim_to(bias, 4)
+
+    if expand_batch and bias.size(0) == 1 and bsz > 1:
+        bias = bias.expand(bsz, -1, -1, -1).contiguous()
+
+    return bias
+
+
 def compact(values: Iterable[Optional[T]]) -> list[T]:
     """Drop None entries from an iterable.
 

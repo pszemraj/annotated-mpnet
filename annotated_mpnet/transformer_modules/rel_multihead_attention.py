@@ -14,6 +14,7 @@ from torch import nn
 from einops import rearrange
 
 from annotated_mpnet.utils import utils
+from annotated_mpnet.utils.tensor_ops import normalize_position_bias
 
 
 class RelativeMultiHeadAttention(nn.Module):
@@ -279,31 +280,29 @@ class RelativeMultiHeadAttention(nn.Module):
             src_len: int,
             device: torch.device,
             dtype: torch.dtype,
+            expand_batch: bool = False,
         ) -> torch.Tensor:
-            """Normalize position bias to a 4D (batch, heads, tgt, src) tensor."""
-            if bias.device != device or bias.dtype != dtype:
-                bias = bias.to(device=device, dtype=dtype)
-            if bias.dim() == 3:
-                if bias.size(0) == self.num_heads:
-                    bias = bias.unsqueeze(0)
-                elif bias.size(0) == bsz * self.num_heads:
-                    bias = bias.view(bsz, self.num_heads, tgt_len, src_len)
-                else:
-                    raise ValueError(
-                        "positions_bias has unexpected shape; expected heads or bsz*heads in dim 0."
-                    )
-            elif bias.dim() == 4:
-                if bias.size(1) != self.num_heads:
-                    raise ValueError(
-                        "positions_bias has unexpected head dimension; expected num_heads."
-                    )
-                if bias.size(0) not in (1, bsz):
-                    raise ValueError(
-                        "positions_bias has unexpected batch dimension; expected 1 or bsz."
-                    )
-            else:
-                raise ValueError("positions_bias must be 3D or 4D for attention biasing.")
-            return bias
+            """Normalize position bias to a 4D (batch, heads, tgt, src) tensor.
+
+            :param torch.Tensor bias: Position bias tensor.
+            :param int bsz: Batch size.
+            :param int tgt_len: Target sequence length.
+            :param int src_len: Source sequence length.
+            :param torch.device device: Device to match.
+            :param torch.dtype dtype: Data type to match.
+            :param bool expand_batch: Whether to expand batch dimension to ``bsz``.
+            :return torch.Tensor: Normalized bias tensor.
+            """
+            return normalize_position_bias(
+                bias,
+                bsz,
+                self.num_heads,
+                tgt_len,
+                src_len,
+                device=device,
+                dtype=dtype,
+                expand_batch=expand_batch,
+            )
 
         def _add_positions_bias(
             attn_weights: torch.Tensor,
@@ -313,17 +312,19 @@ class RelativeMultiHeadAttention(nn.Module):
             src_len: int,
         ) -> torch.Tensor:
             """Add position bias to attention weights with broadcast where possible."""
-            if bias.device != attn_weights.device or bias.dtype != attn_weights.dtype:
-                bias = bias.to(device=attn_weights.device, dtype=attn_weights.dtype)
-            if bias.dim() == 3 and bias.size(0) == self.num_heads:
-                attn_weights = attn_weights.view(bsz, self.num_heads, tgt_len, src_len)
-                attn_weights = attn_weights + bias.unsqueeze(0)
-                return attn_weights.view(bsz * self.num_heads, tgt_len, src_len)
-            if bias.dim() == 4:
-                attn_weights = attn_weights.view(bsz, self.num_heads, tgt_len, src_len)
-                attn_weights = attn_weights + bias
-                return attn_weights.view(bsz * self.num_heads, tgt_len, src_len)
-            return attn_weights + bias
+            bias = normalize_position_bias(
+                bias,
+                bsz,
+                self.num_heads,
+                tgt_len,
+                src_len,
+                device=attn_weights.device,
+                dtype=attn_weights.dtype,
+                expand_batch=False,
+            )
+            attn_weights = attn_weights.view(bsz, self.num_heads, tgt_len, src_len)
+            attn_weights = attn_weights + bias
+            return attn_weights.view(bsz * self.num_heads, tgt_len, src_len)
 
         use_sdpa = (
             hasattr(F, "scaled_dot_product_attention")
@@ -340,6 +341,9 @@ class RelativeMultiHeadAttention(nn.Module):
             attn_bias = None
             attn_bias_from_positions = False
             if positions_bias is not None:
+                expand_batch = key_padding_mask is not None or (
+                    attn_mask is not None and attn_mask.dim() == 3
+                )
                 attn_bias = _reshape_positions_bias(
                     positions_bias,
                     bsz,
@@ -347,11 +351,8 @@ class RelativeMultiHeadAttention(nn.Module):
                     src_len,
                     device=q.device,
                     dtype=q.dtype,
+                    expand_batch=expand_batch,
                 )
-                if attn_bias.size(0) == 1 and (
-                    key_padding_mask is not None or (attn_mask is not None and attn_mask.dim() == 3)
-                ):
-                    attn_bias = attn_bias.expand(bsz, -1, -1, -1).contiguous()
                 attn_bias_from_positions = True
 
             if attn_bias is None and (attn_mask is not None or key_padding_mask is not None):

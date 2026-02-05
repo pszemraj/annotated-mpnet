@@ -17,7 +17,7 @@ from torch.utils.checkpoint import checkpoint
 from transformers import PreTrainedTokenizer
 
 from annotated_mpnet.transformer_modules import LayerNorm, SentenceEncoder
-from annotated_mpnet.utils.tensor_ops import maybe
+from annotated_mpnet.utils.tensor_ops import maybe, normalize_position_bias
 from annotated_mpnet.utils import utils
 
 
@@ -540,28 +540,19 @@ def two_stream_self_attention(
         attn_bias_from_positions = False
 
         if bias is not None:
-            if bias.device != device or bias.dtype != dtype:
-                bias = bias.to(device=device, dtype=dtype)
-            if bias.dim() == 3:
-                if bias.size(0) == self.num_heads:
-                    bias = bias.unsqueeze(0)
-                elif bias.size(0) == bsz * self.num_heads:
-                    bias = bias.view(bsz, self.num_heads, target_len, source_len)
-                else:
-                    raise ValueError(
-                        "positions_bias has unexpected shape; expected heads or bsz*heads in dim 0."
-                    )
-            elif bias.dim() == 4:
-                if bias.size(1) != self.num_heads or bias.size(0) not in (1, bsz):
-                    raise ValueError(
-                        "positions_bias has unexpected shape; expected (1|bsz, heads, tgt, src)."
-                    )
-            else:
-                raise ValueError("positions_bias must be 3D or 4D for attention biasing.")
-            if bias.size(0) == 1 and (
-                padding_mask is not None or (attn_mask is not None and attn_mask.dim() == 3)
-            ):
-                bias = bias.expand(bsz, -1, -1, -1).contiguous()
+            expand_batch = padding_mask is not None or (
+                attn_mask is not None and attn_mask.dim() == 3
+            )
+            bias = normalize_position_bias(
+                bias,
+                bsz,
+                self.num_heads,
+                target_len,
+                source_len,
+                device=device,
+                dtype=dtype,
+                expand_batch=expand_batch,
+            )
             attn_bias = bias
             attn_bias_from_positions = True
 
