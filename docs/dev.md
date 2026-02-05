@@ -113,6 +113,15 @@ Always lint and format before committing:
 ruff check --fix . && ruff format .
 ```
 
+## Docstring Checks
+
+Run the docstring checker against project code (avoid scanning vendored deps):
+
+```bash
+python ~/scripts/py/doc_check.py annotated_mpnet --check-lazy-docstrings
+python ~/scripts/py/doc_check.py cli_tools --check-lazy-docstrings
+```
+
 ## Development Workflow
 
 1. Create a topic branch for your changes

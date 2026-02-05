@@ -60,6 +60,7 @@ pip install -e .
 
 - Python 3.x
 - PyTorch (version >= 2.6.0, CUDA is required for training)
+- `einops` (version >= 0.7.0) for explicit tensor shape transforms
 - CUDA GPU with BF16 support (Ampere+). As of 2026, legacy GPUs without BF16 are not supported.
 - HuggingFace `transformers`, `datasets`
 - `wandb` (for Weights & Biases logging, optional)
