@@ -18,7 +18,7 @@ from transformers import PreTrainedTokenizer
 from einops import rearrange
 
 from annotated_mpnet.transformer_modules import LayerNorm, SentenceEncoder
-from annotated_mpnet.utils.tensor_ops import maybe, normalize_position_bias
+from annotated_mpnet.utils.tensor_ops import maybe, normalize_position_bias, pad_left_ndim_to
 from annotated_mpnet.utils import utils
 
 
@@ -501,6 +501,19 @@ def two_stream_self_attention(
         """
         return rearrange(x, "t b (h d) -> (b h) t d", h=self.num_heads)
 
+    def expand_attn_mask(attn_mask: torch.Tensor) -> torch.Tensor:
+        """Expand attention mask to (bsz*heads, tgt, src) for non-SDPA attention.
+
+        :param torch.Tensor attn_mask: Attention mask (tgt x src or bsz x tgt x src).
+        :return torch.Tensor: Expanded attention mask for attention weights.
+        """
+        mask = pad_left_ndim_to(attn_mask, 3)
+        if mask.size(0) == 1 and bsz > 1:
+            mask = mask.expand(bsz, -1, -1)
+        tgt_len, src_len = mask.size(-2), mask.size(-1)
+        mask = mask.unsqueeze(1).expand(bsz, self.num_heads, tgt_len, src_len)
+        return mask.reshape(bsz * self.num_heads, tgt_len, src_len)
+
     def fill_mask(attn_weights: torch.Tensor, attn_mask: torch.Tensor) -> torch.Tensor:
         """Apply attention mask to attention weights.
 
@@ -508,13 +521,7 @@ def two_stream_self_attention(
         :param torch.Tensor attn_mask: Mask tensor (tgt x src or bsz x tgt x src).
         :return torch.Tensor: Masked attention weights.
         """
-        if attn_mask.dim() == 2:
-            mask = attn_mask.unsqueeze(0)
-        else:
-            mask = attn_mask.unsqueeze(1).expand(
-                bsz, self.num_heads, attn_mask.size(1), attn_mask.size(2)
-            )
-            mask = mask.reshape(bsz * self.num_heads, attn_mask.size(1), attn_mask.size(2))
+        mask = expand_attn_mask(attn_mask)
         return attn_weights.masked_fill(mask, float("-inf"))
 
     def build_attn_bias(
@@ -539,6 +546,15 @@ def two_stream_self_attention(
         """
         attn_bias = None
         attn_bias_from_positions = False
+
+        def normalize_attn_mask(mask: torch.Tensor) -> torch.Tensor:
+            """Normalize attention mask to (batch, 1, tgt, src) for SDPA."""
+            if mask.dtype == torch.bool:
+                mask = mask.to(device=device)
+            else:
+                mask = mask.to(device=device, dtype=dtype)
+            mask = pad_left_ndim_to(mask, 3)
+            return mask.unsqueeze(1)
 
         if bias is not None:
             expand_batch = padding_mask is not None or (
@@ -565,21 +581,13 @@ def two_stream_self_attention(
 
         if attn_mask is not None:
             if attn_mask.dtype == torch.bool:
-                mask = attn_mask
-                if mask.dim() == 2:
-                    mask = mask.unsqueeze(0).unsqueeze(0)
-                else:
-                    mask = mask.unsqueeze(1)
+                mask = normalize_attn_mask(attn_mask)
                 if attn_bias_from_positions:
                     attn_bias = attn_bias.clone()
                     attn_bias_from_positions = False
                 attn_bias.masked_fill_(mask, float("-inf"))
             else:
-                mask = attn_mask.to(device=device, dtype=dtype)
-                if mask.dim() == 2:
-                    mask = mask.unsqueeze(0).unsqueeze(0)
-                else:
-                    mask = mask.unsqueeze(1)
+                mask = normalize_attn_mask(attn_mask)
                 if attn_bias_from_positions:
                     attn_bias = attn_bias + mask
                     attn_bias_from_positions = False
