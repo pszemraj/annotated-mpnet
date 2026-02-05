@@ -30,6 +30,13 @@ def maybe(fn: Callable[..., T]) -> Callable[..., Optional[T]]:
 
     @wraps(fn)
     def inner(value: Optional[T], *args: Any, **kwargs: Any) -> Optional[T]:
+        """Return None when the first argument is None, otherwise call ``fn``.
+
+        :param Optional[T] value: Primary value to check for None.
+        :param Any args: Positional args forwarded to ``fn``.
+        :param Any kwargs: Keyword args forwarded to ``fn``.
+        :return Optional[T]: ``fn`` result or None.
+        """
         if not exists(value):
             return None
         return fn(value, *args, **kwargs)

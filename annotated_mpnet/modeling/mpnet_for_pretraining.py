@@ -557,7 +557,11 @@ def two_stream_self_attention(
         attn_bias_from_positions = False
 
         def normalize_attn_mask(mask: torch.Tensor) -> torch.Tensor:
-            """Normalize attention mask to (batch, 1, tgt, src) for SDPA."""
+            """Normalize attention mask to (batch, 1, tgt, src) for SDPA.
+
+            :param torch.Tensor mask: Attention mask tensor to normalize.
+            :return torch.Tensor: Normalized attention mask.
+            """
             if mask.dtype == torch.bool:
                 mask = mask.to(device=device)
             else:
@@ -735,7 +739,10 @@ _TWO_STREAM_MASK_CACHE: "OrderedDict[tuple[int, int, str, int], tuple[torch.Tens
 
 
 def _dynamo_is_compiling() -> bool:
-    """Return True when torch._dynamo is tracing/compiling."""
+    """Return True when torch._dynamo is tracing/compiling.
+
+    :return bool: True if Dynamo is compiling, otherwise False.
+    """
     if hasattr(torch, "_dynamo") and hasattr(torch._dynamo, "is_compiling"):
         return torch._dynamo.is_compiling()
     return False

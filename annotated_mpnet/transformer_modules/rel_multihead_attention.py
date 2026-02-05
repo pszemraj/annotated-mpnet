@@ -299,7 +299,15 @@ class RelativeMultiHeadAttention(nn.Module):
             tgt_len: int,
             src_len: int,
         ) -> torch.Tensor:
-            """Add position bias to attention weights with broadcast where possible."""
+            """Add position bias to attention weights with broadcast where possible.
+
+            :param torch.Tensor attn_weights: Attention weights to bias.
+            :param torch.Tensor bias: Position bias tensor.
+            :param int bsz: Batch size.
+            :param int tgt_len: Target sequence length.
+            :param int src_len: Source sequence length.
+            :return torch.Tensor: Biased attention weights.
+            """
             bias = normalize_position_bias(
                 bias,
                 bsz,
