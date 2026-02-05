@@ -98,6 +98,26 @@ def normalize_position_bias(
     return bias
 
 
+def pad_right_at_dim(
+    tensor: torch.Tensor, pad: int, dim: int = -1, value: float | int = 0
+) -> torch.Tensor:
+    """Pad a tensor on the right along a specific dimension.
+
+    :param torch.Tensor tensor: Input tensor to pad.
+    :param int pad: Number of values to append.
+    :param int dim: Dimension to pad, defaults to -1.
+    :param float | int value: Pad value, defaults to 0.
+    :return torch.Tensor: Padded tensor.
+    """
+    if pad <= 0:
+        return tensor
+    dim = dim if dim >= 0 else tensor.ndim + dim
+    pad_shape = list(tensor.shape)
+    pad_shape[dim] = pad
+    pad_tensor = tensor.new_full(pad_shape, value)
+    return torch.cat((tensor, pad_tensor), dim=dim)
+
+
 def compact(values: Iterable[Optional[T]]) -> list[T]:
     """Drop None entries from an iterable.
 

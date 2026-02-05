@@ -14,7 +14,7 @@ from torch import nn
 from einops import rearrange
 
 from annotated_mpnet.utils import utils
-from annotated_mpnet.utils.tensor_ops import normalize_position_bias
+from annotated_mpnet.utils.tensor_ops import normalize_position_bias, pad_right_at_dim
 
 
 class RelativeMultiHeadAttention(nn.Module):
@@ -209,15 +209,9 @@ class RelativeMultiHeadAttention(nn.Module):
             k = torch.cat([k, self.bias_k.repeat(1, bsz, 1)])
             v = torch.cat([v, self.bias_v.repeat(1, bsz, 1)])
             if attn_mask is not None:
-                attn_mask = torch.cat([attn_mask, attn_mask.new_zeros(attn_mask.size(0), 1)], dim=1)
+                attn_mask = pad_right_at_dim(attn_mask, 1, dim=1, value=0)
             if key_padding_mask is not None:
-                key_padding_mask = torch.cat(
-                    [
-                        key_padding_mask,
-                        key_padding_mask.new_zeros(key_padding_mask.size(0), 1),
-                    ],
-                    dim=1,
-                )
+                key_padding_mask = pad_right_at_dim(key_padding_mask, 1, dim=1, value=0)
 
         # Do the matrix manipulation for the energy calculation, namely a transpose
         q = rearrange(q, "t b (h d) -> (b h) t d", h=self.num_heads)
@@ -260,18 +254,12 @@ class RelativeMultiHeadAttention(nn.Module):
 
         if self.add_zero_attn:
             src_len += 1
-            k = torch.cat([k, k.new_zeros((k.size(0), 1) + k.size()[2:])], dim=1)
-            v = torch.cat([v, v.new_zeros((v.size(0), 1) + v.size()[2:])], dim=1)
+            k = pad_right_at_dim(k, 1, dim=1, value=0)
+            v = pad_right_at_dim(v, 1, dim=1, value=0)
             if attn_mask is not None:
-                attn_mask = torch.cat([attn_mask, attn_mask.new_zeros(attn_mask.size(0), 1)], dim=1)
+                attn_mask = pad_right_at_dim(attn_mask, 1, dim=1, value=0)
             if key_padding_mask is not None:
-                key_padding_mask = torch.cat(
-                    [
-                        key_padding_mask,
-                        torch.zeros(key_padding_mask.size(0), 1).type_as(key_padding_mask),
-                    ],
-                    dim=1,
-                )
+                key_padding_mask = pad_right_at_dim(key_padding_mask, 1, dim=1, value=0)
 
         def _reshape_positions_bias(
             bias: torch.Tensor,
