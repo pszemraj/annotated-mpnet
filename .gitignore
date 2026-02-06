@@ -4,6 +4,10 @@ checkpoints/
 checkpoints*/
 /data/
 annotated_mpnet/utils/*.cpp
+benchmarks/log_*
+benchmarks/ckpt_*
+benchmarks/*_mem.txt
+benchmarks/benchmark_metrics.csv
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
