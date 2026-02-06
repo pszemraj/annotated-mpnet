@@ -129,6 +129,34 @@ class MPNetForPretraining(nn.Module):
             if rope_max_pos is not None:
                 rope_max_pos = int(rope_max_pos)
 
+            flex_block_size = getattr(args, "flex_block_size", 128)
+            flex_kernel_options = getattr(args, "flex_kernel_options", None)
+            # If no explicit kernel options are provided, keep FlexAttention kernel tile sizes
+            # aligned with smaller BlockMask tiles. This avoids inductor lowering failures where
+            # Q/KV block sizes (e.g. 64 or 32) are not divisible by default BLOCK_M/BLOCK_N.
+            if flex_kernel_options is None:
+                block_m: Optional[int] = None
+                block_n: Optional[int] = None
+                if isinstance(flex_block_size, tuple) and len(flex_block_size) == 2:
+                    block_m = int(flex_block_size[0])
+                    block_n = int(flex_block_size[1])
+                elif isinstance(flex_block_size, int):
+                    block_m = int(flex_block_size)
+                    block_n = int(flex_block_size)
+                if (
+                    block_m is not None
+                    and block_n is not None
+                    and block_m > 0
+                    and block_n > 0
+                    and (block_m < 128 or block_n < 128)
+                ):
+                    flex_kernel_options = {"BLOCK_M": block_m, "BLOCK_N": block_n}
+                    LOGGER.info(
+                        "Auto-setting FlexAttention kernel tile sizes to match flex_block_size=%s: %s",
+                        flex_block_size,
+                        flex_kernel_options,
+                    )
+
             self.rope = RotaryEmbedding(
                 RotaryConfig(
                     dim=rope_dim,
@@ -138,9 +166,9 @@ class MPNetForPretraining(nn.Module):
             )
             self.two_stream_attention_config = MPNetTwoStreamAttentionConfig(
                 use_flex_attention=bool(getattr(args, "use_flex_attention", True)),
-                flex_block_size=getattr(args, "flex_block_size", 128),
+                flex_block_size=flex_block_size,
                 flex_compile_block_mask=bool(getattr(args, "flex_compile_block_mask", False)),
-                flex_kernel_options=getattr(args, "flex_kernel_options", None),
+                flex_kernel_options=flex_kernel_options,
             )
 
             if use_position_embeddings:
