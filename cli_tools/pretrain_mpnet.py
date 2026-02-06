@@ -2184,6 +2184,13 @@ def main(args: Namespace) -> None:
     else:
         LOGGER.warning("Skipping final test evaluation because test dataloader is empty.")
 
+    if torch.cuda.is_available():
+        peak_mib = torch.cuda.max_memory_allocated() / (1024**2)
+        reserved_mib = torch.cuda.max_memory_reserved() / (1024**2)
+        LOGGER.info(
+            f"GPU peak memory: {peak_mib:.1f} MiB allocated, {reserved_mib:.1f} MiB reserved"
+        )
+
     LOGGER.info(
         f"Training is finished! See output in {args.checkpoint_dir} and "
         f"tensorboard logs in {args.tensorboard_log_dir}"
