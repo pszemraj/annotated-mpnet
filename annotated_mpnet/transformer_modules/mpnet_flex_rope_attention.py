@@ -429,9 +429,9 @@ def two_stream_self_attention_rope_flex(
     content_positions = content_positions.to(dtype=torch.long, device=c.device)
     query_positions = query_positions.to(dtype=torch.long, device=c.device)
 
-    k = rope.apply(k, content_positions)
-    q_c = rope.apply(q_c, content_positions)
-    q_q = rope.apply(q_q, query_positions)
+    k = rope.rotate(k, content_positions)
+    q_c = rope.rotate(q_c, content_positions)
+    q_q = rope.rotate(q_q, query_positions)
 
     # Structural BlockMasks (cached)
     content_bm, query_bm = get_mpnet_two_stream_block_masks(
@@ -540,9 +540,9 @@ def two_stream_self_attention_rope_sdpa(
     content_positions = content_positions.to(dtype=torch.long, device=c.device)
     query_positions = query_positions.to(dtype=torch.long, device=c.device)
 
-    k = rope.apply(k, content_positions)
-    q_c = rope.apply(q_c, content_positions)
-    q_q = rope.apply(q_q, query_positions)
+    k = rope.rotate(k, content_positions)
+    q_c = rope.rotate(q_c, content_positions)
+    q_q = rope.rotate(q_q, query_positions)
 
     tgt_len_c = q_c.size(2)
     tgt_len_q = q_q.size(2)

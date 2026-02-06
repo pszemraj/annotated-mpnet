@@ -51,7 +51,7 @@ class TestRotaryEmbedding(unittest.TestCase):
         rope = RotaryEmbedding(
             RotaryConfig(dim=D, base_theta=10_000.0, max_position_embeddings=128)
         ).to(device)
-        y = rope.apply(x, position_ids)
+        y = rope.rotate(x, position_ids)
 
         # Reference implementation (explicit).
         inv_freq = rope.inv_freq.to(device=device, dtype=torch.float32)  # (D/2,)

@@ -136,7 +136,7 @@ class RotaryEmbedding(nn.Module):
         sin = self._sin_cached.index_select(0, flat).view(*position_ids.shape, -1).to(dtype=dtype)
         return cos, sin
 
-    def apply(self, x: torch.Tensor, position_ids: torch.Tensor) -> torch.Tensor:
+    def rotate(self, x: torch.Tensor, position_ids: torch.Tensor) -> torch.Tensor:
         """Apply RoPE to x.
 
         Args:
@@ -182,7 +182,7 @@ class RotaryEmbedding(nn.Module):
             return out
         return torch.cat((out, x_pass), dim=-1)
 
-    def apply_qk(
+    def rotate_qk(
         self,
         q: torch.Tensor,
         k: torch.Tensor,
@@ -192,4 +192,4 @@ class RotaryEmbedding(nn.Module):
         """Apply RoPE to q and k (optionally with different position ids)."""
         if k_position_ids is None:
             k_position_ids = q_position_ids
-        return self.apply(q, q_position_ids), self.apply(k, k_position_ids)
+        return self.rotate(q, q_position_ids), self.rotate(k, k_position_ids)
