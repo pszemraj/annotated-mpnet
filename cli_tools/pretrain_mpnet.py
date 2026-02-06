@@ -597,6 +597,57 @@ def _select_architecture_source(args: Namespace) -> str:
     return "new"
 
 
+def _cli_flag_was_provided(argv: list[str], flag: str) -> bool:
+    """Return True if a CLI flag appears in argv.
+
+    :param list[str] argv: CLI argument vector without program name.
+    :param str flag: Flag to detect (e.g., ``--attention-dropout``).
+    :return bool: True when the flag is present as ``--flag`` or ``--flag=value``.
+    """
+    return any(arg == flag or arg.startswith(f"{flag}=") for arg in argv)
+
+
+def _normalize_attention_dropout_for_flex(
+    args: Namespace,
+    *,
+    arch_source: str,
+    attention_dropout_explicit: bool,
+) -> None:
+    """Normalize attention dropout defaults for RoPE + FlexAttention runs.
+
+    :param Namespace args: Parsed/normalized training args.
+    :param str arch_source: One of ``new``, ``resume``, or ``hf``.
+    :param bool attention_dropout_explicit: Whether ``--attention-dropout`` was provided.
+    :return None: This function returns nothing.
+    """
+    if not bool(getattr(args, "use_rope", False)):
+        return
+    if not bool(getattr(args, "use_flex_attention", True)):
+        return
+
+    current = float(getattr(args, "attention_dropout", 0.0))
+    if arch_source == "new" and not attention_dropout_explicit and current != 0.0:
+        args.attention_dropout = 0.0
+        LOGGER.info(
+            "RoPE+FlexAttention enabled and --attention-dropout was not provided; "
+            "defaulting attention_dropout to 0.0 for FlexAttention fast path compatibility."
+        )
+        return
+
+    if float(getattr(args, "attention_dropout", 0.0)) != 0.0:
+        LOGGER.info(
+            "RoPE+FlexAttention enabled with attention_dropout=%.4f; FlexAttention fast path "
+            "requires attention_dropout=0.0, so attention will use the SDPA fallback.",
+            float(getattr(args, "attention_dropout", 0.0)),
+        )
+        return
+
+    LOGGER.info(
+        "RoPE+FlexAttention enabled with attention_dropout=0.0; FlexAttention fast path is active "
+        "when available."
+    )
+
+
 def _select_resume_checkpoint_path(checkpoint_dir: Path, resume_checkpoint: str | None) -> Path:
     """Select the checkpoint path for resuming training.
 
@@ -947,6 +998,7 @@ def main(args: Namespace) -> None:
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
     arch_source = _select_architecture_source(args)
+    attention_dropout_explicit = _cli_flag_was_provided(sys.argv[1:], "--attention-dropout")
     resume_checkpoint_path: Path | None = None
     resume_checkpoint: dict | None = None
     resume_samples_processed = 0
@@ -1033,6 +1085,12 @@ def main(args: Namespace) -> None:
             f"Using HF model architecture: {args.encoder_layers} layers, "
             f"{args.encoder_embed_dim} hidden, {args.encoder_ffn_dim} FFN"
         )
+
+    _normalize_attention_dropout_for_flex(
+        args,
+        arch_source=arch_source,
+        attention_dropout_explicit=attention_dropout_explicit,
+    )
 
     # Next, we instantiate the model and the data collator
     model = MPNetForPretraining(args, tokenizer)
@@ -2248,7 +2306,8 @@ def cli_main() -> None:
     parser.add_argument(
         "--attention-dropout",
         help="The standard dropout probability for the attention layers of the encoder model. "
-        "Defaults to 0.1",
+        "Defaults to 0.1. For new runs with --use-rope and --use-flex-attention, this is "
+        "auto-set to 0.0 unless explicitly provided.",
         default=0.1,
         type=float,
     )

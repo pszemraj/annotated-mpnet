@@ -90,6 +90,41 @@ class TestPretrainHelpers(unittest.TestCase):
         self.assertTrue(any(p is model.norm.weight for p in no_decay))
         self.assertTrue(any(p is model.norm.bias for p in no_decay))
 
+    def test_cli_flag_was_provided(self) -> None:
+        """Detect CLI flags provided as separate arg or equals form.
+
+        :return None: This test returns nothing.
+        """
+        argv = ["--use-rope", "--attention-dropout=0.0"]
+        self.assertTrue(pretrain_mpnet._cli_flag_was_provided(argv, "--attention-dropout"))
+        self.assertFalse(pretrain_mpnet._cli_flag_was_provided(argv, "--compile"))
+
+    def test_normalize_attention_dropout_for_flex_sets_default(self) -> None:
+        """Set attention_dropout to 0.0 for new RoPE+Flex runs when not explicit.
+
+        :return None: This test returns nothing.
+        """
+        args = Namespace(use_rope=True, use_flex_attention=True, attention_dropout=0.1)
+        pretrain_mpnet._normalize_attention_dropout_for_flex(
+            args,
+            arch_source="new",
+            attention_dropout_explicit=False,
+        )
+        self.assertEqual(args.attention_dropout, 0.0)
+
+    def test_normalize_attention_dropout_for_flex_respects_explicit(self) -> None:
+        """Keep explicit attention_dropout values unchanged.
+
+        :return None: This test returns nothing.
+        """
+        args = Namespace(use_rope=True, use_flex_attention=True, attention_dropout=0.1)
+        pretrain_mpnet._normalize_attention_dropout_for_flex(
+            args,
+            arch_source="new",
+            attention_dropout_explicit=True,
+        )
+        self.assertEqual(args.attention_dropout, 0.1)
+
     def test_polynomial_scheduler_step_indexing(self) -> None:
         """Ensure scheduler step indexing matches expected warmup/decay behavior.
 
