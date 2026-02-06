@@ -26,7 +26,9 @@ MODEL_ARGS=(
     --max-tokens "$MAX_TOKENS"
     --warmup-updates "$WARMUP"
     --logging-steps "$LOGGING_STEPS"
+    --dropout 0.0
     --attention-dropout 0.0
+    --activation-dropout 0.0
     --update-freq 1
     --num-workers 0
 )
