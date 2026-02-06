@@ -9,7 +9,7 @@ cd "$SCRIPT_DIR/.."
 TOTAL_UPDATES=600
 LOGGING_STEPS=10
 BATCH_SIZE=16
-MAX_TOKENS=128
+MAX_TOKENS=512
 WARMUP=60  # warmup updates (for LR schedule, also covers torch.compile warmup)
 
 # Shared model config (H384, 8 layers)
@@ -31,7 +31,6 @@ MODEL_ARGS=(
 )
 
 gpu_peak_mem() {
-    # Print peak GPU memory used (MiB) via nvidia-smi
     nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits 2>/dev/null || echo "N/A"
 }
 
@@ -41,7 +40,6 @@ run_config() {
     local memfile="${logfile%.txt}_mem.txt"
     echo ""
     echo "$label"
-    # Reset GPU memory stats and clear cache
     python -c "import torch; torch.cuda.reset_peak_memory_stats(); torch.cuda.empty_cache()" 2>/dev/null || true
     sleep 2
 
@@ -50,8 +48,6 @@ run_config() {
     local rc=${PIPESTATUS[0]}
     local elapsed=$((SECONDS - start_time))
 
-    # Record nvidia-smi peak memory (process already exited, so this is residual)
-    # The more reliable metric is parsed from the log's ttp (total tokens processed)
     local gpu_mem
     gpu_mem=$(gpu_peak_mem)
     {
@@ -60,7 +56,6 @@ run_config() {
     } > "$memfile"
     echo "  => Elapsed: ${elapsed}s, GPU mem (nvidia-smi): ${gpu_mem} MiB"
 
-    # Exit code 134 = harmless PyGIL cleanup race during finalization
     if [ "$rc" -ne 0 ] && [ "$rc" -ne 134 ]; then
         echo "ERROR: pretrain-mpnet exited with code $rc"
         return "$rc"

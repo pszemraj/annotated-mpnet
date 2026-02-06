@@ -70,11 +70,14 @@ def parse_mem_file(path: Path) -> dict:
 
 
 def parse_peak_memory_from_log(path: Path) -> float | None:
-    """Extract 'GPU peak memory: X.X MiB allocated' from training log."""
-    for line in path.read_text().splitlines():
-        m = re.search(r"GPU peak memory:\s*([\d.]+)\s*MiB allocated", line)
-        if m:
-            return float(m.group(1))
+    """Extract 'GPU peak memory: X.X MiB' from training log.
+
+    Rich wraps the line across multiple lines, so we join all text and search.
+    """
+    text = re.sub(r"\s+", " ", path.read_text())
+    m = re.search(r"GPU peak memory:\s*([\d.]+)\s*MiB", text)
+    if m:
+        return float(m.group(1))
     return None
 
 
@@ -106,7 +109,7 @@ def main():
     # --- Summary table ---
     print()
     print("=" * 80)
-    print("  BENCHMARK RESULTS — H384, 8L, batch=16, max_tokens=128")
+    print("  BENCHMARK RESULTS — H384, 8L, batch=16, max_tokens=512")
     print("=" * 80)
     print()
 
