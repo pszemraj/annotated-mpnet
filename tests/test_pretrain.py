@@ -1,5 +1,6 @@
 """Unit tests for pretraining helper utilities."""
 
+import json
 from pathlib import Path
 import sys
 import unittest
@@ -962,6 +963,148 @@ class TestPretrainHelpers(unittest.TestCase):
         self.assertEqual(args.max_positions, 256)
         self.assertEqual(args.relative_attention_max_distance, 128)
         self.assertTrue(args.normalize_before)
+
+    def test_apply_checkpoint_architecture_args_uses_legacy_rope_defaults(self) -> None:
+        """Ensure missing RoPE/Flex fields fall back to legacy-safe defaults.
+
+        :return None: This test returns nothing.
+        """
+        args = Namespace(
+            encoder_layers=1,
+            encoder_embed_dim=64,
+            encoder_ffn_dim=128,
+            encoder_attention_heads=4,
+            dropout=0.1,
+            attention_dropout=0.1,
+            activation_dropout=0.1,
+            activation_fn="gelu",
+            relative_attention_num_buckets=32,
+            relative_attention_max_distance=64,
+            normalize_before=False,
+            original_vocab_size=100,
+            padded_vocab_size=128,
+            max_tokens=128,
+            max_positions=128,
+            use_rope=True,
+            rope_theta=500_000.0,
+            rope_dim=32,
+            rope_max_position_embeddings=8192,
+            use_relative_attention_bias=False,
+            use_flex_attention=False,
+            flex_block_size=64,
+            flex_compile_block_mask=True,
+            gradient_checkpointing=False,
+        )
+        checkpoint_args = {
+            "encoder_layers": 2,
+            "encoder_embed_dim": 32,
+            "encoder_ffn_dim": 64,
+            "encoder_attention_heads": 2,
+            "dropout": 0.2,
+            "attention_dropout": 0.2,
+            "activation_dropout": 0.2,
+            "activation_fn": "relu",
+            "relative_attention_num_buckets": 16,
+            "relative_attention_max_distance": 128,
+            "normalize_before": True,
+            "original_vocab_size": 200,
+            "padded_vocab_size": 256,
+            "max_tokens": 256,
+        }
+
+        pretrain_mpnet._apply_checkpoint_architecture_args(args, checkpoint_args)
+
+        self.assertFalse(args.use_rope)
+        self.assertEqual(args.rope_theta, 10_000.0)
+        self.assertIsNone(args.rope_dim)
+        self.assertIsNone(args.rope_max_position_embeddings)
+        self.assertTrue(args.use_relative_attention_bias)
+        self.assertTrue(args.use_flex_attention)
+        self.assertEqual(args.flex_block_size, 128)
+        self.assertFalse(args.flex_compile_block_mask)
+
+    def test_load_architecture_config_prefers_resume_root(self) -> None:
+        """Ensure resume-root config is preferred over local checkpoint_dir config.
+
+        :return None: This test returns nothing.
+        """
+        with TemporaryDirectory() as tmpdir:
+            checkpoint_dir = Path(tmpdir) / "current"
+            checkpoint_dir.mkdir()
+            resume_root = Path(tmpdir) / "resume_root"
+            resume_root.mkdir()
+            resume_checkpoint = resume_root / "checkpoint10.pt"
+            resume_checkpoint.write_text("placeholder")
+
+            with open(checkpoint_dir / "config.json", "w") as f:
+                json.dump({"encoder_layers": 6}, f)
+            with open(resume_root / "config.json", "w") as f:
+                json.dump({"encoder_layers": 12}, f)
+
+            config, config_path = pretrain_mpnet._load_architecture_config(
+                checkpoint_dir, resume_checkpoint
+            )
+
+            self.assertEqual(config, {"encoder_layers": 12})
+            self.assertEqual(config_path, resume_root / "config.json")
+
+    def test_save_initial_run_outputs_writes_architecture_config(self) -> None:
+        """Ensure initial run artifacts include config.json and training_args.json.
+
+        :return None: This test returns nothing.
+        """
+
+        class TinyTokenizer:
+            def save_pretrained(self, target_dir: Path) -> None:
+                Path(target_dir).mkdir(parents=True, exist_ok=True)
+                (Path(target_dir) / "tokenizer.json").write_text("{}")
+
+        args = Namespace(
+            encoder_layers=2,
+            encoder_embed_dim=32,
+            encoder_ffn_dim=64,
+            encoder_attention_heads=2,
+            dropout=0.1,
+            attention_dropout=0.0,
+            activation_dropout=0.1,
+            activation_fn="gelu",
+            relative_attention_num_buckets=16,
+            relative_attention_max_distance=128,
+            normalize_before=False,
+            original_vocab_size=100,
+            padded_vocab_size=128,
+            max_tokens=128,
+            max_positions=128,
+            use_rope=True,
+            rope_theta=10_000.0,
+            rope_dim=None,
+            rope_max_position_embeddings=None,
+            use_relative_attention_bias=True,
+            use_flex_attention=True,
+            flex_block_size=128,
+            flex_compile_block_mask=False,
+            gradient_checkpointing=False,
+            tokenizer_name="dummy",
+            checkpoint_dir="./checkpoints",
+            lr=1e-4,
+        )
+
+        with TemporaryDirectory() as tmpdir:
+            out_dir = Path(tmpdir)
+            pretrain_mpnet._save_initial_run_outputs(out_dir, args, TinyTokenizer())
+
+            config_path = out_dir / "config.json"
+            training_args_path = out_dir / "training_args.json"
+            tokenizer_file = out_dir / "tokenizer" / "tokenizer.json"
+            self.assertTrue(config_path.exists())
+            self.assertTrue(training_args_path.exists())
+            self.assertTrue(tokenizer_file.exists())
+
+            with open(config_path) as f:
+                config = json.load(f)
+            self.assertTrue(config["use_rope"])
+            self.assertEqual(config["encoder_layers"], 2)
+            self.assertEqual(config["tokenizer_name"], "dummy")
 
     def test_normalize_training_accuracy(self) -> None:
         """Validate training accuracy normalization helper.

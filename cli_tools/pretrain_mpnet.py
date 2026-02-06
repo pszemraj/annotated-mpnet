@@ -58,6 +58,45 @@ VOCAB_SIZE_ALIGNMENT = 128  # Align vocab size for efficient GPU kernels.
 # Optional dependencies are imported lazily; keep a module-level slot for wandb.
 wandb = None
 
+ARCHITECTURE_CONFIG_FILENAME = "config.json"
+ARCHITECTURE_CONFIG_FIELDS = (
+    "encoder_layers",
+    "encoder_embed_dim",
+    "encoder_ffn_dim",
+    "encoder_attention_heads",
+    "dropout",
+    "attention_dropout",
+    "activation_dropout",
+    "activation_fn",
+    "relative_attention_num_buckets",
+    "relative_attention_max_distance",
+    "normalize_before",
+    "original_vocab_size",
+    "padded_vocab_size",
+    "max_tokens",
+    "max_positions",
+    "use_rope",
+    "rope_theta",
+    "rope_dim",
+    "rope_max_position_embeddings",
+    "use_relative_attention_bias",
+    "use_flex_attention",
+    "flex_block_size",
+    "flex_compile_block_mask",
+    "gradient_checkpointing",
+    "tokenizer_name",
+)
+ARCHITECTURE_LEGACY_DEFAULTS = {
+    "use_rope": False,
+    "rope_theta": 10_000.0,
+    "rope_dim": None,
+    "rope_max_position_embeddings": None,
+    "use_relative_attention_bias": True,
+    "use_flex_attention": True,
+    "flex_block_size": 128,
+    "flex_compile_block_mask": False,
+}
+
 
 def accuracy(
     output: torch.Tensor, target: torch.Tensor, ignore_index: int | None = None
@@ -102,6 +141,82 @@ def _atomic_torch_save(payload: Any, path: Path) -> None:
     tmp_path = path.with_suffix(path.suffix + ".tmp")
     torch.save(payload, tmp_path)
     os.replace(tmp_path, path)
+
+
+def _atomic_json_save(payload: dict[str, Any], path: Path) -> None:
+    """Write JSON payload atomically to avoid partial files.
+
+    :param dict[str, Any] payload: JSON-serializable mapping.
+    :param Path path: Destination path.
+    :return None: This function returns nothing.
+    """
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    with open(tmp_path, "w") as f:
+        json.dump(payload, f, indent=4, default=str)
+    os.replace(tmp_path, path)
+
+
+def _extract_architecture_config(args: Namespace | dict[str, Any]) -> dict[str, Any]:
+    """Extract architecture-focused config fields from args.
+
+    :param Namespace | dict[str, Any] args: Parsed args namespace or dict.
+    :return dict[str, Any]: Architecture config payload.
+    """
+    args_dict = vars(args) if isinstance(args, Namespace) else args
+    return {field: args_dict[field] for field in ARCHITECTURE_CONFIG_FIELDS if field in args_dict}
+
+
+def _save_initial_run_outputs(checkpoint_dir: Path, args: Namespace, tokenizer: Any) -> None:
+    """Persist run metadata files for deterministic resume/init.
+
+    :param Path checkpoint_dir: Directory where run artifacts are stored.
+    :param Namespace args: Parsed training arguments.
+    :param Any tokenizer: Tokenizer to save.
+    :return None: This function returns nothing.
+    """
+    args_dict = vars(args)
+    _atomic_json_save(args_dict, checkpoint_dir / "training_args.json")
+    _atomic_json_save(
+        _extract_architecture_config(args),
+        checkpoint_dir / ARCHITECTURE_CONFIG_FILENAME,
+    )
+    tokenizer.save_pretrained(checkpoint_dir / "tokenizer")
+
+
+def _load_architecture_config(
+    checkpoint_dir: Path, resume_checkpoint_path: Path | None
+) -> tuple[dict[str, Any] | None, Path | None]:
+    """Load architecture config from resume root or checkpoint dir.
+
+    :param Path checkpoint_dir: Active checkpoint output directory.
+    :param Path | None resume_checkpoint_path: Selected resume checkpoint path.
+    :return tuple[dict[str, Any] | None, Path | None]: ``(config, path)`` if found, else ``(None, None)``.
+    """
+    candidate_roots: list[Path] = []
+    if resume_checkpoint_path is not None:
+        candidate_roots.append(resume_checkpoint_path.parent)
+    candidate_roots.append(checkpoint_dir)
+
+    seen: set[Path] = set()
+    for root in candidate_roots:
+        resolved = root.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+
+        config_path = root / ARCHITECTURE_CONFIG_FILENAME
+        if not config_path.exists():
+            continue
+
+        with open(config_path) as f:
+            payload = json.load(f)
+        if not isinstance(payload, dict):
+            raise ValueError(
+                f"Architecture config at {config_path} must contain a JSON object at top level."
+            )
+        return payload, config_path
+
+    return None, None
 
 
 def write_to_tensorboard(writer: "SummaryWriter", logging_dict: dict, step: int) -> None:
@@ -537,26 +652,32 @@ def _apply_checkpoint_architecture_args(args: Namespace, checkpoint_args: Namesp
     args.original_vocab_size = checkpoint_args.get("original_vocab_size", args.original_vocab_size)
     args.padded_vocab_size = checkpoint_args.get("padded_vocab_size", args.padded_vocab_size)
 
-    # RoPE + FlexAttention architecture args
-    args.use_rope = checkpoint_args.get("use_rope", getattr(args, "use_rope", False))
-    args.rope_theta = checkpoint_args.get("rope_theta", getattr(args, "rope_theta", 10000.0))
-    args.rope_dim = checkpoint_args.get("rope_dim", getattr(args, "rope_dim", None))
+    # RoPE + FlexAttention architecture args.
+    # Legacy checkpoints do not include these keys, so default to the historical architecture rather
+    # than inheriting current CLI values.
+    args.use_rope = checkpoint_args.get("use_rope", ARCHITECTURE_LEGACY_DEFAULTS["use_rope"])
+    args.rope_theta = checkpoint_args.get("rope_theta", ARCHITECTURE_LEGACY_DEFAULTS["rope_theta"])
+    args.rope_dim = checkpoint_args.get("rope_dim", ARCHITECTURE_LEGACY_DEFAULTS["rope_dim"])
     args.rope_max_position_embeddings = checkpoint_args.get(
         "rope_max_position_embeddings",
-        getattr(args, "rope_max_position_embeddings", None),
+        ARCHITECTURE_LEGACY_DEFAULTS["rope_max_position_embeddings"],
     )
     args.use_relative_attention_bias = checkpoint_args.get(
         "use_relative_attention_bias",
-        getattr(args, "use_relative_attention_bias", True),
+        ARCHITECTURE_LEGACY_DEFAULTS["use_relative_attention_bias"],
     )
     args.use_flex_attention = checkpoint_args.get(
-        "use_flex_attention", getattr(args, "use_flex_attention", True)
+        "use_flex_attention", ARCHITECTURE_LEGACY_DEFAULTS["use_flex_attention"]
     )
     args.flex_block_size = checkpoint_args.get(
-        "flex_block_size", getattr(args, "flex_block_size", 128)
+        "flex_block_size", ARCHITECTURE_LEGACY_DEFAULTS["flex_block_size"]
     )
     args.flex_compile_block_mask = checkpoint_args.get(
-        "flex_compile_block_mask", getattr(args, "flex_compile_block_mask", False)
+        "flex_compile_block_mask",
+        ARCHITECTURE_LEGACY_DEFAULTS["flex_compile_block_mask"],
+    )
+    args.gradient_checkpointing = checkpoint_args.get(
+        "gradient_checkpointing", getattr(args, "gradient_checkpointing", False)
     )
 
     args.max_tokens = checkpoint_args.get("max_tokens", args.max_tokens)
@@ -1021,33 +1142,48 @@ def main(args: Namespace) -> None:
             resume_checkpoint, resume_checkpoint_path
         )
 
-        # Restore architecture args from checkpoint
-        if "args" in resume_checkpoint:
+        architecture_config, architecture_config_path = _load_architecture_config(
+            checkpoint_dir, resume_checkpoint_path
+        )
+        if architecture_config is not None:
+            LOGGER.info("Loading architecture config from %s", architecture_config_path)
+            checkpoint_args_dict = architecture_config
+        elif "args" in resume_checkpoint:
             checkpoint_args = resume_checkpoint["args"]
             checkpoint_args_dict = (
                 vars(checkpoint_args) if isinstance(checkpoint_args, Namespace) else checkpoint_args
             )
-            _apply_checkpoint_architecture_args(args, checkpoint_args)
-            # Update tokenizer length immediately after restoring checkpoint args.
-            tokenizer.model_max_length = args.max_tokens
-            _warn_if_max_positions_mismatch(args)
-            _validate_tokenizer_vocab_size(tokenizer, args, "checkpoint")
-            checkpoint_tokenizer_name = checkpoint_args_dict.get("tokenizer_name")
-            if (
-                checkpoint_tokenizer_name is not None
-                and checkpoint_tokenizer_name != args.tokenizer_name
-            ):
-                LOGGER.warning(
-                    "Checkpoint tokenizer (%s) does not match current --tokenizer-name (%s). "
-                    "If vocab sizes differ, resume will fail.",
-                    checkpoint_tokenizer_name,
-                    args.tokenizer_name,
-                )
-
-            LOGGER.info(
-                f"Restored model architecture from checkpoint: {args.encoder_layers} layers, "
-                f"{args.encoder_embed_dim} hidden, {args.encoder_ffn_dim} FFN"
+            LOGGER.warning(
+                "No %s found; falling back to architecture args stored in checkpoint payload.",
+                ARCHITECTURE_CONFIG_FILENAME,
             )
+        else:
+            raise KeyError(
+                "Resume checkpoint does not contain architecture args and no "
+                f"{ARCHITECTURE_CONFIG_FILENAME} was found."
+            )
+
+        _apply_checkpoint_architecture_args(args, checkpoint_args_dict)
+        # Update tokenizer length immediately after restoring checkpoint args.
+        tokenizer.model_max_length = args.max_tokens
+        _warn_if_max_positions_mismatch(args)
+        _validate_tokenizer_vocab_size(tokenizer, args, "checkpoint")
+        checkpoint_tokenizer_name = checkpoint_args_dict.get("tokenizer_name")
+        if (
+            checkpoint_tokenizer_name is not None
+            and checkpoint_tokenizer_name != args.tokenizer_name
+        ):
+            LOGGER.warning(
+                "Checkpoint tokenizer (%s) does not match current --tokenizer-name (%s). "
+                "If vocab sizes differ, resume will fail.",
+                checkpoint_tokenizer_name,
+                args.tokenizer_name,
+            )
+
+        LOGGER.info(
+            f"Restored model architecture from checkpoint: {args.encoder_layers} layers, "
+            f"{args.encoder_embed_dim} hidden, {args.encoder_ffn_dim} FFN"
+        )
 
     # If loading from HuggingFace model, we need to get the config first
     elif arch_source == "hf":
@@ -1546,6 +1682,10 @@ def main(args: Namespace) -> None:
                     f"No optimizer state found at {optimizer_state_path}, using default initialization"
                 )
 
+    # Persist run metadata eagerly so resume/init can read architecture config independent of
+    # checkpoint payload internals.
+    _save_initial_run_outputs(checkpoint_dir, args, tokenizer)
+
     # Compile after any checkpoint/HF weight loading so state dict keys stay consistent.
     if args.compile:
         # torch.compile may emit SymPy interpreter warnings (e.g., pow_by_natural) during
@@ -1685,8 +1825,8 @@ def main(args: Namespace) -> None:
         eval_interval_steps = args.total_updates
 
     # best_loss is already initialized above (possibly from a checkpoint)
-    # Flag to track if non-trainable model repo files were saved at first checkpoint.
-    initial_outputs_saved = False
+    # Initial run outputs are written before training starts.
+    initial_outputs_saved = True
     last_eval_step: int | None = None
     best_checkpoint_written = False
 
@@ -2007,13 +2147,7 @@ def main(args: Namespace) -> None:
                         _atomic_torch_save(optimizer_state, optimizer_state_path)
 
                     if not initial_outputs_saved:
-                        args_dict = vars(args) if not isinstance(args, dict) else args
-                        args_path = checkpoint_dir / "training_args.json"
-                        with open(args_path, "w") as f:
-                            json.dump(args_dict, f, indent=4)
-
-                        tokenizer_dir = checkpoint_dir / "tokenizer"
-                        tokenizer.save_pretrained(tokenizer_dir)
+                        _save_initial_run_outputs(checkpoint_dir, args, tokenizer)
                         initial_outputs_saved = True
 
                     _prune_checkpoints(
