@@ -8,6 +8,8 @@ benchmarks/log_*
 benchmarks/ckpt_*
 benchmarks/*_mem.txt
 benchmarks/benchmark_metrics.csv
+benchmarks/analyze_benchmark.py
+benchmarks/run_benchmark.sh
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
