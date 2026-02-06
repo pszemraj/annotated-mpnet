@@ -120,7 +120,8 @@ class MPNetForPretraining(nn.Module):
         self.two_stream_attention_config: Optional[MPNetTwoStreamAttentionConfig] = None
         if self.use_rope:
             head_dim = args.encoder_embed_dim // args.encoder_attention_heads
-            rope_dim = int(getattr(args, "rope_dim", None) or head_dim)
+            rope_dim_arg = getattr(args, "rope_dim", None)
+            rope_dim = head_dim if rope_dim_arg is None else int(rope_dim_arg)
             rope_theta = float(getattr(args, "rope_theta", 10_000.0))
             rope_max_pos = getattr(args, "rope_max_position_embeddings", None)
             if rope_max_pos is None:

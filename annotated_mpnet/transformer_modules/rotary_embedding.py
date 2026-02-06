@@ -60,6 +60,11 @@ class RotaryEmbedding(nn.Module):
             raise ValueError(f"RotaryConfig.dim must be even, got {config.dim}.")
         if config.base_theta <= 0:
             raise ValueError(f"RotaryConfig.base_theta must be > 0, got {config.base_theta}.")
+        if config.max_position_embeddings is not None and config.max_position_embeddings <= 0:
+            raise ValueError(
+                "RotaryConfig.max_position_embeddings must be > 0 when provided, "
+                f"got {config.max_position_embeddings}."
+            )
 
         self.config = config
 
