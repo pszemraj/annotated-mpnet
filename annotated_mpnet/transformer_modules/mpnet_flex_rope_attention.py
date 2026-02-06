@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """Fast MPNet two-stream attention using RoPE + FlexAttention.
 
 Why this exists
@@ -27,9 +25,11 @@ option (AUTO/TRITON/TRITON_DECODE/FLASH). Older PyTorch versions may not support
 default we do NOT pass any kernel_options.
 """
 
+from __future__ import annotations
+
 from dataclasses import dataclass
 from collections import OrderedDict
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Any, Callable, Dict, Optional, Tuple, Union
 
 import torch
 import torch.nn.functional as F
@@ -48,6 +48,11 @@ except Exception:  # pragma: no cover
     create_block_mask = None  # type: ignore
     flex_attention = None  # type: ignore
     _FLEX_AVAILABLE = False
+
+MaskModFn = Callable[[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]
+ScoreModFn = Callable[
+    [torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor
+]
 
 
 @dataclass(frozen=True)
@@ -77,7 +82,7 @@ def _dynamo_is_compiling() -> bool:
     return False
 
 
-def _disable_compile(fn):
+def _disable_compile(fn: Callable[..., Any]) -> Callable[..., Any]:
     """Decorator that disables torch.compile/torch._dynamo for helper code."""
     if hasattr(torch, "compiler") and hasattr(torch.compiler, "disable"):
         return torch.compiler.disable(fn)  # type: ignore[attr-defined]
@@ -94,18 +99,36 @@ _BLOCK_MASK_CACHE: "OrderedDict[tuple[int, int, str, int, Union[int, Tuple[int,i
 
 
 def _device_key(device: torch.device) -> Tuple[str, int]:
+    """Build a stable cache key fragment from a torch device.
+
+    :param torch.device device: Device to encode.
+    :return Tuple[str, int]: ``(device_type, device_index)`` with index ``-1`` when absent.
+    """
     idx = -1 if device.index is None else int(device.index)
     return device.type, idx
 
 
-def _mpnet_query_mask_mod(seq_len: int, pred_size: int):
+def _mpnet_query_mask_mod(seq_len: int, pred_size: int) -> MaskModFn:
     """Return mask_mod(b,h,q_idx,kv_idx)->bool for the *query* stream.
 
     True means the attention edge is **allowed**.
     """
     seq_left = seq_len - pred_size
 
-    def mask_mod(b, h, q_idx, kv_idx):
+    def mask_mod(
+        b: torch.Tensor,
+        h: torch.Tensor,
+        q_idx: torch.Tensor,
+        kv_idx: torch.Tensor,
+    ) -> torch.Tensor:
+        """Return allowed query-stream edges for MPNet two-stream attention.
+
+        :param torch.Tensor b: Batch index tensor (unused, required by FlexAttention API).
+        :param torch.Tensor h: Head index tensor (unused, required by FlexAttention API).
+        :param torch.Tensor q_idx: Query positions.
+        :param torch.Tensor kv_idx: Key/value positions.
+        :return torch.Tensor: Boolean tensor where ``True`` marks allowed attention edges.
+        """
         # 1) allow all original (non-predicted) tokens
         allowed = kv_idx < seq_left
 
@@ -121,14 +144,27 @@ def _mpnet_query_mask_mod(seq_len: int, pred_size: int):
     return mask_mod
 
 
-def _mpnet_content_mask_mod(seq_len: int, pred_size: int):
+def _mpnet_content_mask_mod(seq_len: int, pred_size: int) -> MaskModFn:
     """Return mask_mod(b,h,q_idx,kv_idx)->bool for the *content* stream.
 
     True means the attention edge is **allowed**.
     """
     seq_left = seq_len - pred_size
 
-    def mask_mod(b, h, q_idx, kv_idx):
+    def mask_mod(
+        b: torch.Tensor,
+        h: torch.Tensor,
+        q_idx: torch.Tensor,
+        kv_idx: torch.Tensor,
+    ) -> torch.Tensor:
+        """Return allowed content-stream edges for MPNet two-stream attention.
+
+        :param torch.Tensor b: Batch index tensor (unused, required by FlexAttention API).
+        :param torch.Tensor h: Head index tensor (unused, required by FlexAttention API).
+        :param torch.Tensor q_idx: Query positions.
+        :param torch.Tensor kv_idx: Key/value positions.
+        :return torch.Tensor: Boolean tensor where ``True`` marks allowed attention edges.
+        """
         pred_q = (q_idx >= seq_left) & (q_idx < seq_len)
 
         # 1) allow all original (non-predicted) tokens
@@ -250,7 +286,7 @@ def _build_mpnet_two_stream_block_masks(
 # ---- Optional key padding (score_mod) ------------------------------------
 
 
-def make_key_padding_score_mod(key_padding_mask: torch.Tensor):
+def make_key_padding_score_mod(key_padding_mask: torch.Tensor) -> ScoreModFn:
     """Create a score_mod closure that masks out padded keys.
 
     Args:
@@ -262,7 +298,22 @@ def make_key_padding_score_mod(key_padding_mask: torch.Tensor):
     if key_padding_mask.dtype != torch.bool:
         key_padding_mask = key_padding_mask.to(torch.bool)
 
-    def score_mod(score, b, h, q_idx, kv_idx):
+    def score_mod(
+        score: torch.Tensor,
+        b: torch.Tensor,
+        h: torch.Tensor,
+        q_idx: torch.Tensor,
+        kv_idx: torch.Tensor,
+    ) -> torch.Tensor:
+        """Mask padded keys by writing ``-inf`` to matching attention scores.
+
+        :param torch.Tensor score: Current attention score tensor.
+        :param torch.Tensor b: Batch index tensor.
+        :param torch.Tensor h: Head index tensor (unused).
+        :param torch.Tensor q_idx: Query positions (unused).
+        :param torch.Tensor kv_idx: Key/value positions.
+        :return torch.Tensor: Scores with padded key positions set to ``-inf``.
+        """
         # key_padding_mask[b, kv_idx] broadcasts to score shape.
         return torch.where(key_padding_mask[b, kv_idx], float("-inf"), score)
 

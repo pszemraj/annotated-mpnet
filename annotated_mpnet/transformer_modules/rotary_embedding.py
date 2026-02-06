@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """Rotary Position Embeddings (RoPE).
 
 This implementation is intentionally minimal and repo-friendly:
@@ -18,6 +16,8 @@ at construction time and registered as a buffer.  This avoids runtime
 References:
 - Su et al., "RoFormer: Enhanced Transformer with Rotary Position Embedding" (2021)
 """
+
+from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Optional, Tuple
@@ -54,6 +54,12 @@ class RotaryEmbedding(nn.Module):
     """
 
     def __init__(self, config: RotaryConfig) -> None:
+        """Initialize the rotary embedding cache and inverse frequencies.
+
+        :param RotaryConfig config: RoPE configuration.
+        :raises ValueError: If ``config`` values are invalid.
+        :return None: This constructor returns nothing.
+        """
         super().__init__()
         if config.dim <= 0:
             raise ValueError(f"RotaryConfig.dim must be > 0, got {config.dim}.")
