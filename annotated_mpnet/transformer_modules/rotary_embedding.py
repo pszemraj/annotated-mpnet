@@ -132,10 +132,26 @@ class RotaryEmbedding(nn.Module):
             empty = torch.empty((b, seq, self.config.dim // 2), device=device, dtype=dtype)
             return empty, empty
 
+        is_compiling = bool(
+            hasattr(torch, "_dynamo")
+            and hasattr(torch._dynamo, "is_compiling")
+            and torch._dynamo.is_compiling()
+        )
+
+        if (not is_compiling) and torch.any(position_ids < 0):
+            raise ValueError("position_ids must be non-negative for RoPE.")
+
         # Dynamic mode: grow cache on demand (causes graph break under torch.compile).
         if self.config.max_position_embeddings is None:
             max_pos = int(position_ids.max().item()) + 1
             self._grow_cache(max_pos, device)
+        elif not is_compiling:
+            max_pos = int(position_ids.max().item()) + 1
+            if max_pos > self._cos_cached.shape[0]:
+                raise ValueError(
+                    "position_ids exceed RotaryConfig.max_position_embeddings. "
+                    f"max seen position={max_pos - 1}, cache size={self._cos_cached.shape[0]}."
+                )
 
         # Gather from cache.  When max_position_embeddings is set, the cache is
         # a buffer that already lives on `device` (moved by .to(device)).

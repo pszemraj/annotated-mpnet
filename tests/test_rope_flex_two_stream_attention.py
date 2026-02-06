@@ -72,6 +72,28 @@ class TestRotaryEmbedding(unittest.TestCase):
 
         torch.testing.assert_close(y, y_ref, rtol=0.0, atol=1e-6)
 
+    def test_rope_rejects_negative_positions(self) -> None:
+        device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+        x = torch.randn(1, 2, 4, 8, device=device, dtype=torch.float32)
+        position_ids = torch.tensor([[0, 1, -1, 2]], device=device, dtype=torch.long)
+        rope = RotaryEmbedding(
+            RotaryConfig(dim=8, base_theta=10_000.0, max_position_embeddings=64)
+        ).to(device)
+
+        with self.assertRaisesRegex(ValueError, "non-negative"):
+            rope.rotate(x, position_ids)
+
+    def test_rope_rejects_positions_past_static_cache(self) -> None:
+        device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+        x = torch.randn(1, 2, 4, 8, device=device, dtype=torch.float32)
+        position_ids = torch.tensor([[0, 1, 2, 64]], device=device, dtype=torch.long)
+        rope = RotaryEmbedding(
+            RotaryConfig(dim=8, base_theta=10_000.0, max_position_embeddings=64)
+        ).to(device)
+
+        with self.assertRaisesRegex(ValueError, "max_position_embeddings"):
+            rope.rotate(x, position_ids)
+
 
 class TestTwoStreamMaskMods(unittest.TestCase):
     def test_mask_mods_match_dense_two_stream_masks(self) -> None:
