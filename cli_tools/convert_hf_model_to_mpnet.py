@@ -4,9 +4,11 @@ This is the reverse of convert_pretrained_mpnet_to_hf_model.py.
 """
 
 import argparse
+import json
 import logging
 from argparse import Namespace
 from pathlib import Path
+from typing import Any
 
 from rich.logging import RichHandler
 
@@ -19,6 +21,24 @@ import torch
 from transformers import AutoTokenizer, MPNetForMaskedLM
 
 from annotated_mpnet.utils.utils import hf_max_positions_to_internal
+
+ARCHITECTURE_CONFIG_FILENAME = "config.json"
+
+
+def _save_architecture_config(checkpoint_dir: Path, args: Namespace) -> Path:
+    """Save architecture config sidecar JSON next to converted checkpoint.
+
+    :param Path checkpoint_dir: Directory containing converted checkpoint.
+    :param Namespace args: Model architecture args for converted checkpoint.
+    :return Path: Path to written config file.
+    """
+    config_path = checkpoint_dir / ARCHITECTURE_CONFIG_FILENAME
+    payload: dict[str, Any] = vars(args).copy()
+    tmp_path = config_path.with_suffix(config_path.suffix + ".tmp")
+    with open(tmp_path, "w") as f:
+        json.dump(payload, f, indent=4, default=str)
+    tmp_path.replace(config_path)
+    return config_path
 
 
 def convert_hf_model_to_mpnet(
@@ -73,18 +93,27 @@ def convert_hf_model_to_mpnet(
             max_positions=hf_max_positions_to_internal(
                 hf_config.max_position_embeddings
             ),  # HF includes special tokens.
+            max_tokens=hf_max_positions_to_internal(
+                hf_config.max_position_embeddings
+            ),  # Keep max_tokens aligned for resume logic.
             relative_attention_num_buckets=hf_config.relative_attention_num_buckets,
             relative_attention_max_distance=None,
             pad_token_id=hf_config.pad_token_id,
             bos_token_id=hf_config.bos_token_id,
             eos_token_id=hf_config.eos_token_id,
             num_segments=num_segments,
+            tokenizer_name=hf_model_path,
             # Store the HF model's vocab size as padded_vocab_size to prevent re-padding
             original_vocab_size=hf_config.vocab_size,
             padded_vocab_size=hf_config.vocab_size,
         )
     else:
         args = Namespace(**model_config)
+
+    if not hasattr(args, "max_tokens") and hasattr(args, "max_positions"):
+        args.max_tokens = args.max_positions
+    if not hasattr(args, "tokenizer_name"):
+        args.tokenizer_name = hf_model_path
 
     if type_vocab_size > 1 and getattr(args, "num_segments", 0) < type_vocab_size:
         raise ValueError(
@@ -256,6 +285,8 @@ def convert_hf_model_to_mpnet(
         {"args": vars(args), "model_states": model.state_dict()},
         checkpoint_path,
     )
+    config_path = _save_architecture_config(checkpoint_dir, args)
+    LOGGER.info("Saved architecture config to %s", config_path)
     LOGGER.info("Conversion completed successfully")
 
 

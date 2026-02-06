@@ -7,9 +7,11 @@ doing here.
 """
 
 import argparse
+import json
 import logging
 from argparse import Namespace
 from pathlib import Path
+from typing import Any
 
 from rich.logging import RichHandler
 
@@ -29,6 +31,78 @@ from transformers.utils import logging as hf_logging
 HF_LOGGER = hf_logging.get_logger(__name__)
 hf_logging.set_verbosity_info()
 
+ARCHITECTURE_CONFIG_FILENAME = "config.json"
+
+
+def _coerce_namespace_dict(payload: Any) -> dict[str, Any] | None:
+    """Normalize checkpoint args payload to a plain dict.
+
+    :param Any payload: Raw payload from checkpoint["args"].
+    :return dict[str, Any] | None: Normalized mapping or None when payload is absent.
+    :raises TypeError: If payload type is unsupported.
+    """
+    if payload is None:
+        return None
+    if isinstance(payload, Namespace):
+        return vars(payload)
+    if isinstance(payload, dict):
+        return payload
+    raise TypeError(
+        f"Unsupported checkpoint args payload type: {type(payload)}. Expected dict or Namespace."
+    )
+
+
+def _load_architecture_config(checkpoint_path: Path) -> dict[str, Any] | None:
+    """Load architecture config JSON from the checkpoint root directory.
+
+    :param Path checkpoint_path: Path to checkpoint ``.pt`` file.
+    :return dict[str, Any] | None: Config mapping when present, otherwise None.
+    :raises ValueError: If config JSON does not contain an object.
+    """
+    config_path = checkpoint_path.resolve().parent / ARCHITECTURE_CONFIG_FILENAME
+    if not config_path.exists():
+        return None
+
+    with open(config_path) as f:
+        payload = json.load(f)
+    if not isinstance(payload, dict):
+        raise ValueError(
+            f"Architecture config at {config_path} must contain a JSON object at top level."
+        )
+    LOGGER.info("Loaded architecture config from %s", config_path)
+    return payload
+
+
+def _build_mpnet_args_from_checkpoint_payload(
+    checkpoint_path: Path, state_dicts: dict[str, Any]
+) -> Namespace:
+    """Build a merged args Namespace from config.json and checkpoint payload.
+
+    ``config.json`` (when present) is treated as the primary architecture source.
+    Legacy checkpoint ``args`` are merged in as fallback for non-architecture fields
+    (e.g. tokenizer metadata).
+
+    :param Path checkpoint_path: Path to the source checkpoint.
+    :param dict[str, Any] state_dicts: Loaded checkpoint payload.
+    :return Namespace: Merged argument namespace.
+    :raises KeyError: If neither config.json nor checkpoint args are available.
+    """
+    checkpoint_args = _coerce_namespace_dict(state_dicts.get("args"))
+    config_payload = _load_architecture_config(checkpoint_path)
+
+    if config_payload is None and checkpoint_args is None:
+        raise KeyError(
+            "Checkpoint does not contain args and no config.json was found in checkpoint directory."
+        )
+
+    merged: dict[str, Any] = {}
+    if checkpoint_args is not None:
+        merged.update(checkpoint_args)
+    if config_payload is not None:
+        merged.update(config_payload)
+
+    return Namespace(**merged)
+
 
 def convert_mpnet_checkpoint_to_pytorch(
     mpnet_checkpoint_path: str,
@@ -45,14 +119,13 @@ def convert_mpnet_checkpoint_to_pytorch(
     # Load up the state dicts (one for the weights and one for the args) from the provided
     # serialization path
     # PyTorch 2.6+ requires weights_only=False for loading checkpoints with custom objects
+    checkpoint_path = Path(mpnet_checkpoint_path)
     with safe_globals([Namespace, np.ndarray, np.dtype, np._core.multiarray._reconstruct]):
-        state_dicts = torch.load(mpnet_checkpoint_path, map_location="cpu", weights_only=False)
+        state_dicts = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
 
-    # Extract the model args so that we can properly set the config later on
-    # Extract the weights so we can set them within the constructs of the model
-    mpnet_args = state_dicts["args"]
-    if isinstance(mpnet_args, dict):
-        mpnet_args = Namespace(**mpnet_args)
+    # Build args namespace from config.json + checkpoint payload.
+    # Extract weights so we can set them within the constructs of the model.
+    mpnet_args = _build_mpnet_args_from_checkpoint_payload(checkpoint_path, state_dicts)
 
     mpnet_weight = state_dicts["model_states"]
     # Fix for torch.compile() _orig_mod prefix
