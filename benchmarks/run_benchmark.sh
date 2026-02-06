@@ -11,6 +11,7 @@ LOGGING_STEPS=10
 BATCH_SIZE=16
 MAX_TOKENS=512
 WARMUP=60  # warmup updates (for LR schedule, also covers torch.compile warmup)
+GPU_MONITOR_INTERVAL_SEC=1
 
 # Shared model config (H384, 8 layers)
 MODEL_ARGS=(
@@ -34,19 +35,54 @@ gpu_peak_mem() {
     nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits 2>/dev/null || echo "N/A"
 }
 
+start_gpu_monitor() {
+    local outfile="$1"
+    if ! command -v nvidia-smi >/dev/null 2>&1; then
+        return 1
+    fi
+
+    echo "timestamp,index,name,utilization.gpu_pct,utilization.memory_pct,memory.used_mib,memory.total_mib,power.draw_w,temperature.gpu_c" > "$outfile"
+    nvidia-smi \
+        --query-gpu=timestamp,index,name,utilization.gpu,utilization.memory,memory.used,memory.total,power.draw,temperature.gpu \
+        --format=csv,noheader,nounits \
+        -l "$GPU_MONITOR_INTERVAL_SEC" \
+        >> "$outfile" 2>/dev/null &
+    echo $!
+    return 0
+}
+
+stop_gpu_monitor() {
+    local pid="$1"
+    if [ -z "${pid:-}" ]; then
+        return 0
+    fi
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+}
+
 run_config() {
     local label="$1"; shift
     local logfile="$1"; shift
     local memfile="${logfile%.txt}_mem.txt"
+    local gpufile="${logfile%.txt}_gpu.csv"
     echo ""
     echo "$label"
     python -c "import torch; torch.cuda.reset_peak_memory_stats(); torch.cuda.empty_cache()" 2>/dev/null || true
     sleep 2
 
+    local monitor_pid=""
+    monitor_pid="$(start_gpu_monitor "$gpufile")" || true
+    if [ -n "$monitor_pid" ]; then
+        echo "  -> GPU monitor started (pid=$monitor_pid): $gpufile"
+    else
+        echo "  -> GPU monitor unavailable (nvidia-smi not found)"
+    fi
+
     local start_time=$SECONDS
     pretrain-mpnet "$@" 2>&1 | tee "$logfile"
     local rc=${PIPESTATUS[0]}
     local elapsed=$((SECONDS - start_time))
+    stop_gpu_monitor "$monitor_pid"
 
     local gpu_mem
     gpu_mem=$(gpu_peak_mem)
@@ -54,7 +90,7 @@ run_config() {
         echo "nvidia_smi_mem_mib=$gpu_mem"
         echo "elapsed_sec=$elapsed"
     } > "$memfile"
-    echo "  => Elapsed: ${elapsed}s, GPU mem (nvidia-smi): ${gpu_mem} MiB"
+    echo "  => Elapsed: ${elapsed}s, GPU mem (nvidia-smi): ${gpu_mem} MiB, GPU log: ${gpufile}"
 
     if [ "$rc" -ne 0 ] && [ "$rc" -ne 134 ]; then
         echo "ERROR: pretrain-mpnet exited with code $rc"

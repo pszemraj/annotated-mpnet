@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import ast
+import csv
 import re
 import sys
 from pathlib import Path
@@ -81,6 +82,42 @@ def parse_peak_memory_from_log(path: Path) -> float | None:
     return None
 
 
+def parse_gpu_util_file(path: Path) -> dict[str, float]:
+    """Parse per-sample GPU utilization log written by run_benchmark.sh."""
+    if not path.exists():
+        return {}
+
+    gpu_utils: list[float] = []
+    mem_utils: list[float] = []
+    mem_used: list[float] = []
+
+    with open(path, newline="") as f:
+        reader = csv.reader(f)
+        # Skip header
+        next(reader, None)
+        for row in reader:
+            if len(row) < 6:
+                continue
+            try:
+                gpu_utils.append(float(row[3].strip()))
+                mem_utils.append(float(row[4].strip()))
+                mem_used.append(float(row[5].strip()))
+            except ValueError:
+                continue
+
+    if not gpu_utils:
+        return {}
+
+    return {
+        "gpu_samples": float(len(gpu_utils)),
+        "avg_gpu_util_pct": sum(gpu_utils) / len(gpu_utils),
+        "max_gpu_util_pct": max(gpu_utils),
+        "avg_mem_util_pct": sum(mem_utils) / len(mem_utils) if mem_utils else 0.0,
+        "avg_mem_used_mib": sum(mem_used) / len(mem_used) if mem_used else 0.0,
+        "max_mem_used_mib": max(mem_used) if mem_used else 0.0,
+    }
+
+
 def main():
     results = {}
     for key, label in CONFIGS.items():
@@ -94,12 +131,19 @@ def main():
             continue
         mem_path = SCRIPT_DIR / f"log_{key}_mem.txt"
         mem_info = parse_mem_file(mem_path)
-        peak_mem = parse_peak_memory_from_log(log_path) or mem_info.get("nvidia_smi_mem_mib")
+        gpu_path = SCRIPT_DIR / f"log_{key}_gpu.csv"
+        gpu_info = parse_gpu_util_file(gpu_path)
+        peak_mem = (
+            parse_peak_memory_from_log(log_path)
+            or gpu_info.get("max_mem_used_mib")
+            or mem_info.get("nvidia_smi_mem_mib")
+        )
         results[key] = {
             "label": label,
             "records": records,
             "peak_mem_mib": peak_mem,
             "elapsed_sec": mem_info.get("elapsed_sec"),
+            "gpu_info": gpu_info,
         }
 
     if not results:
@@ -115,7 +159,7 @@ def main():
 
     header = (
         f"{'Configuration':<28} {'Avg TTS':>10} {'Steady TTS':>12} "
-        f"{'Final Loss':>11} {'Peak Mem':>10} {'Elapsed':>9}"
+        f"{'Final Loss':>11} {'Peak Mem':>10} {'Avg GPU%':>9} {'Peak GPU%':>10} {'Elapsed':>9}"
     )
     print(header)
     print("-" * len(header))
@@ -138,6 +182,11 @@ def main():
         avg_steady_tts = sum(steady_tts) / len(steady_tts) if steady_tts else 0
         final_loss = records[-1].get("loss", records[-1].get("sbal", "N/A"))
         peak_mem = f"{r['peak_mem_mib']:.0f} MiB" if r["peak_mem_mib"] else "N/A"
+        gpu_info = r.get("gpu_info", {})
+        avg_gpu = f"{gpu_info['avg_gpu_util_pct']:.1f}" if "avg_gpu_util_pct" in gpu_info else "N/A"
+        peak_gpu = (
+            f"{gpu_info['max_gpu_util_pct']:.1f}" if "max_gpu_util_pct" in gpu_info else "N/A"
+        )
         elapsed = f"{r['elapsed_sec']:.0f}s" if r["elapsed_sec"] else "N/A"
 
         if key == "baseline_nocompile":
@@ -145,7 +194,7 @@ def main():
 
         print(
             f"{r['label']:<28} {avg_tts:>10.0f} {avg_steady_tts:>12.0f} "
-            f"{final_loss:>11.4f} {peak_mem:>10} {elapsed:>9}"
+            f"{final_loss:>11.4f} {peak_mem:>10} {avg_gpu:>9} {peak_gpu:>10} {elapsed:>9}"
         )
 
     # --- Speedup ratios ---
@@ -183,6 +232,7 @@ def main():
     # --- Key ---
     print()
     print("Key: TTS=tokens/sec, Steady=after step 100 (compile warmup excluded)")
+    print("GPU% columns are from nvidia-smi time-series logs captured during each run.")
     print()
 
 
