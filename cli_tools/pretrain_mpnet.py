@@ -537,6 +537,28 @@ def _apply_checkpoint_architecture_args(args: Namespace, checkpoint_args: Namesp
     args.original_vocab_size = checkpoint_args.get("original_vocab_size", args.original_vocab_size)
     args.padded_vocab_size = checkpoint_args.get("padded_vocab_size", args.padded_vocab_size)
 
+    # RoPE + FlexAttention architecture args
+    args.use_rope = checkpoint_args.get("use_rope", getattr(args, "use_rope", False))
+    args.rope_theta = checkpoint_args.get("rope_theta", getattr(args, "rope_theta", 10000.0))
+    args.rope_dim = checkpoint_args.get("rope_dim", getattr(args, "rope_dim", None))
+    args.rope_max_position_embeddings = checkpoint_args.get(
+        "rope_max_position_embeddings",
+        getattr(args, "rope_max_position_embeddings", None),
+    )
+    args.use_relative_attention_bias = checkpoint_args.get(
+        "use_relative_attention_bias",
+        getattr(args, "use_relative_attention_bias", True),
+    )
+    args.use_flex_attention = checkpoint_args.get(
+        "use_flex_attention", getattr(args, "use_flex_attention", True)
+    )
+    args.flex_block_size = checkpoint_args.get(
+        "flex_block_size", getattr(args, "flex_block_size", 128)
+    )
+    args.flex_compile_block_mask = checkpoint_args.get(
+        "flex_compile_block_mask", getattr(args, "flex_compile_block_mask", False)
+    )
+
     args.max_tokens = checkpoint_args.get("max_tokens", args.max_tokens)
     if "max_positions" in checkpoint_args:
         args.max_positions = checkpoint_args.get("max_positions", args.max_positions)
@@ -2283,6 +2305,70 @@ def cli_main() -> None:
         action="store_true",
         default=False,
     )
+    # ---- RoPE + FlexAttention options ----------------------------------------
+    parser.add_argument(
+        "--use-rope",
+        help="Use Rotary Position Embeddings (RoPE) instead of learned absolute + relative bias.",
+        action="store_true",
+        default=False,
+    )
+    parser.add_argument(
+        "--rope-theta",
+        help="RoPE base frequency (theta). Default 10000.0.",
+        type=float,
+        default=10000.0,
+    )
+    parser.add_argument(
+        "--rope-dim",
+        help="Number of head-dimension features to apply RoPE to. Defaults to full head_dim.",
+        type=int,
+        default=None,
+    )
+    parser.add_argument(
+        "--rope-max-position-embeddings",
+        help="Maximum position id for RoPE cache. Defaults to --max-positions.",
+        type=int,
+        default=None,
+    )
+    parser.add_argument(
+        "--use-relative-attention-bias",
+        help="Enable T5-style relative attention bias (default: True).",
+        action="store_true",
+        default=True,
+        dest="use_relative_attention_bias",
+    )
+    parser.add_argument(
+        "--no-relative-attention-bias",
+        help="Disable T5-style relative attention bias.",
+        action="store_false",
+        dest="use_relative_attention_bias",
+    )
+    parser.add_argument(
+        "--use-flex-attention",
+        help="Enable FlexAttention fast path when RoPE is active (default: True).",
+        action="store_true",
+        default=True,
+        dest="use_flex_attention",
+    )
+    parser.add_argument(
+        "--no-flex-attention",
+        help="Disable FlexAttention; always use SDPA fallback.",
+        action="store_false",
+        dest="use_flex_attention",
+    )
+    parser.add_argument(
+        "--flex-block-size",
+        help="Block size for FlexAttention create_block_mask. Default 128.",
+        type=int,
+        default=128,
+    )
+    parser.add_argument(
+        "--flex-compile-block-mask",
+        help="Compile block mask creation (rarely needed; mask is cached anyway).",
+        action="store_true",
+        default=False,
+    )
+
     parser.add_argument(
         "--train-dir",
         help="The directory containing training files. Each file is fully loaded into memory per "
