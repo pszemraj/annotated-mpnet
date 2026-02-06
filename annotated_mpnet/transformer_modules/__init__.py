@@ -7,3 +7,4 @@ from .positional_embedding import PositionalEmbedding
 from .rel_multihead_attention import RelativeMultiHeadAttention
 from .sentence_encoder_layer import SentenceEncoderLayer
 from .sentence_encoder import SentenceEncoder
+from .rotary_embedding import RotaryConfig, RotaryEmbedding
