@@ -334,20 +334,20 @@ def _build_sdpa_attn_bias(
         if attn_mask.dtype == torch.bool:
             mask = attn_mask
             if mask.dim() == 2:
-                mask = mask.unsqueeze(0).unsqueeze(0)
+                mask = rearrange(mask, "t s -> 1 1 t s")
             elif mask.dim() == 3:
-                mask = mask.unsqueeze(1)
+                mask = rearrange(mask, "b t s -> b 1 t s")
             attn_bias.masked_fill_(mask.to(device=device), float("-inf"))
         else:
             mask = attn_mask.to(device=device, dtype=dtype)
             if mask.dim() == 2:
-                mask = mask.unsqueeze(0).unsqueeze(0)
+                mask = rearrange(mask, "t s -> 1 1 t s")
             elif mask.dim() == 3:
-                mask = mask.unsqueeze(1)
+                mask = rearrange(mask, "b t s -> b 1 t s")
             attn_bias += mask
 
     if key_padding_mask is not None:
-        key_mask = key_padding_mask.to(torch.bool).unsqueeze(1).unsqueeze(2)
+        key_mask = rearrange(key_padding_mask.to(torch.bool), "b s -> b 1 1 s")
         attn_bias.masked_fill_(key_mask, float("-inf"))
 
     return attn_bias

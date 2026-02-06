@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from typing import Optional, Tuple
 
 import torch
+from einops import rearrange
 from torch import nn
 
 
@@ -155,9 +156,14 @@ class RotaryEmbedding(nn.Module):
 
         # Gather from cache.  When max_position_embeddings is set, the cache is
         # a buffer that already lives on `device` (moved by .to(device)).
-        flat = position_ids.reshape(-1)
-        cos = self._cos_cached.index_select(0, flat).view(*position_ids.shape, -1).to(dtype=dtype)
-        sin = self._sin_cached.index_select(0, flat).view(*position_ids.shape, -1).to(dtype=dtype)
+        b, seq = position_ids.shape
+        flat = rearrange(position_ids, "b l -> (b l)")
+        cos = rearrange(self._cos_cached.index_select(0, flat), "(b l) d -> b l d", b=b, l=seq).to(
+            dtype=dtype
+        )
+        sin = rearrange(self._sin_cached.index_select(0, flat), "(b l) d -> b l d", b=b, l=seq).to(
+            dtype=dtype
+        )
         return cos, sin
 
     def rotate(self, x: torch.Tensor, position_ids: torch.Tensor) -> torch.Tensor:
@@ -184,20 +190,20 @@ class RotaryEmbedding(nn.Module):
             raise ValueError(f"RotaryConfig.dim={rotary_dim} cannot exceed head_dim={d}.")
 
         cos, sin = self._gather_cos_sin(position_ids, device=x.device, dtype=x.dtype)
-        cos = cos.unsqueeze(1)  # (B, 1, L, dim/2)
-        sin = sin.unsqueeze(1)
+        cos = rearrange(cos, "b l d -> b 1 l d")
+        sin = rearrange(sin, "b l d -> b 1 l d")
 
         x_rope = x[..., :rotary_dim]
         x_pass = x[..., rotary_dim:]
 
         # (B, H, L, dim) -> (B, H, L, dim/2, 2)
-        x_rope = x_rope.view(b, h, seq_len, rotary_dim // 2, 2)
+        x_rope = rearrange(x_rope, "b h l (d r) -> b h l d r", r=2)
         x1 = x_rope[..., 0]
         x2 = x_rope[..., 1]
 
         out1 = x1 * cos - x2 * sin
         out2 = x1 * sin + x2 * cos
-        out = torch.stack((out1, out2), dim=-1).reshape(b, h, seq_len, rotary_dim)
+        out = rearrange(torch.stack((out1, out2), dim=-1), "b h l d r -> b h l (d r)")
 
         if x_pass.numel() == 0:
             return out
