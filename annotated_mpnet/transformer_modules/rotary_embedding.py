@@ -11,6 +11,10 @@ This implementation is intentionally minimal and repo-friendly:
 RoPE is applied to the first ``config.dim`` features of the head dimension and
 leaves the remaining features untouched (useful if you want partial RoPE).
 
+When ``max_position_embeddings`` is set, the full cos/sin table is built eagerly
+at construction time and registered as a buffer.  This avoids runtime
+``Tensor.item()`` calls that would cause torch.compile graph breaks.
+
 References:
 - Su et al., "RoFormer: Enhanced Transformer with Rotary Position Embedding" (2021)
 """
@@ -32,7 +36,8 @@ class RotaryConfig:
             - 10_000 (classic)
             - 160_000 (long context; used in some recent encoder configs)
         max_position_embeddings: Optional cap on the maximum position id + 1 allowed.
-            If set, all position ids must be < max_position_embeddings.
+            If set, the full cos/sin table is eagerly built at construction, avoiding
+            graph breaks under torch.compile.
     """
 
     dim: int
@@ -65,38 +70,35 @@ class RotaryEmbedding(nn.Module):
         # (dim/2,)
         self.register_buffer("inv_freq", inv_freq, persistent=False)
 
-        # Cached tables (fp32): (max_pos, dim/2)
-        self.register_buffer("_cos_cached", torch.empty(0, dtype=torch.float32), persistent=False)
-        self.register_buffer("_sin_cached", torch.empty(0, dtype=torch.float32), persistent=False)
-        self._cached_max_pos: int = 0
-        self._cache_device: Optional[torch.device] = None
-
-    @torch.no_grad()
-    def _maybe_build_cache(self, *, max_pos: int, device: torch.device) -> None:
-        """Ensure cache supports position ids in [0, max_pos)."""
-        if max_pos <= 0:
-            return
-
-        if (
-            self.config.max_position_embeddings is not None
-            and max_pos > self.config.max_position_embeddings
-        ):
-            raise ValueError(
-                f"RoPE cache request max_pos={max_pos} exceeds max_position_embeddings={self.config.max_position_embeddings}."
+        # When max_position_embeddings is known, eagerly build the full table as
+        # a buffer.  Buffers travel with .to(device) so no runtime rebuild needed.
+        if config.max_position_embeddings is not None and config.max_position_embeddings > 0:
+            t = torch.arange(config.max_position_embeddings, dtype=torch.float32)
+            freqs = torch.outer(t, inv_freq)
+            self.register_buffer("_cos_cached", freqs.cos(), persistent=False)
+            self.register_buffer("_sin_cached", freqs.sin(), persistent=False)
+        else:
+            self.register_buffer(
+                "_cos_cached", torch.empty(0, dtype=torch.float32), persistent=False
+            )
+            self.register_buffer(
+                "_sin_cached", torch.empty(0, dtype=torch.float32), persistent=False
             )
 
-        # If cache is already large enough and on the right device, keep it.
-        if self._cache_device == device and self._cached_max_pos >= max_pos:
+    @torch.no_grad()
+    def _grow_cache(self, max_pos: int, device: torch.device) -> None:
+        """Grow the cos/sin cache to cover [0, max_pos) on *device*.
+
+        Only used when ``max_position_embeddings`` is unset (dynamic mode).
+        """
+        if max_pos <= 0:
             return
-
-        # Build [0..max_pos-1] table.
-        t = torch.arange(max_pos, device=device, dtype=torch.float32)  # (max_pos,)
-        freqs = torch.outer(t, self.inv_freq.to(device=device))  # (max_pos, dim/2)
-
+        if self._cos_cached.shape[0] >= max_pos and self._cos_cached.device == device:
+            return
+        t = torch.arange(max_pos, device=device, dtype=torch.float32)
+        freqs = torch.outer(t, self.inv_freq.to(device=device))
         self._cos_cached = freqs.cos()
         self._sin_cached = freqs.sin()
-        self._cached_max_pos = int(max_pos)
-        self._cache_device = device
 
     def _gather_cos_sin(
         self,
@@ -115,22 +117,23 @@ class RotaryEmbedding(nn.Module):
                 f"position_ids must have shape (B, L), got {tuple(position_ids.shape)}."
             )
 
-        # Move/cast positions to the same device as the tensor being rotated.
         if position_ids.device != device:
             position_ids = position_ids.to(device)
         if position_ids.dtype not in (torch.int32, torch.int64):
             position_ids = position_ids.to(torch.int64)
 
         if position_ids.numel() == 0:
-            # Degenerate but safe.
             b, seq = position_ids.shape
             empty = torch.empty((b, seq, self.config.dim // 2), device=device, dtype=dtype)
             return empty, empty
 
-        max_pos = int(position_ids.max().item()) + 1
-        self._maybe_build_cache(max_pos=max_pos, device=device)
+        # Dynamic mode: grow cache on demand (causes graph break under torch.compile).
+        if self.config.max_position_embeddings is None:
+            max_pos = int(position_ids.max().item()) + 1
+            self._grow_cache(max_pos, device)
 
-        # (B*L,) -> gather -> (B, L, dim/2)
+        # Gather from cache.  When max_position_embeddings is set, the cache is
+        # a buffer that already lives on `device` (moved by .to(device)).
         flat = position_ids.reshape(-1)
         cos = self._cos_cached.index_select(0, flat).view(*position_ids.shape, -1).to(dtype=dtype)
         sin = self._sin_cached.index_select(0, flat).view(*position_ids.shape, -1).to(dtype=dtype)
@@ -159,7 +162,6 @@ class RotaryEmbedding(nn.Module):
         if rotary_dim > d:
             raise ValueError(f"RotaryConfig.dim={rotary_dim} cannot exceed head_dim={d}.")
 
-        # Gather cos/sin and broadcast over heads.
         cos, sin = self._gather_cos_sin(position_ids, device=x.device, dtype=x.dtype)
         cos = cos.unsqueeze(1)  # (B, 1, L, dim/2)
         sin = sin.unsqueeze(1)
@@ -172,8 +174,6 @@ class RotaryEmbedding(nn.Module):
         x1 = x_rope[..., 0]
         x2 = x_rope[..., 1]
 
-        # Apply complex rotation:
-        # (x1 + i*x2) * (cos + i*sin) => (x1*cos - x2*sin) + i*(x1*sin + x2*cos)
         out1 = x1 * cos - x2 * sin
         out2 = x1 * sin + x2 * cos
         out = torch.stack((out1, out2), dim=-1).reshape(b, h, seq_len, rotary_dim)
