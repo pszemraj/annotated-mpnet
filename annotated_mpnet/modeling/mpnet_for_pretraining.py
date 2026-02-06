@@ -18,6 +18,12 @@ from transformers import PreTrainedTokenizer
 from einops import rearrange
 
 from annotated_mpnet.transformer_modules import LayerNorm, SentenceEncoder
+from annotated_mpnet.transformer_modules.rotary_embedding import RotaryConfig, RotaryEmbedding
+from annotated_mpnet.transformer_modules.mpnet_flex_rope_attention import (
+    MPNetTwoStreamAttentionConfig,
+    two_stream_self_attention_rope,
+    _FLEX_AVAILABLE as _MPNET_FLEX_AVAILABLE,
+)
 from annotated_mpnet.utils.tensor_ops import (
     maybe,
     normalize_position_bias,
@@ -98,7 +104,63 @@ class MPNetForPretraining(nn.Module):
 
         # Let's define the encoder here
         self.args = args
+
+        # ---- Positional encoding / fast attention options -----------------
+        # If args.use_rope is set, we use RoPE inside attention and (by default) disable learned
+        # absolute position embeddings to avoid double-positioning.
+        self.use_rope = bool(getattr(args, "use_rope", False))
+
+        use_position_embeddings = getattr(args, "use_position_embeddings", None)
+        if use_position_embeddings is None:
+            use_position_embeddings = not self.use_rope
+        else:
+            use_position_embeddings = bool(use_position_embeddings)
+
+        self.rope: Optional[RotaryEmbedding] = None
+        self.two_stream_attention_config: Optional[MPNetTwoStreamAttentionConfig] = None
+        if self.use_rope:
+            head_dim = args.encoder_embed_dim // args.encoder_attention_heads
+            rope_dim = int(getattr(args, "rope_dim", head_dim))
+            rope_theta = float(getattr(args, "rope_theta", 10_000.0))
+            rope_max_pos = getattr(args, "rope_max_position_embeddings", None)
+            if rope_max_pos is None:
+                rope_max_pos = getattr(args, "max_positions", None)
+            if rope_max_pos is not None:
+                rope_max_pos = int(rope_max_pos)
+
+            self.rope = RotaryEmbedding(
+                RotaryConfig(
+                    dim=rope_dim,
+                    base_theta=rope_theta,
+                    max_position_embeddings=rope_max_pos,
+                )
+            )
+            self.two_stream_attention_config = MPNetTwoStreamAttentionConfig(
+                use_flex_attention=bool(getattr(args, "use_flex_attention", True)),
+                flex_block_size=getattr(args, "flex_block_size", 128),
+                flex_compile_block_mask=bool(getattr(args, "flex_compile_block_mask", False)),
+                flex_kernel_options=getattr(args, "flex_kernel_options", None),
+            )
+
+            if use_position_embeddings:
+                LOGGER.warning(
+                    "use_rope=True but use_position_embeddings=True; this applies BOTH RoPE and learned absolute positions. "
+                    "For RoPE-as-primary, leave use_position_embeddings unset or set it to False."
+                )
+
         num_segments = getattr(args, "num_segments", 0)
+
+        # Fast-path gating: when True we can skip building dense two-stream boolean masks
+        # in forward(), because the RoPE+FlexAttention implementation builds structural
+        # BlockMasks internally.
+        self._rope_flex_fastpath = bool(
+            self.use_rope
+            and self.two_stream_attention_config is not None
+            and self.two_stream_attention_config.use_flex_attention
+            and _MPNET_FLEX_AVAILABLE
+            and float(getattr(args, "attention_dropout", 0.0)) == 0.0
+        )
+
         self.sentence_encoder = SentenceEncoder(
             padding_idx=tokenizer.pad_token_id,
             vocab_size=vocab_size,  # Use the padded vocab size
@@ -111,6 +173,7 @@ class MPNetForPretraining(nn.Module):
             activation_dropout=args.activation_dropout,
             max_seq_len=args.max_positions,
             num_segments=num_segments,
+            use_position_embeddings=use_position_embeddings,
             encoder_normalize_before=True,
             activation_fn=args.activation_fn,
             normalize_before=args.normalize_before,
@@ -189,19 +252,30 @@ class MPNetForPretraining(nn.Module):
         # Separate out content and query streams
         c, q = split_tensor(x, pred_size)
 
-        # Get the content and query position biases
-        # Use the shared encoder helper to keep relative position bucketing in one place.
+        # Positions for RoPE and/or relative bias.
+        # content stream length = seq_len + pred_size, query stream length = pred_size
         content_positions = slice_left_at_dim(positions, positions.size(1) - pred_size, dim=1)
-        content_position_bias = self.sentence_encoder.compute_position_bias_from_positions(
-            content_positions
-        )
-        query_position_bias = slice_right_at_dim(
-            content_position_bias, pred_size, dim=1
-        ).contiguous()
+        query_positions = slice_right_at_dim(positions, pred_size, dim=1).contiguous()
 
-        # Cast position bias once to match the attention dtype/device.
-        content_position_bias = cast_bias(content_position_bias, emb)
-        query_position_bias = cast_bias(query_position_bias, emb)
+        use_rel_bias = bool(getattr(self.args, "use_relative_attention_bias", True))
+
+        if self.rope is None and use_rel_bias:
+            # Relative attention bias path (original MPNet behavior).
+            # Use the shared encoder helper to keep relative position bucketing in one place.
+            content_position_bias = self.sentence_encoder.compute_position_bias_from_positions(
+                content_positions
+            )
+            query_position_bias = slice_right_at_dim(
+                content_position_bias, pred_size, dim=1
+            ).contiguous()
+
+            # Cast position bias once to match the attention dtype/device.
+            content_position_bias = cast_bias(content_position_bias, emb)
+            query_position_bias = cast_bias(query_position_bias, emb)
+        else:
+            # RoPE/NoPE path: skip computing relative attention bias entirely.
+            content_position_bias = None
+            query_position_bias = None
 
         # Get the sz of the inital src_length without the tokens to be predicted
         sz = c.size(0) - pred_size
@@ -212,14 +286,25 @@ class MPNetForPretraining(nn.Module):
             pad_token_id = None
         else:
             pad_token_id = self.sentence_encoder.padding_idx
-
-        query_mask, content_mask, key_padding_mask = make_query_and_content_mask(
-            input_ids,
-            sz,
-            pred_size,
-            pad_token_id=pad_token_id,
-            attention_mask=attention_mask,
-        )
+        if self._rope_flex_fastpath:
+            # Only build key-padding (O(B*L)). Two-stream structural masks are represented by BlockMasks.
+            key_len = sz + pred_size
+            query_mask = None
+            content_mask = None
+            if attention_mask is not None:
+                key_padding_mask = attention_mask[:, :key_len].eq(0)
+            elif pad_token_id is not None:
+                key_padding_mask = input_ids[:, :key_len].eq(pad_token_id)
+            else:
+                key_padding_mask = None
+        else:
+            query_mask, content_mask, key_padding_mask = make_query_and_content_mask(
+                input_ids,
+                sz,
+                pred_size,
+                pad_token_id=pad_token_id,
+                attention_mask=attention_mask,
+            )
 
         # Do the attention calculations
         use_checkpoint = (
@@ -250,6 +335,10 @@ class MPNetForPretraining(nn.Module):
                         content_position_bias,
                         query_position_bias,
                         key_padding_mask,
+                        content_positions=content_positions,
+                        query_positions=query_positions,
+                        rope=self.rope,
+                        rope_config=self.two_stream_attention_config,
                     )
 
                 c, q = checkpoint(_layer_forward, c, q, use_reentrant=False)
@@ -263,6 +352,10 @@ class MPNetForPretraining(nn.Module):
                     content_position_bias,
                     query_position_bias,
                     key_padding_mask,
+                    content_positions=content_positions,
+                    query_positions=query_positions,
+                    rope=self.rope,
+                    rope_config=self.two_stream_attention_config,
                 )
 
         # Process the final layer norm
@@ -388,6 +481,11 @@ def encode_two_stream_attention(
     content_position_bias: Optional[torch.Tensor] = None,
     query_position_bias: Optional[torch.Tensor] = None,
     key_padding_mask: Optional[torch.Tensor] = None,
+    *,
+    content_positions: Optional[torch.Tensor] = None,
+    query_positions: Optional[torch.Tensor] = None,
+    rope: Optional[RotaryEmbedding] = None,
+    rope_config: Optional[MPNetTwoStreamAttentionConfig] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Compute two-stream attention for a single encoder layer.
 
@@ -447,19 +545,41 @@ def encode_two_stream_attention(
     c = self.maybe_layer_norm(self.self_attn_layer_norm, c, before=True)
     q = self.maybe_layer_norm(self.self_attn_layer_norm, q, before=True)
 
-    # Wrapper function on top of each layer's self attention mechanism that calculates the proper
-    # two stream attention that is required for MPNet
-    c, q = two_stream_self_attention(
-        self.self_attn,
-        query=[c, q],
-        key=c,
-        value=c,
-        query_mask=query_mask,
-        content_mask=content_mask,
-        query_position_bias=query_position_bias,
-        content_position_bias=content_position_bias,
-        key_padding_mask=key_padding_mask,
-    )
+    # Two-stream self-attention.
+    # - Baseline: relative attention bias + SDPA/manual attention (existing behavior).
+    # - Fast path: RoPE + FlexAttention (flash-like) with SDPA fallback when needed.
+    if rope is not None:
+        if content_positions is None or query_positions is None:
+            raise ValueError(
+                "content_positions and query_positions are required when rope is enabled."
+            )
+        cfg = rope_config if rope_config is not None else MPNetTwoStreamAttentionConfig()
+        c, q = two_stream_self_attention_rope(
+            self.self_attn,
+            c=c,
+            q=q,
+            content_mask=content_mask,
+            query_mask=query_mask,
+            content_positions=content_positions,
+            query_positions=query_positions,
+            key_padding_mask=key_padding_mask,
+            rope=rope,
+            config=cfg,
+        )
+    else:
+        # Wrapper function on top of each layer's self attention mechanism that calculates the proper
+        # two stream attention that is required for MPNet
+        c, q = two_stream_self_attention(
+            self.self_attn,
+            query=[c, q],
+            key=c,
+            value=c,
+            query_mask=query_mask,
+            content_mask=content_mask,
+            query_position_bias=query_position_bias,
+            content_position_bias=content_position_bias,
+            key_padding_mask=key_padding_mask,
+        )
 
     # Calculate skip connection, inner layer norms, and feed forward after attention calculation
     # using the resuable function we built above
