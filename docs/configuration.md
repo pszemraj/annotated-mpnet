@@ -79,9 +79,9 @@ The `--activation-fn` (alias `-activation`) argument sets the FFN activation fun
 | Argument                        | Type   | Default | Description                                                                                                              |
 | ------------------------------- | ------ | ------- | ------------------------------------------------------------------------------------------------------------------------ |
 | `--use-rope`                    | `bool` | `False` | Enable Rotary Position Embeddings (RoPE).                                                                               |
-| `--rope-theta`                  | `float`| `10000.0` | RoPE base frequency (`theta`).                                                                                          |
+| `--rope-theta`                  | `float` | `10000.0` | RoPE base frequency (`theta`).                                                                                          |
 | `--rope-dim`                    | `int`  | `None`  | Number of head-dimension channels to rotate. `None` uses full head dimension.                                          |
-| `--rope-max-position-embeddings`| `int`  | `None`  | Maximum cached RoPE position id. Defaults to `--max-positions` when unset.                                             |
+| `--rope-max-position-embeddings` | `int`  | `None`  | Maximum cached RoPE position id. Defaults to `--max-positions` when unset.                                             |
 | `--use-relative-attention-bias` | `bool` | `True`  | Keep learned relative attention bias enabled (legacy MPNet behavior).                                                   |
 | `--no-relative-attention-bias`  | `bool` | `False` | Disable learned relative attention bias (common for RoPE ablations).                                                    |
 | `--use-flex-attention`          | `bool` | `True`  | Enable FlexAttention path when RoPE is active and attention dropout is `0.0`.                                           |
