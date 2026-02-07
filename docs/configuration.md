@@ -7,6 +7,7 @@ Complete reference for all `pretrain-mpnet` arguments. Default values follow the
 - [Model Architecture](#model-architecture)
   - [Activation Functions](#activation-functions)
 - [Positional Encoding](#positional-encoding)
+- [RoPE + FlexAttention](#rope--flexattention)
 - [Tokenizer](#tokenizer)
 - [Data Source](#data-source)
   - [HuggingFace Streaming (default)](#huggingface-streaming-default)
@@ -70,6 +71,24 @@ The `--activation-fn` (alias `-activation`) argument sets the FFN activation fun
 > `--max-tokens` and `--max-positions` should almost always be the same[^1], so only set one of them.
 
 [^1]: An exception would be if you plan to do multiple training phases and gradually increase the context length trained at (_for efficiency reasons_). In this case, `--max-positions` should be set to the **final planned context length** (e.g. 2048) and `--max-tokens` should be set to the **initial training phase context length** (e.g. 512)
+
+---
+
+## RoPE + FlexAttention
+
+| Argument                        | Type   | Default | Description                                                                                                              |
+| ------------------------------- | ------ | ------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `--use-rope`                    | `bool` | `False` | Enable Rotary Position Embeddings (RoPE).                                                                               |
+| `--rope-theta`                  | `float`| `10000.0` | RoPE base frequency (`theta`).                                                                                          |
+| `--rope-dim`                    | `int`  | `None`  | Number of head-dimension channels to rotate. `None` uses full head dimension.                                          |
+| `--rope-max-position-embeddings`| `int`  | `None`  | Maximum cached RoPE position id. Defaults to `--max-positions` when unset.                                             |
+| `--use-relative-attention-bias` | `bool` | `True`  | Keep learned relative attention bias enabled (legacy MPNet behavior).                                                   |
+| `--no-relative-attention-bias`  | `bool` | `False` | Disable learned relative attention bias (common for RoPE ablations).                                                    |
+| `--use-flex-attention`          | `bool` | `True`  | Enable FlexAttention path when RoPE is active and attention dropout is `0.0`.                                           |
+| `--no-flex-attention`           | `bool` | `False` | Disable FlexAttention and force SDPA fallback.                                                                          |
+| `--flex-block-size`             | `int`  | `128`   | Block size passed to FlexAttention `create_block_mask`.                                                                 |
+| `--flex-compile-block-mask`     | `bool` | `False` | Compile block-mask creation (usually unnecessary because masks are cached).                                              |
+| `--flex-backend`                | `str`  | `None`  | Optional backend override: `auto`, `triton`, `triton_decode`, or `flash`. `None` leaves backend selection to PyTorch. |
 
 ---
 

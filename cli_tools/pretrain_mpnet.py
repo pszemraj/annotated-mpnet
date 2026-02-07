@@ -83,6 +83,7 @@ ARCHITECTURE_CONFIG_FIELDS = (
     "use_flex_attention",
     "flex_block_size",
     "flex_compile_block_mask",
+    "flex_backend",
     "gradient_checkpointing",
     "tokenizer_name",
 )
@@ -95,6 +96,7 @@ ARCHITECTURE_LEGACY_DEFAULTS = {
     "use_flex_attention": True,
     "flex_block_size": 128,
     "flex_compile_block_mask": False,
+    "flex_backend": None,
 }
 
 
@@ -675,6 +677,10 @@ def _apply_checkpoint_architecture_args(args: Namespace, checkpoint_args: Namesp
     args.flex_compile_block_mask = checkpoint_args.get(
         "flex_compile_block_mask",
         ARCHITECTURE_LEGACY_DEFAULTS["flex_compile_block_mask"],
+    )
+    args.flex_backend = checkpoint_args.get(
+        "flex_backend",
+        ARCHITECTURE_LEGACY_DEFAULTS["flex_backend"],
     )
     args.gradient_checkpointing = checkpoint_args.get(
         "gradient_checkpointing", getattr(args, "gradient_checkpointing", False)
@@ -2567,6 +2573,17 @@ def cli_main() -> None:
         help="Compile block mask creation (rarely needed; mask is cached anyway).",
         action="store_true",
         default=False,
+    )
+    parser.add_argument(
+        "--flex-backend",
+        help=(
+            "Optional FlexAttention backend override. "
+            "Choices: auto, triton, triton_decode, flash. "
+            "Default: None (PyTorch AUTO heuristics)."
+        ),
+        type=str.lower,
+        choices=("auto", "triton", "triton_decode", "flash"),
+        default=None,
     )
 
     parser.add_argument(

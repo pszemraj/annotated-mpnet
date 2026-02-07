@@ -157,6 +157,29 @@ class MPNetForPretraining(nn.Module):
                         flex_kernel_options,
                     )
 
+            flex_backend = getattr(args, "flex_backend", None)
+            if flex_backend is not None:
+                backend_name = str(flex_backend).upper()
+                if flex_kernel_options is None:
+                    flex_kernel_options = {}
+                else:
+                    if not isinstance(flex_kernel_options, dict):
+                        raise TypeError(
+                            "flex_kernel_options must be a dict when provided. "
+                            f"Got {type(flex_kernel_options).__name__}."
+                        )
+                    flex_kernel_options = dict(flex_kernel_options)
+
+                existing_backend = flex_kernel_options.get("BACKEND")
+                if existing_backend is not None and str(existing_backend).upper() != backend_name:
+                    LOGGER.warning(
+                        "Overriding flex_kernel_options BACKEND=%s with --flex-backend=%s.",
+                        existing_backend,
+                        backend_name,
+                    )
+                flex_kernel_options["BACKEND"] = backend_name
+                LOGGER.info("Using FlexAttention backend override: BACKEND=%s", backend_name)
+
             self.rope = RotaryEmbedding(
                 RotaryConfig(
                     dim=rope_dim,

@@ -993,6 +993,7 @@ class TestPretrainHelpers(unittest.TestCase):
             use_flex_attention=False,
             flex_block_size=64,
             flex_compile_block_mask=True,
+            flex_backend="flash",
             gradient_checkpointing=False,
         )
         checkpoint_args = {
@@ -1022,6 +1023,61 @@ class TestPretrainHelpers(unittest.TestCase):
         self.assertTrue(args.use_flex_attention)
         self.assertEqual(args.flex_block_size, 128)
         self.assertFalse(args.flex_compile_block_mask)
+        self.assertIsNone(args.flex_backend)
+
+    def test_apply_checkpoint_architecture_args_restores_flex_backend(self) -> None:
+        """Restore explicit flex backend from checkpoint architecture config.
+
+        :return None: This test returns nothing.
+        """
+        args = Namespace(
+            encoder_layers=1,
+            encoder_embed_dim=64,
+            encoder_ffn_dim=128,
+            encoder_attention_heads=4,
+            dropout=0.1,
+            attention_dropout=0.1,
+            activation_dropout=0.1,
+            activation_fn="gelu",
+            relative_attention_num_buckets=32,
+            relative_attention_max_distance=64,
+            normalize_before=False,
+            original_vocab_size=100,
+            padded_vocab_size=128,
+            max_tokens=128,
+            max_positions=128,
+            use_rope=False,
+            rope_theta=10_000.0,
+            rope_dim=None,
+            rope_max_position_embeddings=None,
+            use_relative_attention_bias=True,
+            use_flex_attention=True,
+            flex_block_size=128,
+            flex_compile_block_mask=False,
+            flex_backend=None,
+            gradient_checkpointing=False,
+        )
+        checkpoint_args = {
+            "encoder_layers": 2,
+            "encoder_embed_dim": 32,
+            "encoder_ffn_dim": 64,
+            "encoder_attention_heads": 2,
+            "dropout": 0.2,
+            "attention_dropout": 0.2,
+            "activation_dropout": 0.2,
+            "activation_fn": "relu",
+            "relative_attention_num_buckets": 16,
+            "relative_attention_max_distance": 128,
+            "normalize_before": True,
+            "original_vocab_size": 200,
+            "padded_vocab_size": 256,
+            "max_tokens": 256,
+            "flex_backend": "flash",
+        }
+
+        pretrain_mpnet._apply_checkpoint_architecture_args(args, checkpoint_args)
+
+        self.assertEqual(args.flex_backend, "flash")
 
     def test_load_architecture_config_prefers_resume_root(self) -> None:
         """Ensure resume-root config is preferred over local checkpoint_dir config.
@@ -1083,6 +1139,7 @@ class TestPretrainHelpers(unittest.TestCase):
             use_flex_attention=True,
             flex_block_size=128,
             flex_compile_block_mask=False,
+            flex_backend="triton",
             gradient_checkpointing=False,
             tokenizer_name="dummy",
             checkpoint_dir="./checkpoints",
@@ -1105,6 +1162,44 @@ class TestPretrainHelpers(unittest.TestCase):
             self.assertTrue(config["use_rope"])
             self.assertEqual(config["encoder_layers"], 2)
             self.assertEqual(config["tokenizer_name"], "dummy")
+            self.assertEqual(config["flex_backend"], "triton")
+
+    def test_model_flex_backend_sets_kernel_option(self) -> None:
+        """Ensure --flex-backend is forwarded as FlexAttention BACKEND kernel option.
+
+        :return None: This test returns nothing.
+        """
+        args = Namespace(
+            encoder_layers=2,
+            encoder_embed_dim=32,
+            encoder_ffn_dim=64,
+            encoder_attention_heads=4,
+            dropout=0.1,
+            attention_dropout=0.0,
+            activation_dropout=0.1,
+            activation_fn="gelu",
+            max_positions=16,
+            relative_attention_num_buckets=8,
+            relative_attention_max_distance=16,
+            normalize_before=False,
+            padded_vocab_size=30528,
+            use_rope=True,
+            rope_theta=10_000.0,
+            rope_dim=None,
+            rope_max_position_embeddings=None,
+            use_relative_attention_bias=False,
+            use_flex_attention=True,
+            flex_block_size=128,
+            flex_compile_block_mask=False,
+            flex_backend="flash",
+        )
+        tokenizer = DummyTokenizer()
+        model = pretrain_mpnet.MPNetForPretraining(args, tokenizer)
+
+        self.assertIsNotNone(model.two_stream_attention_config)
+        cfg = model.two_stream_attention_config
+        self.assertIsNotNone(cfg.flex_kernel_options)
+        self.assertEqual(cfg.flex_kernel_options.get("BACKEND"), "FLASH")
 
     def test_normalize_training_accuracy(self) -> None:
         """Validate training accuracy normalization helper.
