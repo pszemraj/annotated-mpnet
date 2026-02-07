@@ -88,10 +88,11 @@ graph LR
 
 ### Positional Embeddings
 
-The model uses positional embeddings to provide sequence order information. This implementation supports:
+The model uses positional information to represent token order. This implementation supports:
 
 - **LearnedPositionalEmbedding**: Positional embeddings are learned during training.
 - **SinusoidalPositionalEmbedding**: Fixed positional embeddings based on sine and cosine functions.
+- **RotaryEmbedding (RoPE)**: Rotary position encoding applied inside attention on Q/K tensors.
 
 The choice is configurable via `pretrain-mpnet` arguments. These are found in `annotated_mpnet/transformer_modules/`.
 
@@ -171,3 +172,17 @@ graph LR
 ```
 
 Pre-LN can improve training stability for deeper models.
+
+## RoPE + FlexAttention Path
+
+In addition to the legacy relative-bias path, the model supports an optional RoPE + FlexAttention route:
+
+- `--use-rope` enables rotary embeddings in two-stream attention.
+- `--use-flex-attention` enables structural `BlockMask` attention when available.
+- If attention dropout is non-zero, the implementation falls back to SDPA for correctness.
+- `--flex-backend` can explicitly select Flex backend (`auto`, `triton`, `triton_decode`, `flash`).
+
+This path is implemented in:
+
+- `annotated_mpnet/transformer_modules/rotary_embedding.py`
+- `annotated_mpnet/transformer_modules/mpnet_flex_rope_attention.py`

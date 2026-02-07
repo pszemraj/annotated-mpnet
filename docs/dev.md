@@ -11,6 +11,7 @@ python -m unittest discover tests
 # Run a specific test file
 python -m unittest tests.test_data
 python -m unittest tests.test_pretrain
+python -m unittest tests.test_rope_flex_two_stream_attention
 python -m unittest tests.test_pretrain_smoke
 
 # Run a specific test case
@@ -68,6 +69,7 @@ Unit tests for pretraining helper functions, model architecture, and training ut
 | `test_strip_compile_prefix`                       | `torch.compile` prefixes removed from state dict             |
 | `test_coerce_rng_state`                           | RNG state coerced to uint8 CPU tensor                        |
 | `test_apply_checkpoint_architecture_args_*`       | Checkpoint args restore model architecture                   |
+| `test_model_flex_backend_sets_kernel_option`      | CLI/backend config sets FlexAttention `BACKEND` kernel option |
 | `test_normalize_training_accuracy`                | Training accuracy normalization helper                       |
 | `test_accuracy_ignores_pad_tokens`                | Accuracy calculation ignores padding                         |
 | `test_count_pred_tokens`                          | Predicted token counting with padding                        |
@@ -139,3 +141,13 @@ Place new tests in the appropriate file based on what they test:
 - End-to-end training flows: `test_pretrain_smoke.py`
 
 Use `DummyTokenizer` for tests that don't need a real tokenizer to avoid network dependencies.
+
+### `tests/test_rope_flex_two_stream_attention.py` - RoPE/Flex Attention Correctness
+
+Deterministic tests focused on the RoPE + FlexAttention integration.
+
+| Test                                              | What It Verifies                                                        |
+| ------------------------------------------------- | ----------------------------------------------------------------------- |
+| `test_rope_matches_reference_for_arbitrary_positions` | RoPE math matches explicit reference for non-monotonic MPNet positions |
+| `test_mask_mods_match_dense_two_stream_masks`     | Flex mask closures match dense two-stream masks                         |
+| `test_rope_flex_matches_rope_sdpa_dropout0`       | Flex and SDPA parity when attention dropout is zero                     |

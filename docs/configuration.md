@@ -90,6 +90,9 @@ The `--activation-fn` (alias `-activation`) argument sets the FFN activation fun
 | `--flex-compile-block-mask`     | `bool` | `False` | Compile block-mask creation (usually unnecessary because masks are cached).                                              |
 | `--flex-backend`                | `str`  | `None`  | Optional backend override: `auto`, `triton`, `triton_decode`, or `flash`. `None` leaves backend selection to PyTorch. |
 
+> [!IMPORTANT]
+> `--flex-backend flash` is an explicit opt-in backend. Installing `flash-attn` alone does not switch `auto` runs to `flash`.
+
 ---
 
 ## Tokenizer

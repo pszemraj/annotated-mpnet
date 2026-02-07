@@ -34,6 +34,7 @@ MPNet ([Masked and Permuted Pre-training for Language Understanding](https://arx
 - **Standalone PyTorch Implementation**: No `fairseq` dependency required for pretraining.
 - **Heavily Annotated Code**: Detailed comments explain the model architecture and training process.
 - **Flexible Data Handling**: Supports pretraining with HuggingFace streaming datasets or local text files.
+- **Optional RoPE + FlexAttention Path**: Supports rotary embeddings and structural mask-based attention with SDPA fallback.
 - **HuggingFace Compatibility**: Includes a tool to convert pretrained checkpoints to the HuggingFace `MPNetForMaskedLM` format for easy fine-tuning.
 - **Integrated Logging**: Supports TensorBoard and Weights & Biases for experiment tracking.
 
@@ -84,6 +85,22 @@ pretrain-mpnet \
 ```
 
 Run `pretrain-mpnet -h` for all available options.
+
+Optional RoPE + FlexAttention run (with explicit backend override):
+
+```bash
+pretrain-mpnet \
+    --dataset-name "HuggingFaceFW/fineweb-edu" \
+    --tokenizer-name "microsoft/mpnet-base" \
+    --batch-size 16 \
+    --total-updates 100000 \
+    --use-rope \
+    --no-relative-attention-bias \
+    --attention-dropout 0.0 \
+    --use-flex-attention \
+    --flex-backend triton \
+    --checkpoint-dir "./checkpoints/my_rope_flex_run"
+```
 
 ## Documentation
 
