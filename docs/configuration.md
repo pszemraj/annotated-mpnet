@@ -78,20 +78,20 @@ The `--activation-fn` (alias `-activation`) argument sets the FFN activation fun
 
 | Argument                        | Type   | Default | Description                                                                                                              |
 | ------------------------------- | ------ | ------- | ------------------------------------------------------------------------------------------------------------------------ |
-| `--use-rope`                    | `bool` | `True`  | Enable Rotary Position Embeddings (RoPE). Enabled by default for new runs.                                              |
+| `--use-rope`                    | `bool` | `False` | Enable Rotary Position Embeddings (RoPE). Disabled by default for legacy/HF compatibility.                              |
 | `--no-rope`                     | `bool` | `False` | Disable RoPE and use the legacy MPNet positional path.                                                                  |
 | `--rope-theta`                  | `float` | `10000.0` | RoPE base frequency (`theta`).                                                                                          |
 | `--rope-dim`                    | `int`  | `None`  | Number of head-dimension channels to rotate. `None` uses full head dimension.                                          |
 | `--rope-max-position-embeddings` | `int`  | `None`  | Maximum cached RoPE position id. Defaults to `--max-positions` when unset.                                             |
-| `--use-relative-attention-bias` | `bool` | `False` | Enable learned relative attention bias (legacy MPNet behavior).                                                         |
-| `--no-relative-attention-bias`  | `bool` | `False` | Disable learned relative attention bias (default).                                                                       |
+| `--use-relative-attention-bias` | `bool` | `True`  | Enable learned relative attention bias (legacy MPNet behavior).                                                          |
+| `--no-relative-attention-bias`  | `bool` | `False` | Disable learned relative attention bias.                                                                                 |
 | `--use-flex-attention`          | `bool` | `False` | Enable FlexAttention path when RoPE is active and attention dropout is `0.0`.                                           |
 | `--no-flex-attention`           | `bool` | `False` | Disable FlexAttention and force SDPA fallback (default).                                                                 |
 | `--flex-block-size`             | `int`  | `128`   | Block size passed to FlexAttention `create_block_mask`.                                                                 |
 | `--flex-compile-block-mask`     | `bool` | `False` | Compile block-mask creation (usually unnecessary because masks are cached).                                              |
 | `--flex-backend`                | `str`  | `None`  | Optional backend override: `auto`, `triton`, `triton_decode`, or `flash`. `None` leaves backend selection to PyTorch. |
 
-Default new-run attention path: RoPE + SDPA (`--use-rope`, `--no-relative-attention-bias`, `--no-flex-attention`).
+Default new-run attention path: legacy MPNet (`--no-rope`, `--use-relative-attention-bias`, `--no-flex-attention`).
 
 > [!IMPORTANT]
 > `--flex-backend flash` is an explicit opt-in backend. Installing `flash-attn` alone does not switch `auto` runs to `flash`.

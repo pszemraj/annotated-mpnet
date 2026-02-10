@@ -100,8 +100,8 @@ class TestPretrainHelpers(unittest.TestCase):
         self.assertTrue(pretrain_mpnet._cli_flag_was_provided(argv, "--attention-dropout"))
         self.assertFalse(pretrain_mpnet._cli_flag_was_provided(argv, "--compile"))
 
-    def test_cli_main_defaults_prefer_rope_sdpa(self) -> None:
-        """Ensure CLI defaults select the RoPE + SDPA architecture path.
+    def test_cli_main_defaults_prefer_legacy_architecture(self) -> None:
+        """Ensure CLI defaults keep the legacy non-RoPE architecture path.
 
         :return None: This test returns nothing.
         """
@@ -121,12 +121,12 @@ class TestPretrainHelpers(unittest.TestCase):
             sys.argv = old_argv
 
         args = captured["args"]
-        self.assertTrue(args.use_rope)
-        self.assertFalse(args.use_relative_attention_bias)
+        self.assertFalse(args.use_rope)
+        self.assertTrue(args.use_relative_attention_bias)
         self.assertFalse(args.use_flex_attention)
 
-    def test_cli_main_allows_legacy_and_flex_opt_in(self) -> None:
-        """Ensure CLI flags can switch away from RoPE + SDPA defaults.
+    def test_cli_main_allows_rope_and_flex_opt_in(self) -> None:
+        """Ensure CLI flags can opt into RoPE and FlexAttention paths.
 
         :return None: This test returns nothing.
         """
@@ -140,8 +140,8 @@ class TestPretrainHelpers(unittest.TestCase):
         try:
             sys.argv = [
                 "pretrain-mpnet",
-                "--no-rope",
-                "--use-relative-attention-bias",
+                "--use-rope",
+                "--no-relative-attention-bias",
                 "--use-flex-attention",
             ]
             pretrain_mpnet.main = _capture_main
@@ -151,8 +151,8 @@ class TestPretrainHelpers(unittest.TestCase):
             sys.argv = old_argv
 
         args = captured["args"]
-        self.assertFalse(args.use_rope)
-        self.assertTrue(args.use_relative_attention_bias)
+        self.assertTrue(args.use_rope)
+        self.assertFalse(args.use_relative_attention_bias)
         self.assertTrue(args.use_flex_attention)
 
     def test_normalize_attention_dropout_for_flex_sets_default(self) -> None:
@@ -1158,6 +1158,50 @@ class TestPretrainHelpers(unittest.TestCase):
 
             self.assertEqual(config, {"encoder_layers": 12})
             self.assertEqual(config_path, resume_root / "config.json")
+
+    def test_load_architecture_config_skips_local_fallback_for_external_resume(self) -> None:
+        """Do not load local checkpoint_dir config when resuming from external checkpoint roots.
+
+        :return None: This test returns nothing.
+        """
+        with TemporaryDirectory() as tmpdir:
+            checkpoint_dir = Path(tmpdir) / "current"
+            checkpoint_dir.mkdir()
+            resume_root = Path(tmpdir) / "resume_root"
+            resume_root.mkdir()
+            resume_checkpoint = resume_root / "checkpoint10.pt"
+            resume_checkpoint.write_text("placeholder")
+
+            with open(checkpoint_dir / "config.json", "w") as f:
+                json.dump({"encoder_layers": 6}, f)
+
+            config, config_path = pretrain_mpnet._load_architecture_config(
+                checkpoint_dir, resume_checkpoint
+            )
+
+            self.assertIsNone(config)
+            self.assertIsNone(config_path)
+
+    def test_load_architecture_config_uses_checkpoint_dir_for_local_resume(self) -> None:
+        """Load config from checkpoint_dir when resuming from a local checkpoint path.
+
+        :return None: This test returns nothing.
+        """
+        with TemporaryDirectory() as tmpdir:
+            checkpoint_dir = Path(tmpdir) / "current"
+            checkpoint_dir.mkdir()
+            resume_checkpoint = checkpoint_dir / "checkpoint10.pt"
+            resume_checkpoint.write_text("placeholder")
+
+            with open(checkpoint_dir / "config.json", "w") as f:
+                json.dump({"encoder_layers": 10}, f)
+
+            config, config_path = pretrain_mpnet._load_architecture_config(
+                checkpoint_dir, resume_checkpoint
+            )
+
+            self.assertEqual(config, {"encoder_layers": 10})
+            self.assertEqual(config_path, checkpoint_dir / "config.json")
 
     def test_save_initial_run_outputs_writes_architecture_config(self) -> None:
         """Ensure initial run artifacts include config.json and training_args.json.

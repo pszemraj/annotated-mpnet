@@ -85,7 +85,7 @@ pretrain-mpnet \
     --checkpoint-dir "./checkpoints/my_run"
 ```
 
-This default configuration uses the RoPE + SDPA attention path.
+This default configuration uses the legacy MPNet attention path (no RoPE, relative bias enabled).
 
 Run `pretrain-mpnet -h` for all available options.
 

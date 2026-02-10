@@ -127,7 +127,7 @@ The script validates the tokenizer. For optimal performance with the default `wh
 
 ## Attention Path Options
 
-Default new-run path is RoPE + SDPA (no extra flags needed):
+Default new-run path is legacy MPNet (no extra flags needed):
 
 ```bash
 pretrain-mpnet \
@@ -136,14 +136,14 @@ pretrain-mpnet \
     --compile
 ```
 
-Use the legacy MPNet positional path explicitly:
+Opt into RoPE + SDPA explicitly:
 
 ```bash
 pretrain-mpnet \
     --dataset-name "HuggingFaceFW/fineweb-edu" \
     --tokenizer-name "microsoft/mpnet-base" \
-    --no-rope \
-    --use-relative-attention-bias \
+    --use-rope \
+    --no-relative-attention-bias \
     --no-flex-attention \
     --compile
 ```
@@ -164,7 +164,8 @@ pretrain-mpnet \
 
 Key points:
 
-- RoPE + SDPA is the default attention path for new runs.
+- Legacy MPNet is the default attention path for new runs.
+- RoPE + SDPA is available via `--use-rope --no-relative-attention-bias --no-flex-attention`.
 - FlexAttention fast path is only used when `--attention-dropout 0.0`.
 - If attention dropout is non-zero, attention falls back to SDPA for correctness.
 - `--flex-backend` is optional; when unset, PyTorch selects backend heuristically (`AUTO`).

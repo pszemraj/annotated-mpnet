@@ -193,8 +193,8 @@ The runtime attention path is selected by configuration:
 
 | Path | Required Flags/Settings | Notes |
 | ---- | ----------------------- | ----- |
-| RoPE + SDPA (default) | `--use-rope` enabled, `--no-relative-attention-bias`, `--no-flex-attention` | Dense SDPA path with rotary embeddings. |
-| Legacy MPNet (relative bias) | `--no-rope`, `--use-relative-attention-bias`, `--no-flex-attention` | Original MPNet-style relative position bias path. |
+| Legacy MPNet (relative bias, default) | `--no-rope`, `--use-relative-attention-bias`, `--no-flex-attention` | Original MPNet-style relative position bias path. |
+| RoPE + SDPA | `--use-rope` enabled, `--no-relative-attention-bias`, `--no-flex-attention` | Dense SDPA path with rotary embeddings. |
 | RoPE + FlexAttention | `--use-rope` enabled, `--no-relative-attention-bias`, `--use-flex-attention`, `--attention-dropout 0.0` | Structural BlockMask path. |
 | RoPE + Flex requested, SDPA fallback | Same as above but `--attention-dropout > 0` | Falls back to SDPA to preserve dropout semantics. |
 

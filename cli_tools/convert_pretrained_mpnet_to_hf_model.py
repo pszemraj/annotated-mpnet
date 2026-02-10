@@ -78,9 +78,9 @@ def _build_mpnet_args_from_checkpoint_payload(
 ) -> Namespace:
     """Build a merged args Namespace from config.json and checkpoint payload.
 
-    ``config.json`` (when present) is treated as the primary architecture source.
-    Legacy checkpoint ``args`` are merged in as fallback for non-architecture fields
-    (e.g. tokenizer metadata).
+    Checkpoint ``args`` are treated as authoritative when available.
+    ``config.json`` is merged as a fallback for missing fields (for example if older
+    checkpoints omitted newer metadata keys).
 
     :param Path checkpoint_path: Path to the source checkpoint.
     :param dict[str, Any] state_dicts: Loaded checkpoint payload.
@@ -96,10 +96,26 @@ def _build_mpnet_args_from_checkpoint_payload(
         )
 
     merged: dict[str, Any] = {}
-    if checkpoint_args is not None:
-        merged.update(checkpoint_args)
     if config_payload is not None:
         merged.update(config_payload)
+    if checkpoint_args is not None:
+        if config_payload is not None:
+            mismatched = [
+                key
+                for key, checkpoint_value in checkpoint_args.items()
+                if key in config_payload and config_payload[key] != checkpoint_value
+            ]
+            if mismatched:
+                preview = ", ".join(sorted(mismatched)[:8])
+                if len(mismatched) > 8:
+                    preview += ", ..."
+                LOGGER.warning(
+                    "config.json differs from checkpoint args for %d fields (%s); "
+                    "preferring checkpoint payload values.",
+                    len(mismatched),
+                    preview,
+                )
+        merged.update(checkpoint_args)
 
     return Namespace(**merged)
 
@@ -193,6 +209,12 @@ def convert_mpnet_checkpoint_to_pytorch(
     model.mpnet.embeddings.word_embeddings.weight.data = mpnet_weight[
         "sentence_encoder.embed_tokens.weight"
     ].type_as(tensor)
+    if "sentence_encoder.embed_positions.weight" not in mpnet_weight:
+        raise ValueError(
+            "Checkpoint is missing sentence_encoder.embed_positions.weight. "
+            "RoPE/no-absolute-position checkpoints cannot be converted to HF MPNetForMaskedLM "
+            "without an explicit compatibility strategy."
+        )
     model.mpnet.embeddings.position_embeddings.weight.data = mpnet_weight[
         "sentence_encoder.embed_positions.weight"
     ].type_as(tensor)

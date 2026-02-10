@@ -195,16 +195,22 @@ def _load_architecture_config(
     :return tuple[dict[str, Any] | None, Path | None]: ``(config, path)`` if found, else ``(None, None)``.
     """
     candidate_roots: list[Path] = []
+    checkpoint_dir_resolved = checkpoint_dir.resolve()
     if resume_checkpoint_path is not None:
-        candidate_roots.append(resume_checkpoint_path.parent)
-    candidate_roots.append(checkpoint_dir)
+        resume_root = resume_checkpoint_path.parent.resolve()
+        candidate_roots.append(resume_root)
+        # For explicitly external checkpoints, do not fall back to local checkpoint_dir config.
+        # The checkpoint payload args are a safer fallback than unrelated local config files.
+        if resume_root == checkpoint_dir_resolved:
+            candidate_roots.append(checkpoint_dir_resolved)
+    else:
+        candidate_roots.append(checkpoint_dir_resolved)
 
     seen: set[Path] = set()
     for root in candidate_roots:
-        resolved = root.resolve()
-        if resolved in seen:
+        if root in seen:
             continue
-        seen.add(resolved)
+        seen.add(root)
 
         config_path = root / ARCHITECTURE_CONFIG_FILENAME
         if not config_path.exists():
@@ -2514,9 +2520,9 @@ def cli_main() -> None:
     # ---- RoPE + FlexAttention options ----------------------------------------
     parser.add_argument(
         "--use-rope",
-        help="Use Rotary Position Embeddings (RoPE). Default: enabled for new runs.",
+        help="Use Rotary Position Embeddings (RoPE). Default: disabled (legacy MPNet path).",
         action="store_true",
-        default=True,
+        default=False,
         dest="use_rope",
     )
     parser.add_argument(
@@ -2548,7 +2554,7 @@ def cli_main() -> None:
         "--use-relative-attention-bias",
         help="Enable T5-style relative attention bias (legacy MPNet behavior).",
         action="store_true",
-        default=False,
+        default=True,
         dest="use_relative_attention_bias",
     )
     parser.add_argument(

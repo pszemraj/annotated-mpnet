@@ -17,8 +17,8 @@ from cli_tools.convert_pretrained_mpnet_to_hf_model import (
 class TestConversionConfigHelpers(unittest.TestCase):
     """Tests for config sidecar read/write helpers used by conversion scripts."""
 
-    def test_build_mpnet_args_prefers_config_json_over_checkpoint_args(self) -> None:
-        """Prefer config.json architecture fields while preserving extra checkpoint metadata.
+    def test_build_mpnet_args_prefers_checkpoint_args_over_config_json(self) -> None:
+        """Prefer checkpoint args while still using config.json as fallback for missing fields.
 
         :return None: This test returns nothing.
         """
@@ -34,10 +34,28 @@ class TestConversionConfigHelpers(unittest.TestCase):
             }
             args = _build_mpnet_args_from_checkpoint_payload(checkpoint_path, state_dicts)
 
-            self.assertEqual(args.encoder_layers, 6)
+            self.assertEqual(args.encoder_layers, 12)
             self.assertEqual(args.max_positions, 512)
             self.assertEqual(args.tokenizer_name, "legacy-tok")
             self.assertEqual(args.pad_token_id, 0)
+
+    def test_build_mpnet_args_keeps_checkpoint_values_when_sources_conflict(self) -> None:
+        """Keep checkpoint architecture values when config.json and checkpoint args disagree.
+
+        :return None: This test returns nothing.
+        """
+        with TemporaryDirectory() as tmpdir:
+            checkpoint_path = Path(tmpdir) / "checkpoint10.pt"
+            checkpoint_path.write_text("placeholder")
+            config_path = checkpoint_path.parent / "config.json"
+            with open(config_path, "w") as f:
+                json.dump({"encoder_layers": 6, "max_positions": 512}, f)
+
+            state_dicts = {"args": {"encoder_layers": 12, "max_positions": 256}}
+            args = _build_mpnet_args_from_checkpoint_payload(checkpoint_path, state_dicts)
+
+            self.assertEqual(args.encoder_layers, 12)
+            self.assertEqual(args.max_positions, 256)
 
     def test_build_mpnet_args_falls_back_to_checkpoint_args(self) -> None:
         """Use checkpoint args when config.json is absent.
