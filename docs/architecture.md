@@ -186,3 +186,28 @@ This path is implemented in:
 
 - `annotated_mpnet/transformer_modules/rotary_embedding.py`
 - `annotated_mpnet/transformer_modules/mpnet_flex_rope_attention.py`
+
+### Attention Path Matrix
+
+The runtime attention path is selected by configuration, not a single fixed default:
+
+| Path | Required Flags/Settings | Notes |
+| ---- | ----------------------- | ----- |
+| Legacy MPNet (relative bias) | `--use-rope` disabled (default) and `--use-relative-attention-bias` enabled (default) | Original MPNet-style relative position bias path. |
+| RoPE + SDPA | `--use-rope` enabled, `--no-relative-attention-bias`, `--no-flex-attention` | Dense SDPA path with rotary embeddings. |
+| RoPE + FlexAttention | `--use-rope` enabled, `--no-relative-attention-bias`, `--use-flex-attention`, `--attention-dropout 0.0` | Structural BlockMask path. |
+| RoPE + Flex requested, SDPA fallback | Same as above but `--attention-dropout > 0` | Falls back to SDPA to preserve dropout semantics. |
+
+### FlexAttention Knobs
+
+These options are available for non-default tuning:
+
+- `--flex-block-size`: Block size for `create_block_mask` (commonly `64`, `128`, `256`).
+- `--flex-compile-block-mask`: Compile mask construction. Usually unnecessary because masks are cached.
+- `--flex-backend`: Optional backend override. Keep unset to use PyTorch default backend selection.
+
+### Version/Runtime Caveats
+
+- Torch 2.9.x may fail on explicit `--flex-backend` override in some compile paths. Workaround: leave `--flex-backend` unset.
+- Certain shape/block combinations may hit `torch._inductor` lowering issues (for example, some `block_size=64` configurations in compiled FlexAttention).
+- For reproducible comparisons, benchmark with explicit dropout flags (`--dropout 0.0 --attention-dropout 0.0 --activation-dropout 0.0`) and fixed update counts.
