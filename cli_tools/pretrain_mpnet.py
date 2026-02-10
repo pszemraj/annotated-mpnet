@@ -54,6 +54,7 @@ if TYPE_CHECKING:
 
 DEFAULT_BEST_LOSS = 10e6
 VOCAB_SIZE_ALIGNMENT = 128  # Align vocab size for efficient GPU kernels.
+_AUTOCAST_DTYPE_CACHE: dict[tuple[str, int], torch.dtype | None] = {}
 
 # Optional dependencies are imported lazily; keep a module-level slot for wandb.
 wandb = None
@@ -938,11 +939,158 @@ def _get_autocast_context(device: torch.device) -> contextlib.AbstractContextMan
     :param torch.device device: Device used for training/inference.
     :return contextlib.AbstractContextManager[None]: Autocast context manager.
     """
-    # BF16 is the default mixed-precision path on CUDA; GradScaler is unnecessary for BF16.
-    # If you switch to FP16, add a GradScaler and unscale before clipping.
     if device.type == "cuda":
-        return torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+        autocast_dtype = _resolve_cuda_autocast_dtype(device)
+        if autocast_dtype is not None:
+            return torch.autocast(device_type="cuda", dtype=autocast_dtype)
     return contextlib.nullcontext()
+
+
+def _autocast_cache_key(device: torch.device) -> tuple[str, int]:
+    """Return a stable autocast cache key for a device.
+
+    :param torch.device device: Device used for training/inference.
+    :return tuple[str, int]: Cache key ``(device.type, device.index_or_current)``.
+    """
+    if device.type != "cuda":
+        return (device.type, -1)
+    device_index = device.index if device.index is not None else torch.cuda.current_device()
+    return (device.type, int(device_index))
+
+
+def _resolve_cuda_autocast_dtype(device: torch.device) -> torch.dtype | None:
+    """Resolve a stable CUDA autocast dtype for the selected device.
+
+    Prefer BF16, then FP16, and cache the choice per CUDA device. If no mixed-precision
+    dtype passes a tiny probe, return None and run in FP32.
+
+    :param torch.device device: CUDA device used for training/inference.
+    :return torch.dtype | None: Working autocast dtype or None to disable autocast.
+    """
+    if device.type != "cuda":
+        return None
+
+    cache_key = _autocast_cache_key(device)
+    if cache_key in _AUTOCAST_DTYPE_CACHE:
+        return _AUTOCAST_DTYPE_CACHE[cache_key]
+
+    candidates: list[torch.dtype] = []
+    if torch.cuda.is_bf16_supported():
+        candidates.append(torch.bfloat16)
+    candidates.append(torch.float16)
+
+    for candidate in candidates:
+        if _probe_cuda_autocast_dtype(device, candidate):
+            _AUTOCAST_DTYPE_CACHE[cache_key] = candidate
+            return candidate
+
+    LOGGER.warning(
+        "No stable CUDA autocast dtype detected on device %s; disabling autocast and using FP32.",
+        device,
+    )
+    _AUTOCAST_DTYPE_CACHE[cache_key] = None
+    return None
+
+
+def _is_cuda_matmul_runtime_error(exc: RuntimeError) -> bool:
+    """Return True for known CUDA matmul/autocast runtime failures worth fallback.
+
+    :param RuntimeError exc: Runtime error raised during model forward.
+    :return bool: True when fallback should be attempted.
+    """
+    message = str(exc).upper()
+    return "CUBLAS_STATUS_INVALID_VALUE" in message or (
+        "CUDA ERROR" in message and "CUBLAS" in message
+    )
+
+
+def _forward_with_autocast(
+    model: torch.nn.Module, model_inputs: dict[str, Any], device: torch.device
+) -> torch.Tensor:
+    """Run model forward with robust CUDA autocast fallback.
+
+    On CUDA, this tries cached/auto-selected mixed precision first, then falls back to
+    FP16 and finally FP32 when known CUBLAS runtime issues occur. Successful fallback is
+    cached for subsequent forwards on the same device.
+
+    :param torch.nn.Module model: Model to run.
+    :param dict[str, Any] model_inputs: Model input mapping.
+    :param torch.device device: Active training/eval device.
+    :return torch.Tensor: Model output tensor.
+    :raises RuntimeError: Re-raises if all fallback attempts fail.
+    """
+    if device.type != "cuda":
+        return model(**model_inputs)
+
+    preferred = _resolve_cuda_autocast_dtype(device)
+    attempts: list[torch.dtype | None] = [preferred]
+    if preferred == torch.bfloat16:
+        attempts.append(torch.float16)
+    attempts.append(None)
+
+    seen: set[torch.dtype | None] = set()
+    cache_key = _autocast_cache_key(device)
+    last_exc: RuntimeError | None = None
+
+    for autocast_dtype in attempts:
+        if autocast_dtype in seen:
+            continue
+        seen.add(autocast_dtype)
+
+        try:
+            if autocast_dtype is None:
+                out = model(**model_inputs)
+            else:
+                with torch.autocast(device_type="cuda", dtype=autocast_dtype):
+                    out = model(**model_inputs)
+            _AUTOCAST_DTYPE_CACHE[cache_key] = autocast_dtype
+            return out
+        except RuntimeError as exc:
+            last_exc = exc
+            if not _is_cuda_matmul_runtime_error(exc):
+                raise
+            LOGGER.warning(
+                "Model forward failed with CUDA autocast dtype=%s on %s; trying safer fallback. Error: %s",
+                autocast_dtype,
+                device,
+                exc,
+            )
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("Model forward failed before any autocast attempt was made.")
+
+
+def _probe_cuda_autocast_dtype(device: torch.device, dtype: torch.dtype) -> bool:
+    """Probe a CUDA autocast dtype with a tiny linear op.
+
+    :param torch.device device: CUDA device used for training/inference.
+    :param torch.dtype dtype: Candidate autocast dtype to probe.
+    :return bool: True when the candidate runs successfully.
+    """
+    try:
+        probe_index = device.index if device.index is not None else torch.cuda.current_device()
+        probe_device = torch.device("cuda", probe_index)
+        with torch.autocast(device_type="cuda", dtype=dtype):
+            x = torch.randn((2, 4, 64), device=probe_device, dtype=torch.float32)
+            w = torch.randn((64, 64), device=probe_device, dtype=torch.float32)
+            b = torch.randn((64,), device=probe_device, dtype=torch.float32)
+            out = F.linear(x, w, b)
+        _ = float(out.float().mean().item())
+        torch.cuda.synchronize(probe_device)
+        return True
+    except Exception as exc:
+        LOGGER.warning(
+            "CUDA autocast probe failed for dtype=%s on %s; trying next fallback. Error: %s",
+            dtype,
+            device,
+            exc,
+        )
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        return False
 
 
 def _ensure_bf16_supported(device: torch.device) -> None:
@@ -1810,8 +1958,7 @@ def main(args: Namespace) -> None:
 
             model_inputs, targets = _prepare_forward_batch(batch)
             with torch.no_grad():
-                with _get_autocast_context(device):
-                    outs = model_to_eval(**model_inputs)
+                outs = _forward_with_autocast(model_to_eval, model_inputs, device)
                 logits = outs.float().view(-1, outs.size(-1))
                 loss = F.cross_entropy(
                     logits,
@@ -2020,8 +2167,7 @@ def main(args: Namespace) -> None:
             accumulation_pred_tokens += pred_token_count
 
             model_inputs, targets = _prepare_forward_batch(batch)
-            with _get_autocast_context(device):
-                outs = model(**model_inputs)
+            outs = _forward_with_autocast(model, model_inputs, device)
 
             # Compute loss in fp32 outside autocast for numerical stability.
             logits = outs.float().view(-1, outs.size(-1))

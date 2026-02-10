@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import sys
 import unittest
+from unittest import mock
 from argparse import Namespace
 from tempfile import TemporaryDirectory
 
@@ -1336,6 +1337,67 @@ class TestPretrainHelpers(unittest.TestCase):
         """
         with pretrain_mpnet._get_autocast_context(torch.device("cpu")):
             pass
+
+    def test_is_cuda_matmul_runtime_error_detection(self) -> None:
+        """Detect known CUDA matmul runtime failures for fallback handling.
+
+        :return None: This test returns nothing.
+        """
+        self.assertTrue(
+            pretrain_mpnet._is_cuda_matmul_runtime_error(
+                RuntimeError("CUDA error: CUBLAS_STATUS_INVALID_VALUE")
+            )
+        )
+        self.assertFalse(
+            pretrain_mpnet._is_cuda_matmul_runtime_error(RuntimeError("some other runtime error"))
+        )
+
+    def test_forward_with_autocast_falls_back_after_cuda_matmul_error(self) -> None:
+        """Retry forward with safer dtype when CUDA autocast path fails once.
+
+        :return None: This test returns nothing.
+        """
+
+        class FakeCudaDevice:
+            type = "cuda"
+            index = 0
+
+            def __str__(self) -> str:
+                return "cuda:0"
+
+        class FlakyModel(torch.nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.calls = 0
+
+            def forward(self, **kwargs: torch.Tensor) -> torch.Tensor:
+                self.calls += 1
+                if self.calls == 1:
+                    raise RuntimeError("CUDA error: CUBLAS_STATUS_INVALID_VALUE")
+                return kwargs["x"] + 1
+
+        model = FlakyModel()
+        inputs = {"x": torch.ones(2)}
+        device = FakeCudaDevice()
+        cache_key = pretrain_mpnet._autocast_cache_key(device)
+        pretrain_mpnet._AUTOCAST_DTYPE_CACHE.pop(cache_key, None)
+
+        with (
+            mock.patch(
+                "cli_tools.pretrain_mpnet._resolve_cuda_autocast_dtype",
+                return_value=torch.bfloat16,
+            ),
+            mock.patch(
+                "cli_tools.pretrain_mpnet.torch.autocast",
+                side_effect=lambda *args, **kwargs: pretrain_mpnet.contextlib.nullcontext(),
+            ),
+            mock.patch("cli_tools.pretrain_mpnet.torch.cuda.is_available", return_value=False),
+        ):
+            out = pretrain_mpnet._forward_with_autocast(model, inputs, device)
+
+        self.assertTrue(torch.equal(out, torch.ones(2) + 1))
+        self.assertEqual(model.calls, 2)
+        self.assertEqual(pretrain_mpnet._AUTOCAST_DTYPE_CACHE[cache_key], torch.float16)
 
     def test_ga_gradients_match_full_batch(self) -> None:
         """Verify GA gradients match full-batch gradients.

@@ -16,6 +16,7 @@ Flex-specific tests are skipped.
 
 from __future__ import annotations
 
+import os
 import unittest
 
 import torch
@@ -33,11 +34,22 @@ from annotated_mpnet.transformer_modules.mpnet_flex_rope_attention import (
 )
 
 
+def _unit_test_device() -> torch.device:
+    """Return default device for deterministic unit tests.
+
+    By default these tests run on CPU to avoid CUDA-driver/kernel flakiness.
+    Set ``MPNET_TEST_USE_CUDA=1`` to opt into CUDA execution when debugging.
+    """
+    if os.getenv("MPNET_TEST_USE_CUDA", "0") == "1" and torch.cuda.is_available():
+        return torch.device("cuda")
+    return torch.device("cpu")
+
+
 class TestRotaryEmbedding(unittest.TestCase):
     def test_rope_matches_reference_for_arbitrary_positions(self) -> None:
         torch.manual_seed(0)
 
-        device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+        device = _unit_test_device()
         dtype = torch.float32
 
         B, H, L, D = 2, 3, 5, 8
@@ -73,7 +85,7 @@ class TestRotaryEmbedding(unittest.TestCase):
         torch.testing.assert_close(y, y_ref, rtol=0.0, atol=1e-6)
 
     def test_rope_rejects_negative_positions(self) -> None:
-        device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+        device = _unit_test_device()
         x = torch.randn(1, 2, 4, 8, device=device, dtype=torch.float32)
         position_ids = torch.tensor([[0, 1, -1, 2]], device=device, dtype=torch.long)
         rope = RotaryEmbedding(
@@ -84,7 +96,7 @@ class TestRotaryEmbedding(unittest.TestCase):
             rope.rotate(x, position_ids)
 
     def test_rope_rejects_positions_past_static_cache(self) -> None:
-        device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+        device = _unit_test_device()
         x = torch.randn(1, 2, 4, 8, device=device, dtype=torch.float32)
         position_ids = torch.tensor([[0, 1, 2, 64]], device=device, dtype=torch.long)
         rope = RotaryEmbedding(
@@ -105,7 +117,7 @@ class TestTwoStreamMaskMods(unittest.TestCase):
         """
 
         torch.manual_seed(0)
-        device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+        device = _unit_test_device()
 
         # A small grid of sizes + an edge case.
         cases = [
@@ -163,7 +175,7 @@ class TestTwoStreamAttentionParity(unittest.TestCase):
 
         torch.manual_seed(0)
 
-        device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+        device = _unit_test_device()
         dtype = torch.float32
 
         B = 2
