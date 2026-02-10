@@ -93,6 +93,10 @@ The `--activation-fn` (alias `-activation`) argument sets the FFN activation fun
 > [!IMPORTANT]
 > `--flex-backend flash` is an explicit opt-in backend. Installing `flash-attn` alone does not switch `auto` runs to `flash`.
 
+> [!NOTE]
+> In torch 2.9.x, explicit FlexAttention backend override via `--flex-backend` may fail at compile time (for example, Triton errors such as `NameError('AUTO'|'TRITON'|'FLASH' is not defined)`).  
+> Workaround: leave `--flex-backend` unset (`None`) and allow default backend selection, or disable FlexAttention with `--no-flex-attention`.
+
 ---
 
 ## Tokenizer

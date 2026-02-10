@@ -148,6 +148,7 @@ Key points:
 - If attention dropout is non-zero, attention falls back to SDPA for correctness.
 - `--flex-backend` is optional; when unset, PyTorch selects backend heuristically (`AUTO`).
 - `--flex-backend flash` is an explicit opt-in backend and may require additional backend support in your environment.
+- On torch 2.9.x, explicit `--flex-backend` override may fail in compile paths; the current workaround is to omit `--flex-backend` and use default selection.
 
 ## Resuming Training
 
