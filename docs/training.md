@@ -8,7 +8,7 @@ This document covers pretraining MPNet models using `annotated-mpnet`.
   - [Using a HuggingFace Dataset (Streaming)](#using-a-huggingface-dataset-streaming)
   - [Using Local Text Files](#using-local-text-files)
 - [Key Pretraining Arguments](#key-pretraining-arguments)
-- [RoPE + FlexAttention Runs](#rope--flexattention-runs)
+- [Attention Path Options](#attention-path-options)
 - [Resuming Training](#resuming-training)
 - [Exporting Checkpoint to HuggingFace](#exporting-checkpoint-to-huggingface)
 
@@ -125,15 +125,35 @@ pretrain-mpnet \
 
 The script validates the tokenizer. For optimal performance with the default `whole_word_mask=True` in the data collator, a WordPiece-compatible tokenizer is expected.
 
-## RoPE + FlexAttention Runs
+## Attention Path Options
 
-To run the RoPE path with FlexAttention enabled:
+Default new-run path is RoPE + SDPA (no extra flags needed):
 
 ```bash
 pretrain-mpnet \
     --dataset-name "HuggingFaceFW/fineweb-edu" \
     --tokenizer-name "microsoft/mpnet-base" \
-    --use-rope \
+    --compile
+```
+
+Use the legacy MPNet positional path explicitly:
+
+```bash
+pretrain-mpnet \
+    --dataset-name "HuggingFaceFW/fineweb-edu" \
+    --tokenizer-name "microsoft/mpnet-base" \
+    --no-rope \
+    --use-relative-attention-bias \
+    --no-flex-attention \
+    --compile
+```
+
+Opt into RoPE + FlexAttention:
+
+```bash
+pretrain-mpnet \
+    --dataset-name "HuggingFaceFW/fineweb-edu" \
+    --tokenizer-name "microsoft/mpnet-base" \
     --no-relative-attention-bias \
     --attention-dropout 0.0 \
     --use-flex-attention \
@@ -144,6 +164,7 @@ pretrain-mpnet \
 
 Key points:
 
+- RoPE + SDPA is the default attention path for new runs.
 - FlexAttention fast path is only used when `--attention-dropout 0.0`.
 - If attention dropout is non-zero, attention falls back to SDPA for correctness.
 - `--flex-backend` is optional; when unset, PyTorch selects backend heuristically (`AUTO`).

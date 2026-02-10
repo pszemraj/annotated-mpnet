@@ -87,6 +87,6 @@ This supports the same conclusion as H768 on the current software stack.
 
 On the current environment (`torch 2.9.1+cu128`), use:
 
-- `--use-rope --no-relative-attention-bias --no-flex-attention --compile`
+- `--compile` (new-run defaults already map to `--use-rope --no-relative-attention-bias --no-flex-attention`)
 
 for best throughput among tested successful configurations.

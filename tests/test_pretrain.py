@@ -100,6 +100,61 @@ class TestPretrainHelpers(unittest.TestCase):
         self.assertTrue(pretrain_mpnet._cli_flag_was_provided(argv, "--attention-dropout"))
         self.assertFalse(pretrain_mpnet._cli_flag_was_provided(argv, "--compile"))
 
+    def test_cli_main_defaults_prefer_rope_sdpa(self) -> None:
+        """Ensure CLI defaults select the RoPE + SDPA architecture path.
+
+        :return None: This test returns nothing.
+        """
+        old_argv = sys.argv
+        old_main = pretrain_mpnet.main
+        captured: dict[str, Namespace] = {}
+
+        def _capture_main(args: Namespace) -> None:
+            captured["args"] = args
+
+        try:
+            sys.argv = ["pretrain-mpnet"]
+            pretrain_mpnet.main = _capture_main
+            pretrain_mpnet.cli_main()
+        finally:
+            pretrain_mpnet.main = old_main
+            sys.argv = old_argv
+
+        args = captured["args"]
+        self.assertTrue(args.use_rope)
+        self.assertFalse(args.use_relative_attention_bias)
+        self.assertFalse(args.use_flex_attention)
+
+    def test_cli_main_allows_legacy_and_flex_opt_in(self) -> None:
+        """Ensure CLI flags can switch away from RoPE + SDPA defaults.
+
+        :return None: This test returns nothing.
+        """
+        old_argv = sys.argv
+        old_main = pretrain_mpnet.main
+        captured: dict[str, Namespace] = {}
+
+        def _capture_main(args: Namespace) -> None:
+            captured["args"] = args
+
+        try:
+            sys.argv = [
+                "pretrain-mpnet",
+                "--no-rope",
+                "--use-relative-attention-bias",
+                "--use-flex-attention",
+            ]
+            pretrain_mpnet.main = _capture_main
+            pretrain_mpnet.cli_main()
+        finally:
+            pretrain_mpnet.main = old_main
+            sys.argv = old_argv
+
+        args = captured["args"]
+        self.assertFalse(args.use_rope)
+        self.assertTrue(args.use_relative_attention_bias)
+        self.assertTrue(args.use_flex_attention)
+
     def test_normalize_attention_dropout_for_flex_sets_default(self) -> None:
         """Set attention_dropout to 0.0 for new RoPE+Flex runs when not explicit.
 

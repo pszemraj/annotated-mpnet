@@ -749,7 +749,7 @@ def _normalize_attention_dropout_for_flex(
     """
     if not bool(getattr(args, "use_rope", False)):
         return
-    if not bool(getattr(args, "use_flex_attention", True)):
+    if not bool(getattr(args, "use_flex_attention", False)):
         return
 
     current = float(getattr(args, "attention_dropout", 0.0))
@@ -2446,8 +2446,8 @@ def cli_main() -> None:
     parser.add_argument(
         "--attention-dropout",
         help="The standard dropout probability for the attention layers of the encoder model. "
-        "Defaults to 0.1. For new runs with --use-rope and --use-flex-attention, this is "
-        "auto-set to 0.0 unless explicitly provided.",
+        "Defaults to 0.1. For new runs with --use-flex-attention, this is auto-set to 0.0 "
+        "unless explicitly provided.",
         default=0.1,
         type=float,
     )
@@ -2514,9 +2514,17 @@ def cli_main() -> None:
     # ---- RoPE + FlexAttention options ----------------------------------------
     parser.add_argument(
         "--use-rope",
-        help="Use Rotary Position Embeddings (RoPE) instead of learned absolute + relative bias.",
+        help="Use Rotary Position Embeddings (RoPE). Default: enabled for new runs.",
         action="store_true",
-        default=False,
+        default=True,
+        dest="use_rope",
+    )
+    parser.add_argument(
+        "--no-rope",
+        help="Disable RoPE and use the legacy MPNet positional path.",
+        action="store_false",
+        default=argparse.SUPPRESS,
+        dest="use_rope",
     )
     parser.add_argument(
         "--rope-theta",
@@ -2538,28 +2546,30 @@ def cli_main() -> None:
     )
     parser.add_argument(
         "--use-relative-attention-bias",
-        help="Enable T5-style relative attention bias (default: True).",
+        help="Enable T5-style relative attention bias (legacy MPNet behavior).",
         action="store_true",
-        default=True,
+        default=False,
         dest="use_relative_attention_bias",
     )
     parser.add_argument(
         "--no-relative-attention-bias",
-        help="Disable T5-style relative attention bias.",
+        help="Disable T5-style relative attention bias (default).",
         action="store_false",
+        default=argparse.SUPPRESS,
         dest="use_relative_attention_bias",
     )
     parser.add_argument(
         "--use-flex-attention",
-        help="Enable FlexAttention fast path when RoPE is active (default: True).",
+        help="Enable FlexAttention fast path when RoPE is active.",
         action="store_true",
-        default=True,
+        default=False,
         dest="use_flex_attention",
     )
     parser.add_argument(
         "--no-flex-attention",
-        help="Disable FlexAttention; always use SDPA fallback.",
+        help="Disable FlexAttention; use SDPA attention path (default).",
         action="store_false",
+        default=argparse.SUPPRESS,
         dest="use_flex_attention",
     )
     parser.add_argument(

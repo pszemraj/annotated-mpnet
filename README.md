@@ -81,12 +81,15 @@ pretrain-mpnet \
     --batch-size 16 \
     --update-freq 8 \
     --total-updates 100000 \
+    --compile \
     --checkpoint-dir "./checkpoints/my_run"
 ```
 
+This default configuration uses the RoPE + SDPA attention path.
+
 Run `pretrain-mpnet -h` for all available options.
 
-Optional RoPE + FlexAttention run (with explicit backend override):
+Optional RoPE + FlexAttention run (opt-in, with explicit backend override):
 
 ```bash
 pretrain-mpnet \
@@ -94,7 +97,6 @@ pretrain-mpnet \
     --tokenizer-name "microsoft/mpnet-base" \
     --batch-size 16 \
     --total-updates 100000 \
-    --use-rope \
     --no-relative-attention-bias \
     --attention-dropout 0.0 \
     --use-flex-attention \

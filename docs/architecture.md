@@ -173,12 +173,12 @@ graph LR
 
 Pre-LN can improve training stability for deeper models.
 
-## RoPE + FlexAttention Path
+## Attention Path Options
 
-In addition to the legacy relative-bias path, the model supports an optional RoPE + FlexAttention route:
+The model supports multiple attention-path configurations:
 
-- `--use-rope` enables rotary embeddings in two-stream attention.
-- `--use-flex-attention` enables structural `BlockMask` attention when available.
+- `--use-rope` enables rotary embeddings in two-stream attention (default for new runs).
+- `--use-flex-attention` enables structural `BlockMask` attention when available (opt-in).
 - If attention dropout is non-zero, the implementation falls back to SDPA for correctness.
 - `--flex-backend` can explicitly select Flex backend (`auto`, `triton`, `triton_decode`, `flash`).
 
@@ -189,12 +189,12 @@ This path is implemented in:
 
 ### Attention Path Matrix
 
-The runtime attention path is selected by configuration, not a single fixed default:
+The runtime attention path is selected by configuration:
 
 | Path | Required Flags/Settings | Notes |
 | ---- | ----------------------- | ----- |
-| Legacy MPNet (relative bias) | `--use-rope` disabled (default) and `--use-relative-attention-bias` enabled (default) | Original MPNet-style relative position bias path. |
-| RoPE + SDPA | `--use-rope` enabled, `--no-relative-attention-bias`, `--no-flex-attention` | Dense SDPA path with rotary embeddings. |
+| RoPE + SDPA (default) | `--use-rope` enabled, `--no-relative-attention-bias`, `--no-flex-attention` | Dense SDPA path with rotary embeddings. |
+| Legacy MPNet (relative bias) | `--no-rope`, `--use-relative-attention-bias`, `--no-flex-attention` | Original MPNet-style relative position bias path. |
 | RoPE + FlexAttention | `--use-rope` enabled, `--no-relative-attention-bias`, `--use-flex-attention`, `--attention-dropout 0.0` | Structural BlockMask path. |
 | RoPE + Flex requested, SDPA fallback | Same as above but `--attention-dropout > 0` | Falls back to SDPA to preserve dropout semantics. |
 
