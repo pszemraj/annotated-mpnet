@@ -228,6 +228,73 @@ def _load_architecture_config(
     return None, None
 
 
+def _coerce_namespace_dict(payload: Any) -> dict[str, Any] | None:
+    """Normalize checkpoint args payload to a plain dict.
+
+    :param Any payload: Raw payload from checkpoint["args"].
+    :return dict[str, Any] | None: Normalized mapping or None when payload is absent.
+    :raises TypeError: If payload type is unsupported.
+    """
+    if payload is None:
+        return None
+    if isinstance(payload, Namespace):
+        return vars(payload)
+    if isinstance(payload, dict):
+        return payload
+    raise TypeError(
+        f"Unsupported checkpoint args payload type: {type(payload)}. Expected dict or Namespace."
+    )
+
+
+def _resolve_resume_architecture_args(
+    architecture_config: dict[str, Any] | None,
+    resume_checkpoint: dict[str, Any],
+) -> dict[str, Any]:
+    """Resolve resume architecture args from config sidecar and checkpoint payload.
+
+    Checkpoint payload args are treated as authoritative when available.
+    ``config.json`` is merged as a fallback for missing fields.
+
+    :param dict[str, Any] | None architecture_config: Loaded config.json payload when available.
+    :param dict[str, Any] resume_checkpoint: Loaded resume checkpoint payload.
+    :return dict[str, Any]: Merged architecture args mapping.
+    :raises KeyError: If neither source provides architecture args.
+    """
+    checkpoint_args = _coerce_namespace_dict(resume_checkpoint.get("args"))
+
+    if architecture_config is None and checkpoint_args is None:
+        raise KeyError(
+            "Resume checkpoint does not contain architecture args and no "
+            f"{ARCHITECTURE_CONFIG_FILENAME} was found."
+        )
+
+    merged: dict[str, Any] = {}
+    if architecture_config is not None:
+        merged.update(architecture_config)
+
+    if checkpoint_args is not None:
+        if architecture_config is not None:
+            mismatched = [
+                key
+                for key, checkpoint_value in checkpoint_args.items()
+                if key in architecture_config and architecture_config[key] != checkpoint_value
+            ]
+            if mismatched:
+                preview = ", ".join(sorted(mismatched)[:8])
+                if len(mismatched) > 8:
+                    preview += ", ..."
+                LOGGER.warning(
+                    "%s differs from checkpoint args for %d fields (%s); "
+                    "preferring checkpoint payload values for resume compatibility.",
+                    ARCHITECTURE_CONFIG_FILENAME,
+                    len(mismatched),
+                    preview,
+                )
+        merged.update(checkpoint_args)
+
+    return merged
+
+
 def write_to_tensorboard(writer: "SummaryWriter", logging_dict: dict, step: int) -> None:
     """
     This function takes in a logging dict and sends it to tensorboard
@@ -1307,20 +1374,18 @@ def main(args: Namespace) -> None:
         )
         if architecture_config is not None:
             LOGGER.info("Loading architecture config from %s", architecture_config_path)
-            checkpoint_args_dict = architecture_config
-        elif "args" in resume_checkpoint:
-            checkpoint_args = resume_checkpoint["args"]
-            checkpoint_args_dict = (
-                vars(checkpoint_args) if isinstance(checkpoint_args, Namespace) else checkpoint_args
-            )
+        if architecture_config is None and "args" in resume_checkpoint:
             LOGGER.warning(
                 "No %s found; falling back to architecture args stored in checkpoint payload.",
                 ARCHITECTURE_CONFIG_FILENAME,
             )
-        else:
-            raise KeyError(
-                "Resume checkpoint does not contain architecture args and no "
-                f"{ARCHITECTURE_CONFIG_FILENAME} was found."
+        checkpoint_args_dict = _resolve_resume_architecture_args(
+            architecture_config, resume_checkpoint
+        )
+        if architecture_config is not None and "args" not in resume_checkpoint:
+            LOGGER.warning(
+                "%s was found but checkpoint payload has no args; using config sidecar only.",
+                ARCHITECTURE_CONFIG_FILENAME,
             )
 
         _apply_checkpoint_architecture_args(args, checkpoint_args_dict)

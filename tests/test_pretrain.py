@@ -1204,6 +1204,56 @@ class TestPretrainHelpers(unittest.TestCase):
             self.assertEqual(config, {"encoder_layers": 10})
             self.assertEqual(config_path, checkpoint_dir / "config.json")
 
+    def test_resolve_resume_architecture_args_merges_and_prefers_checkpoint_payload(self) -> None:
+        """Merge config.json with checkpoint args and prefer checkpoint values on conflicts.
+
+        :return None: This test returns nothing.
+        """
+        architecture_config = {
+            "encoder_layers": 6,
+            "encoder_embed_dim": 256,
+            "tokenizer_name": "from-config",
+        }
+        resume_checkpoint = {
+            "args": {
+                "encoder_layers": 12,
+                "encoder_ffn_dim": 1024,
+                "tokenizer_name": "from-checkpoint",
+            }
+        }
+
+        merged = pretrain_mpnet._resolve_resume_architecture_args(
+            architecture_config, resume_checkpoint
+        )
+
+        self.assertEqual(merged["encoder_layers"], 12)
+        self.assertEqual(merged["encoder_embed_dim"], 256)
+        self.assertEqual(merged["encoder_ffn_dim"], 1024)
+        self.assertEqual(merged["tokenizer_name"], "from-checkpoint")
+
+    def test_resolve_resume_architecture_args_accepts_namespace_payload(self) -> None:
+        """Accept checkpoint args stored as argparse.Namespace.
+
+        :return None: This test returns nothing.
+        """
+        architecture_config = {"encoder_layers": 6}
+        resume_checkpoint = {"args": Namespace(encoder_layers=8, encoder_ffn_dim=512)}
+
+        merged = pretrain_mpnet._resolve_resume_architecture_args(
+            architecture_config, resume_checkpoint
+        )
+
+        self.assertEqual(merged["encoder_layers"], 8)
+        self.assertEqual(merged["encoder_ffn_dim"], 512)
+
+    def test_resolve_resume_architecture_args_raises_without_any_sources(self) -> None:
+        """Raise when both config sidecar and checkpoint args are unavailable.
+
+        :return None: This test returns nothing.
+        """
+        with self.assertRaises(KeyError):
+            pretrain_mpnet._resolve_resume_architecture_args(None, {})
+
     def test_save_initial_run_outputs_writes_architecture_config(self) -> None:
         """Ensure initial run artifacts include config.json and training_args.json.
 
